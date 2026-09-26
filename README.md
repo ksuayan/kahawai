@@ -39,7 +39,7 @@ in `player/README.md`.
 | `crates/kahawai-player-api` | Async `reqwest` client covering every server endpoint; reuses `kahawai-core` API types. |
 | `crates/kahawai-player-audio` | Real OS audio sinks: `CpalSink` (shared-mode PCM, all OSes) and `CoreAudioDopSink` (macOS-only exclusive hog-mode DoP). |
 | `player/` | Tauri 2 desktop client: `src-tauri/` (thin shell, excluded from the Cargo workspace — see below) + `ui/` (Vue 3 + Vite + Pinia + strict TypeScript). |
-| `scripts/` | `build-universal.sh` (server, macOS) · `build-client-universal.sh` (client, macOS) |
+| `scripts/` | `setup.sh` · `start-server.sh` · `start-client.sh` · `build-server-universal.sh` · `build-client-universal.sh` |
 
 `player/src-tauri` is deliberately **excluded** from the Cargo workspace: it
 needs system WebKit/GTK dev libraries absent from some build machines. It
@@ -48,24 +48,32 @@ the thin shell builds separately, on the Mac.
 
 ## Quick start
 
+Everything is a script in `scripts/`. From the repository root:
+
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-cd kahawai
-
-cargo check --workspace   # typecheck everything
-cargo test --workspace    # unit + integration tests (fast, hermetic, no network)
-
-# Run the server against your library:
-cat > config.toml <<'EOF'
-music_dirs = ["/mnt/music"]
-bind = "0.0.0.0:8080"
-scan_on_startup = true
-EOF
-cargo run -p kahawai-server -- config.toml
+scripts/setup.sh              # guided setup: your music folder, network address, audio options
+scripts/start-server.sh -d    # start the server in the background (builds it the first time)
+scripts/start-client.sh       # wait for the server, then open the player
 ```
 
-Tests use temp dirs and a temp SQLite DB — nothing touches your network or
-your real files.
+That's it. Day to day:
+
+| Script | What it does |
+|---|---|
+| `scripts/setup.sh` | Wizard for the server (`config.toml`) and the player's settings. Safe to re-run; it backs up what it replaces. `setup.sh server` or `setup.sh client` does just one half. |
+| `scripts/start-server.sh` | Runs the server (`-d` = in the background, with a log and pid file). Also `--status`, `--stop`, `-c other.toml`, and `--build` to rebuild first. It runs the newest of the native and universal builds. |
+| `scripts/start-client.sh` | Opens the player once the server answers. `--url http://host:8080` points it at another server; `--dev` runs the development build instead. |
+| `scripts/build-server-universal.sh` | Universal (Intel + Apple Silicon) server binary → `dist/kahawai-server`. |
+| `scripts/build-client-universal.sh` | Universal player → `dist/Kahawai Player.app` and `.dmg`. |
+
+A universal build is one command but two compiles (one per architecture,
+merged into a single binary); the frontend is built once.
+
+## Development
+
+`cargo test --workspace` for the Rust crates and `npm test` in `player/ui` for
+the client. The tests use temp dirs and a temp SQLite database: nothing touches
+your network or your real files.
 
 ## API (v1)
 
@@ -141,7 +149,7 @@ bit-exact or property tests rather than by trusting an external implementation.
 ## macOS universal binary (server)
 
 ```bash
-./scripts/build-universal.sh
+./scripts/build-server-universal.sh
 ```
 
 **Mac-only** — builds `aarch64-apple-darwin` + `x86_64-apple-darwin` and

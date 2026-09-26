@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# Build a macOS Universal Binary of the desktop client (Tauri app) via
-# per-arch `cargo tauri build` + lipo of the resulting app bundle's binary.
+# Build the macOS desktop client (Kahawai Player) as a Universal app
+# (x86_64 + arm64) into dist/.
 #
-# MAC-ONLY: this script refuses to run on any other OS. Producing a universal
-# binary requires macOS (for lipo and the Apple SDKs). On Linux, validate the
-# client code with `cargo check` / `cargo test` in kahawai-player-core and the npm
-# gates in player/ui instead.
+#   scripts/build-client-universal.sh
 #
-# UNTESTED: the CoreAudio DoP path has never been compiled or run in this
-# workspace (Linux has no Apple SDK/libclang). The first real validation
-# happens on a Mac: `cargo tauri build` for one arch, play to a real DAC,
-# verify hog mode, sample-rate switching, and 24-bit packed output, then
-# run this script for the universal bundle.
+# One command does everything, once: `cargo tauri build --target
+# universal-apple-darwin` runs the frontend build (Vite) a single time,
+# compiles the Rust shell for each architecture (that is what "universal"
+# means: two compiles, merged into one binary), and bundles the .app and a
+# .dmg. The frontend is identical for both architectures, so it is built once,
+# not once per architecture.
 #
-# Signing & notarization are deliberately NOT done here. They require a
-# paid Apple Developer identity and manual steps — see the bottom of the
-# script output for the manual recipe.
+# MAC-ONLY: producing a universal binary needs macOS (lipo and the Apple SDKs).
+#
+# Output:
+#   dist/Kahawai Player.app
+#   dist/Kahawai Player.dmg
+#
+# Signing & notarization are deliberately NOT done here. They require a paid
+# Apple Developer identity and manual steps; see the notes printed at the end.
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "error: universal client builds require macOS (this is $(uname -s))." >&2
-  echo "On Linux, validate with: cd player && cargo check (needs GTK/WebKit dev packages)" >&2
-  echo "and the player/ui npm gates (typecheck + build)." >&2
+  echo "On Linux, validate with the player/ui npm gates (npm test, npm run build)." >&2
   exit 1
 fi
 
@@ -41,56 +43,46 @@ command -v cargo-tauri >/dev/null 2>&1 || {
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLAYER="${ROOT}/player"
 
-echo "==> building frontend (player/ui)…"
-cd "${PLAYER}/ui"
-if [[ -d node_modules ]]; then
-  npm run build
-else
+if [[ ! -d "${PLAYER}/ui/node_modules" ]]; then
   echo "error: player/ui/node_modules missing. Run 'npm install' in player/ui first." >&2
   exit 1
 fi
 
 APP_NAME="Kahawai Player"  # must match productName in player/src-tauri/tauri.conf.json
 EXE_NAME="kahawai-player"  # the Cargo bin name inside Contents/MacOS (not the product name)
+BUNDLES="${PLAYER}/src-tauri/target/universal-apple-darwin/release/bundle"
 
-for target in x86_64-apple-darwin aarch64-apple-darwin; do
-  echo "==> cargo tauri build --target ${target}…"
-  cd "${PLAYER}"
-  cargo tauri build --target "${target}"
-done
+echo "==> cargo tauri build --target universal-apple-darwin (frontend once, Rust for both architectures)…"
+cd "${PLAYER}"
+cargo tauri build --target universal-apple-darwin
 
-BUNDLE_X64="${PLAYER}/src-tauri/target/x86_64-apple-darwin/release/bundle/macos"
-BUNDLE_ARM="${PLAYER}/src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
-
-if [[ ! -d "${BUNDLE_X64}/${APP_NAME}.app" || ! -d "${BUNDLE_ARM}/${APP_NAME}.app" ]]; then
-  echo "error: expected app bundles not found under:" >&2
-  echo "  ${BUNDLE_X64}" >&2
-  echo "  ${BUNDLE_ARM}" >&2
+if [[ ! -d "${BUNDLES}/macos/${APP_NAME}.app" ]]; then
+  echo "error: expected app bundle not found: ${BUNDLES}/macos/${APP_NAME}.app" >&2
   echo "Check that 'productName' in player/src-tauri/tauri.conf.json is '${APP_NAME}'." >&2
   exit 1
 fi
 
-OUT="${ROOT}/dist/${APP_NAME}.app"
-echo "==> assembling universal bundle → ${OUT}"
-rm -rf "${OUT}"
-cp -R "${BUNDLE_ARM}/${APP_NAME}.app" "${OUT}"
-
-BIN_X64="${BUNDLE_X64}/${APP_NAME}.app/Contents/MacOS/${EXE_NAME}"
-BIN_ARM="${BUNDLE_ARM}/${APP_NAME}.app/Contents/MacOS/${EXE_NAME}"
-BIN_OUT="${OUT}/Contents/MacOS/${EXE_NAME}"
-
-if [[ ! -f "${BIN_X64}" || ! -f "${BIN_ARM}" ]]; then
-  echo "error: app bundle executables not found." >&2
-  exit 1
+OUT="${ROOT}/dist"
+mkdir -p "${OUT}"
+echo "==> copying to ${OUT}"
+rm -rf "${OUT}/${APP_NAME}.app"
+cp -R "${BUNDLES}/macos/${APP_NAME}.app" "${OUT}/${APP_NAME}.app"
+dmg="$(ls "${BUNDLES}"/dmg/*.dmg 2>/dev/null | head -n 1 || true)"
+if [[ -n "${dmg}" ]]; then
+  cp -f "${dmg}" "${OUT}/${APP_NAME}.dmg"
 fi
 
-lipo -create "${BIN_X64}" "${BIN_ARM}" -output "${BIN_OUT}"
-
 echo "==> verifying"
-lipo -archs "${BIN_OUT}"
+BIN_OUT="${OUT}/${APP_NAME}.app/Contents/MacOS/${EXE_NAME}"
+archs="$(lipo -archs "${BIN_OUT}")"
+echo "architectures: ${archs}"
+case "${archs}" in
+  *x86_64*arm64*|*arm64*x86_64*) ;;
+  *) echo "error: ${BIN_OUT} is not universal (${archs})." >&2; exit 1 ;;
+esac
 file "${BIN_OUT}"
 
-cat <<'EOF'
+cat <<'EOF2'
 
 Universal bundle is ready (unsigned, unnotarized).
 
@@ -105,4 +97,4 @@ NOT attempted here):
        --wait
   4. xcrun stapler staple "dist/Kahawai Player.app"
   5. spctl -a -vvv -t install "dist/Kahawai Player.app"   # sanity check
-EOF
+EOF2

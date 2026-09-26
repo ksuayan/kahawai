@@ -8,8 +8,8 @@
 #   scripts/start-server.sh -c my.toml       # use another config (default: config.toml)
 #   scripts/start-server.sh --build          # (re)build first; also: --features encode-opus,encode-mp3
 #
-# Uses the first server binary it finds: target/release, then dist/ (universal
-# build). If there is none it builds one. An existing binary is NOT rebuilt
+# Runs the newest server binary of target/release (native build) and dist/
+# (universal build). If there is none it builds one (native, release). An existing binary is NOT rebuilt
 # unless you pass --build, so a build made with --features is never silently
 # replaced by a plain one.
 #
@@ -97,12 +97,15 @@ if [[ "$music_dirs_line" == *"[]"* || -z "$music_dirs_line" ]]; then
 fi
 
 # -- binary
+# The newest of the native build (target/release) and the universal build
+# (dist/), so a fresh build of either is what runs.
 find_bin() {
-  local c
+  local best="" c
   for c in target/release/kahawai-server dist/kahawai-server; do
-    [[ -x "$c" ]] && { echo "$c"; return 0; }
+    [[ -x "$c" ]] || continue
+    if [[ -z "$best" || "$c" -nt "$best" ]]; then best="$c"; fi
   done
-  return 1
+  [[ -n "$best" ]] && echo "$best"
 }
 
 if [[ "$build" -eq 1 ]] || ! bin="$(find_bin)"; then
@@ -114,6 +117,9 @@ if [[ "$build" -eq 1 ]] || ! bin="$(find_bin)"; then
     cargo build --release -p kahawai-server
   fi
   bin="target/release/kahawai-server"
+fi
+if [[ -x target/release/kahawai-server && -x dist/kahawai-server ]]; then
+  echo "(using the newest of target/release and dist/: $bin)"
 fi
 
 # -- port check (best effort)

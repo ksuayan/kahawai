@@ -101,6 +101,20 @@ if [[ -n "$app" ]]; then
 else
   [[ "$dev" -eq 1 ]] || echo "No built app found (run scripts/build-client-universal.sh); using dev mode."
   command -v cargo-tauri >/dev/null 2>&1 || { echo "error: tauri-cli missing. Install: cargo install tauri-cli" >&2; exit 1; }
+  # `cargo tauri dev` starts its own Vite dev server on :1420 (strict port). A
+  # Vite left behind by an earlier dev session would make it fail, or leave
+  # two running. Stop a stale Vite; refuse to touch anything else.
+  for pid in $(lsof -nP -iTCP:1420 -sTCP:LISTEN -t 2>/dev/null | sort -u); do
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    if [[ "$cmd" == *vite* ]]; then
+      echo "Stopping a leftover Vite dev server on :1420 (pid $pid)"
+      kill "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.3; done
+    else
+      echo "error: port 1420 (the dev server port) is in use by: $cmd" >&2
+      exit 1
+    fi
+  done
   cd "$ROOT/player"
   exec cargo tauri dev
 fi

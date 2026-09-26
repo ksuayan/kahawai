@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build a macOS Universal Binary (x86_64 + arm64) of kahawai-server via lipo.
+# Output: dist/kahawai-server
 #
 # MAC-ONLY: this script refuses to run on any other OS. Producing a universal
 # binary requires macOS (for lipo and the Apple SDKs). On Linux CI/VMs, use
@@ -22,10 +23,11 @@ done
 
 cd "$(dirname "$0")/.."
 
-echo "==> building x86_64 (Intel)…"
-cargo build --release --target x86_64-apple-darwin -p kahawai-server
-echo "==> building aarch64 (Apple Silicon)…"
-cargo build --release --target aarch64-apple-darwin -p kahawai-server
+# One cargo invocation, two targets: a universal binary is two compiles (one
+# per architecture) merged by lipo; there is no single-pass way to build it.
+echo "==> building x86_64 (Intel) and aarch64 (Apple Silicon)…"
+cargo build --release -p kahawai-server \
+  --target x86_64-apple-darwin --target aarch64-apple-darwin
 
 OUT="dist/kahawai-server"
 mkdir -p dist
