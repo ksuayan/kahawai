@@ -71,13 +71,32 @@ Both items below need the same groundwork, so plan them together:
 | Item | Size | Why / notes |
 |---|---|---|
 | **Analog tape emulation, with classic machines as presets** | L (research: M) | A chain of models, not one effect: input saturation with magnetic hysteresis (Jiles-Atherton or a simpler bias-curve model), head bump and gap loss (low-frequency bump, high-frequency roll-off that depends on tape speed), wow and flutter (slow and fast pitch modulation), compression from tape saturation, noise floor and hiss (optional, off by default), record and playback EQ curves (NAB / IEC), and optionally azimuth error and crosstalk. Presets would set speed, tape type and the parameters above for a few well-documented machines and formats (for example a studio 2-inch machine, a consumer reel-to-reel, a cassette deck with and without Dolby-style noise reduction). Research needed: pick the reference machines, find measurements (published frequency responses, THD versus level, wow and flutter figures), decide model depth versus CPU, and listen-test against real recordings. |
-| **Tube and transistor "euphonics", with a few popular models as presets** | L (research: M) | Model the character, not a circuit-level simulation: static waveshaping with asymmetry (even-order harmonics for triode-style stages, odd-order for push-pull and transistor clipping), a soft knee that reacts to level, power-supply sag and recovery, output-transformer low-frequency saturation and high-frequency roll-off, and a bias control. Presets would be a handful of well-known stages, described as flavours: a warm single-ended tube, a push-pull tube amp, a solid-state console preamp, a hard-clipping transistor stage. Research needed: which models to include, measured harmonic profiles (2nd/3rd/5th harmonic levels versus drive), how much dynamics (sag) is worth the CPU, and whether to chain with a tone-stack style EQ. A drive control plus a mix (parallel) control keeps it subtle by default. |
+| ~~Tube and transistor "euphonics", with a few popular models as presets~~ | done on `analog-poc` | Built: 21 flavours, sag, transformer colour, level meter, blind test and listening suggestions. See [Analog-Emulation.md](Analog-Emulation.md). Follow-ups are in "Analog warmth: what is left" below. |
 | **Effects chain UI** | M | A single place to enable, order and preset the effects (EQ, tape, tube), in the same modal style as the EQ dialog, each with the level meters and the "not supported for this stream type" dimming. Needs the stage seam above and a per-stage on/off with fades. |
+
+## Analog warmth: what is left
+
+Everything here follows from the work on `analog-poc` (see
+[Analog-Emulation.md](Analog-Emulation.md)); it is built and tested but has
+not been listened to yet.
+
+| Item | Size | Why / notes |
+|---|---|---|
+| **Listen, then tune** | S | Nothing has been heard yet. Use the listening suggestions (section 18 of the doc) and the blind test, then adjust: the defaults (drive 40%, mix 40%, sag 30%, transformer 30%), each flavour's typical sag and transformer values, and the anti-aliasing plan by rate. |
+| **Quick-access warmth control in the transport bar** | S | Phase 4.1 of the plan was not done: the stage lives only in Settings. A small button next to the EQ button (on/off, A/B) would put it one click away. |
+| **Blind test: keep the result, check the match per passage** | S | The result disappears when closed, and the level match is checked from earlier readings, not the passage playing during the test. Save results (date, slots, score), and re-measure while a test runs. |
+| **Check the tube models against datasheets** | M | Only the EL84, 300B and 2A3 biases were compared with published operating points, and those from memory. Compare the small-signal tubes' plate curves and gain with the datasheets, and find published harmonic measurements to replace the provisional targets. |
+| **Model more of the real circuit** | L | Left out on purpose: interelectrode capacitance (high-frequency roll-off), cathode bypass and coupling dynamics, screen current and supply sag, a Jiles-Atherton transformer instead of the bass soft clip, hum and noise, and class-AB bias variations. |
+| **Faster oversampling** | M | The FIR is a straightforward loop. A polyphase half-band or SIMD version would cost a fraction of the current 3.5% (44.1 kHz) to 4.5% (96 kHz) of a core. Only worth it if CPU becomes a concern. |
+| **Build the tube tables at build time** | S | Each flavour's table is computed on first use (about 20 ms on the playback thread, once). Generating them at build time removes that. |
+| **Make the analog tests faster** | S | The analog unit tests take about 35 s in a debug build (FFTs and oversampling). Trim the sample counts, or run them with optimizations. |
+| **Reuse the level meter for the EQ** | S | The EQ has no automatic pre-gain or limiter (see the headroom item above). The new `LoudnessMeter` and peak tracking could drive an "EQ boost may clip" reading with real numbers instead of the graph's estimate. |
+| **Put the effects in a chain** | M | With the EQ and the analog stage both in the PCM path, the "Effects chain UI" item above is now more useful: enable, order and preset them in one place. |
 
 ## Housekeeping
 
 | Item | Size | Why / notes |
 |---|---|---|
-| **Delete merged branches** | S | `reka-poc` and `fix-album-grouping` are merged into `main`. Delete with `git branch -d`. |
+| **Delete merged branches** | S | `reka-poc`, `fix-album-grouping` and `look-and-feel` are merged into `main`. Delete with `git branch -d`. |
 | **Server tests that fail on this Mac** | S | 10 server tests (`integration_tests::*`, `scan_tests::*`) fail here only because the local ffmpeg lacks `libvorbis`. They pass elsewhere. Skip them when the encoder is missing, so a red run always means something. |
 | **Verify queue restore in the real app** | S | The fix and its tests are in, but a full quit-and-relaunch has not been done by hand yet. |

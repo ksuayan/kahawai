@@ -85,6 +85,9 @@ export const useAnalogStore = defineStore("analog", () => {
     resetMeasured("a");
     resetMeasured("b");
     loaded.value = true;
+    // The engine keeps only the slot that was playing; make sure it matches the
+    // restored pair (its settings file may have been reset, or edited by hand).
+    if (saved) push();
   }
 
   /** Change one slot. Only the active slot reaches the engine. */

@@ -104,7 +104,7 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
 </script>
 
 <template>
-  <SettingsSection title="Analog warmth (experimental)">
+  <SettingsSection title="Analog Warmth (Experimental)">
     <UiHint>
       Adds the character of a tube or transistor stage to the shared PCM output, after the EQ. Choose from several tubes (12AX7, 12AT7, 12AU7, 6SN7, 6DJ8, 300B, 2A3), a push-pull pair, or solid-state stages; choosing a flavour also sets Sag and Transformer to typical values for it. Set up two versions and
       switch between them while music plays: compare the effect against the dry signal, or one flavour or

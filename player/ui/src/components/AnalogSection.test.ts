@@ -22,7 +22,7 @@ beforeEach(() => localStorage.clear());
 describe("Analog warmth settings", () => {
   it("shows two slots, A dry and B warm, with A being heard", async () => {
     const { wrapper } = await boot();
-    expect(wrapper.text()).toContain("Analog warmth (experimental)");
+    expect(wrapper.text()).toMatch(/analog warmth \(experimental\)/i);
     expect(wrapper.get('[data-testid="ab-a"]').attributes("aria-pressed")).toBe("true");
     expect(wrapper.get('[data-testid="ab-b"]').attributes("aria-pressed")).toBe("false");
     expect(wrapper.get('[data-testid="slot-a-summary"]').text()).toBe("Off (dry signal)");

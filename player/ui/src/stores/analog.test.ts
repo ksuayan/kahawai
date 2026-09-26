@@ -238,3 +238,23 @@ describe("level measurements and matching", () => {
     expect(sent().at(-1)).toMatchObject({ output_db: -2 });
   });
 });
+
+describe("restoring the pair at launch", () => {
+  it("sends the restored active slot to the engine, so both agree even if the engine's file was reset", async () => {
+    const s = useAnalogStore();
+    s.update("b", { flavour: "tube_2a3", drive: 0.7 });
+    s.select("b");
+    setActivePinia(createPinia());
+    tauri.calls.length = 0;
+    const again = useAnalogStore();
+    await again.init();
+    expect(sent()).toHaveLength(1);
+    expect(sent()[0]).toMatchObject({ flavour: "tube_2a3", drive: 0.7, enabled: true });
+  });
+
+  it("with nothing saved, sends nothing (the engine's own settings are the truth)", async () => {
+    const s = useAnalogStore();
+    await s.init();
+    expect(sent()).toHaveLength(0);
+  });
+});

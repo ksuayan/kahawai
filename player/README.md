@@ -27,8 +27,8 @@ OS audio sinks) live in the workspace root.
 
 Settings → **Bit-perfect output** (Off / MQA files only / All tracks; macOS).
 When it applies to a track, the engine sends the decoded samples to the
-exclusive (hog-mode) device **untouched**: no EQ, loudness gain, software
-volume or resampling, at the file's own sample rate, as packed 24-bit
+exclusive (hog-mode) device **untouched**: no EQ, analog warmth, loudness gain,
+software volume or resampling, at the file's own sample rate, as packed 24-bit
 (`bitperfect.rs`; the float→24-bit conversion is exact). That is what a DAC
 that decodes MQA needs to see the MQA signal, and what "bit-perfect" means
 generally.
@@ -132,7 +132,7 @@ delegated to an audio framework.
 rate when the device supports it; the engine resamples (cubic) only when
 the device runs at a different rate. Chain order is fixed:
 
-`decode → resample (if needed) → EQ → loudness → volume → sink`
+`decode → resample (if needed) → EQ → analog warmth (optional) → loudness → volume → sink`
 
 The audio callback never blocks or allocates: it drains a lock-free ring
 the engine feeds, fills underruns with silence, and counts them

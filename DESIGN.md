@@ -165,7 +165,7 @@ internet exposure, ever, in v1.
 flowchart TD
     ui["<b>Vue 3 + Pinia</b> (ui/)<br/>views · stores (library / player / queue / playlists / jobs / settings)<br/>direct fetch for browse APIs"]
     shell["<b>src-tauri/</b> — thin shell<br/>30+ commands, engine ownership,<br/>server-URL + prefs persistence"]
-    core["<b>kahawai-player-core</b><br/>Player state machine · HttpTransport (ureq) · symphonia decode<br/>DSP (EQ → loudness → volume) · queue / shuffle / repeat · format resolution"]
+    core["<b>kahawai-player-core</b><br/>Player state machine · HttpTransport (ureq) · symphonia decode<br/>DSP (EQ → analog warmth → loudness → volume) · queue / shuffle / repeat · format resolution"]
     api["<b>kahawai-player-api</b><br/>reqwest client for the browse APIs"]
     audio["<b>kahawai-player-audio</b><br/>CpalSink (PCM, shared mode, all OSes) ·<br/>CoreAudioDopSink (macOS hog mode)"]
     ui -->|"Tauri invoke / events"| shell
@@ -186,7 +186,7 @@ needs protecting); only playback crosses the Tauri bridge.
 track-native rate when supported; the engine resamples (cubic) only
 otherwise. Chain order is fixed and visible in the UI's audio-path badge:
 
-`decode → resample (if needed) → EQ → loudness → volume → sink`
+`decode → resample (if needed) → EQ → analog warmth (optional) → loudness → volume → sink`
 
 The audio callback never blocks or allocates: it drains a lock-free
 (`ringbuf`) SPSC ring the decode thread feeds, fills underruns with

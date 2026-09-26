@@ -1,14 +1,27 @@
 # Analog emulation: tube and transistor "euphonics"
 
-Research summary and an itemized plan for adding tube and transistor
-character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 3 done, plus 21 flavours (sections 15 and 16)** (research, a working stage in the engine,
-the triode curve derived from Koren's model, and antiderivative
-antialiasing), sag and transformer colour (section 14), plus **an A/B test panel in
-Settings** (section 13). Findings: section 10; Phase 1 results: 11;
-Phase 2 results: 12.
+Research, plan and results for adding tube and transistor character to the
+PCM playback chain. Branch: `analog-poc`.
 
-Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md)
-(DSP effects section), [EQ.md](EQ.md) (pipeline and the `DspStage` idea).
+**Status: built and tested; not yet listened to.** The engine has an optional
+analog stage (21 flavours, drive, mix, sag, transformer colour, level match,
+alias-protected), and Settings has an A/B test bench for it (two slots, level
+meter, blind test, listening suggestions, keyboard shortcut). It is off by
+default and never runs on DoP or bit-perfect output.
+
+Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md) (what
+is left), [EQ.md](EQ.md) (the EQ, and the `DspStage` seam this uses).
+
+**Where to look**
+
+| If you want to... | Read |
+|---|---|
+| Try it | 13 (the panel), 18 (listening suggestions) |
+| Understand the terms and flavours | 17 |
+| See what each flavour is made from | 15, 16 |
+| See how it was built and measured | 10 to 14 |
+| Check sources and how deeply they were read | 19 |
+| See the original plan | 1 to 9 |
 
 How to read the claims below:
 
@@ -211,7 +224,7 @@ with something we can listen to and a green test suite.
 | 1.3 | Oversampling wrapper, 2x and 4x, built once and reused | Done (Kaiser FIR, streaming) |
 | 1.4 | Fade-in/out on parameter change and on/off | Done, including flavour changes |
 | 1.5 | Wire into `pump_pcm` after the EQ; PCM shared path only; DoP and bit-perfect bypass | Done |
-| 1.6 | Engine command, settings persistence | Done (no UI, no snapshot field) |
+| 1.6 | Engine command, settings persistence | Done (the UI came later, section 13; the player state gained `analog_plan` and `analog_level`) |
 
 ### Phase 2: derive curves from tube models (M) *(done, see section 12)*
 
@@ -229,15 +242,15 @@ with something we can listen to and a green test suite.
 | 3.2 | Transformer colour: cheap level-dependent low shelf plus soft clip; evaluate a hysteresis state as a follow-up | Done (bass soft clip); hysteresis not tried |
 | 3.3 | Tone shaping: coupling and roll-off filters per flavour | Partly: the 10 Hz coupling high-pass exists; a per-flavour roll-off was judged not worth adding (section 14.3) |
 
-### Phase 4: UI (M)
+### Phase 4: UI (M) *(done, differently from the plan: see sections 13 and 18)*
 
-| # | Item | Notes / acceptance |
+| # | Item | Status |
 |---|---|---|
-| 4.1 | "Warmth" button next to the EQ button, opening a modal in the EQ dialog's style | Same look, both themes |
-| 4.2 | Flavour picker, Drive, Mix, Output; live preview with OK / Cancel, like the EQ | Cancel reverts |
-| 4.3 | Dim with "not supported for this stream type" on exclusive paths | Same rule as the EQ |
-| 4.4 | Guardrails: limit drive, warn when the stage will clip the output; gain-matched A/B toggle | Consistent with the EQ guardrails |
-| 4.5 | Tests: component, store, and a house-style check | Green |
+| 4.1 | "Warmth" button next to the EQ button, opening a modal in the EQ dialog's style | **Not done.** Built instead as a section of Settings, because it grew into an A/B test bench (two slots, level meter, blind test, listening suggestions). A quick-access button in the transport bar is still open (Backlog) |
+| 4.2 | Flavour picker, Drive, Mix, Output; live preview with OK / Cancel | Done as live edits with an A/B switch (no OK / Cancel: the two slots are the safety net). Also Sag, Transformer, level match and the anti-aliasing plan |
+| 4.3 | Dim with "not supported for this stream type" on exclusive paths | Done |
+| 4.4 | Guardrails: limit drive, warn when the stage will clip the output; gain-matched A/B toggle | Done: ranges are enforced, the level meter warns about clipping, and Match B to A gain-matches |
+| 4.5 | Tests: component, store, and a house-style check | Done |
 
 ### Phase 5: optional higher fidelity (L, only if Phases 1-4 are not enough)
 
@@ -443,7 +456,7 @@ fix.
 Code: [analog.rs](crates/kahawai-player-core/src/analog.rs) (the stage),
 the `DspStage` trait in [dsp.rs](crates/kahawai-player-core/src/dsp.rs),
 and the wiring in [engine.rs](crates/kahawai-player-core/src/engine.rs).
-Tauri command: `set_analog`. **There is no UI yet (that is Phase 4).**
+Tauri command: `set_analog`. (The Settings panel came later; see section 13.)
 
 ### 11.1 What exists
 
@@ -550,7 +563,7 @@ bit-perfect output.
 
 ### 11.6 Known limits and what is next
 
-- No UI, so no live A/B in the app yet (Phase 4).
+- (Since added: the A/B panel in Settings, section 13.)
 - (Phase 2 since added the Koren-derived curve and ADAA.) Still no sag or
   transformer colour (Phase 3).
 - No clip protection: with the output trim up or hot material and high
@@ -669,7 +682,7 @@ better still at 192 kHz; measured to −70 dB or better in the test). If CPU eve
   against a datasheet-scale 1.2 mA).
 - Whether it sounds right by ear; only measured so far.
 - Push-pull and hard-transistor flavours (Phase 3 and later), sag and
-  transformer colour (Phase 3), UI (Phase 4).
+  transformer colour (Phase 3), UI (Phase 4): all since done, sections 13 to 16.
 
 ---
 

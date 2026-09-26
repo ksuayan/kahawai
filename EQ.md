@@ -13,7 +13,8 @@ Scope: `player/` (Tauri shell + Vue UI) and `crates/kahawai-player-core`,
 - The EQ runs **on the client**, in Rust, inside the playback thread. The
   server streams audio and knows nothing about EQ.
 - It is a cascade of up to **8 biquad filters** (RBJ "Audio EQ Cookbook"),
-  applied to decoded 32-bit float PCM, before loudness gain and volume.
+  applied to decoded 32-bit float PCM, before the optional analog stage
+  (see [Analog-Emulation.md](Analog-Emulation.md)), loudness gain and volume.
 - It applies to the **shared PCM path only**. The exclusive paths (DoP and
   bit-perfect PCM) send samples to the DAC untouched, so EQ is bypassed and
   the UI dims the editor.
@@ -31,7 +32,8 @@ flowchart LR
     decode --> branch{"output path"}
     branch -->|"pcm-shared"| resample["cubic resampler<br/>(only if device rate differs)"]
     resample --> eq["<b>EQ</b><br/>≤ 8 biquads"]
-    eq --> loud["loudness gain<br/>(50 ms ramp)"]
+    eq --> analog["analog warmth<br/>(optional)"]
+    analog --> loud["loudness gain<br/>(50 ms ramp)"]
     loud --> vol["volume"]
     vol --> ring["CpalSink<br/>ring buffer (~200 ms)"]
     ring --> dev(["output device"])
@@ -45,7 +47,8 @@ flowchart LR
 The relevant code is `Player::pump_pcm` in
 [engine.rs](crates/kahawai-player-core/src/engine.rs): it decodes one chunk
 (4096 frames, about 93 ms at 44.1 kHz), optionally resamples, then runs
-`eq.process` → `gain_ramp.apply` → volume → `sink.write`. The order is fixed.
+`eq.process` → `analog.process` (optional, off by default) → `gain_ramp.apply`
+→ volume → `sink.write`. The order is fixed.
 The DSP itself is in [dsp.rs](crates/kahawai-player-core/src/dsp.rs), which
 imports nothing platform-specific.
 
@@ -192,24 +195,27 @@ small trait, so the current biquad EQ becomes one implementation:
 ```mermaid
 flowchart LR
     pcm["decoded f32<br/>(after resample)"] --> stage1["<b>DspStage</b><br/>built-in ParametricEq"]
-    stage1 --> stage2["<b>DspStage</b><br/>AudioUnitStage (optional)"]
-    stage2 --> loud["loudness gain"]
+    stage1 --> stage2["<b>DspStage</b><br/>AnalogStage (built)"]
+    stage2 --> stage3["<b>DspStage</b><br/>AudioUnitStage (future)"]
+    stage3 --> loud["loudness gain"]
     loud --> vol["volume"]
     vol --> sink["sink"]
 ```
 
-Sketch:
+That trait now exists in [dsp.rs](crates/kahawai-player-core/src/dsp.rs) and is
+implemented by both the EQ and the analog stage (`AnalogStage`,
+[analog.rs](crates/kahawai-player-core/src/analog.rs)):
 
 ```rust
 // kahawai-player-core: platform-free
 pub trait DspStage: Send {
-    fn prepare(&mut self, sample_rate: u32, channels: u16) -> Result<(), MusicError>;
-    fn process(&mut self, interleaved: &mut [f32]);          // in place
+    fn prepare(&mut self, sample_rate: u32);
+    fn process(&mut self, interleaved: &mut [f32], channels: usize);   // in place
     fn latency_frames(&self) -> u32 { 0 }
-    fn reset(&mut self);                                     // on seek / track change
-    fn tail_frames(&self) -> u32 { 0 }                       // reverb/delay tails
+    fn reset(&mut self);                                  // on a new track
 }
-// kahawai-player-audio (macOS only): AudioUnitStage implements DspStage.
+// kahawai-player-audio (macOS only): AudioUnitStage would implement DspStage,
+// possibly with a tail_frames() for reverb and delay tails.
 ```
 
 Because `kahawai-player-core` has no platform imports, the AU host belongs
@@ -262,8 +268,9 @@ Either way we would need to:
 
 ### A suggested path
 
-1. **Refactor**: extract the `DspStage` trait; make the built-in EQ one
-   stage. No behaviour change.
+1. **Refactor**: the `DspStage` trait is done (the EQ and the analog stage
+   implement it). What is left is turning the fixed call order in
+   `pump_pcm` into a list of stages.
 2. **Spike**: an `AudioUnitStage` for one Apple built-in (`AUNBandEQ`),
    using approach 1, with a hard-coded parameter set, to measure latency,
    CPU, and how well chunk-at-a-time rendering works.
