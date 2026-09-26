@@ -1,0 +1,60 @@
+=== 1. Harmonic profile (dBc relative to the fundamental) ===
+  asym tanh (bias 0.4, g=1.5)  amp=0.1   2nd   -31.0  3rd   -59.5  4th   -81.6  5th  -129.5 dBc   (THD 2.83%)
+  asym tanh (bias 0.4, g=1.5)  amp=0.3   2nd   -22.0  3rd   -40.3  4th   -53.7  5th   -87.6 dBc   (THD 8.00%)
+  asym tanh (bias 0.4, g=1.5)  amp=0.6   2nd   -17.7  3rd   -28.3  4th   -37.8  5th   -59.3 dBc   (THD 13.62%)
+  asym tanh (bias 0.4, g=1.5)  amp=1     2nd   -16.5  3rd   -20.4  4th   -28.9  5th   -40.6 dBc   (THD 18.17%)
+  sym tanh (g=2)               amp=0.1   2nd  -240.0  3rd   -49.6  4th  -240.0  5th   -97.7 dBc   (THD 0.33%)
+  sym tanh (g=2)               amp=0.3   2nd  -240.0  3rd   -31.2  4th  -240.0  5th   -60.7 dBc   (THD 2.76%)
+  sym tanh (g=2)               amp=0.6   2nd  -240.0  3rd   -21.1  4th  -240.0  5th   -40.1 dBc   (THD 8.92%)
+  sym tanh (g=2)               amp=1     2nd  -240.0  3rd   -15.5  4th  -240.0  5th   -28.3 dBc   (THD 17.34%)
+  hard clip (g=2)              amp=0.1   2nd  -240.0  3rd  -240.0  4th  -240.0  5th  -240.0 dBc   (THD 0.00%)
+  hard clip (g=2)              amp=0.3   2nd  -240.0  3rd  -240.0  4th  -240.0  5th  -240.0 dBc   (THD 0.00%)
+  hard clip (g=2)              amp=0.6   2nd  -240.0  3rd   -23.8  4th  -240.0  5th   -29.6 dBc   (THD 7.34%)
+  hard clip (g=2)              amp=1     2nd  -240.0  3rd   -12.9  4th  -240.0  5th   -26.9 dBc   (THD 23.25%)
+  12AX7 stage (Koren, RL 100k) amp=0.1   2nd   -42.1  3rd   -79.0  4th  -128.0  5th  -152.5 dBc   (THD 0.79%)
+  12AX7 stage (Koren, RL 100k) amp=0.3   2nd   -32.5  3rd   -59.8  4th   -99.4  5th  -114.5 dBc   (THD 2.37%)
+  12AX7 stage (Koren, RL 100k) amp=0.6   2nd   -26.3  3rd   -47.5  4th   -81.8  5th   -91.1 dBc   (THD 4.83%)
+  12AX7 stage (Koren, RL 100k) amp=1     2nd   -21.6  3rd   -38.0  4th   -70.8  5th   -75.6 dBc   (THD 8.39%)
+
+=== 2. Aliasing (error vs ideal band-limited reference, audible band) ===
+  fs 44100 Hz, tone 6000 Hz, asym tanh drive g=3:
+    naive (no protection)      inharmonic (alias) level:   -26.4 dB
+    ADAA 1st order             inharmonic (alias) level:   -38.4 dB
+    2x oversampling            inharmonic (alias) level:   -62.6 dB
+    4x oversampling            inharmonic (alias) level:  -106.3 dB
+    8x oversampling            inharmonic (alias) level:  -104.6 dB
+  fs 44100 Hz, tone 9500 Hz, asym tanh drive g=3:
+    naive (no protection)      inharmonic (alias) level:   -14.2 dB
+    ADAA 1st order             inharmonic (alias) level:   -25.5 dB
+    2x oversampling            inharmonic (alias) level:   -41.5 dB
+    4x oversampling            inharmonic (alias) level:   -91.0 dB
+    8x oversampling            inharmonic (alias) level:  -104.0 dB
+  fs 96000 Hz, tone 9500 Hz, asym tanh drive g=3:
+    naive (no protection)      inharmonic (alias) level:   -51.1 dB
+    ADAA 1st order             inharmonic (alias) level:   -74.6 dB
+    2x oversampling            inharmonic (alias) level:  -100.9 dB
+    4x oversampling            inharmonic (alias) level:  -133.2 dB
+    8x oversampling            inharmonic (alias) level:  -130.2 dB
+
+=== 3. CPU cost (1 s of stereo audio, this machine, release build) ===
+  44100 Hz:
+    existing 8-band EQ (f32 API)           2.11 ms per 1 s of stereo audio  ->    0.2% of one core
+    naive asym-tanh x2ch                   1.25 ms per 1 s of stereo audio  ->    0.1% of one core
+    triode table lookup x2ch               0.53 ms per 1 s of stereo audio  ->    0.1% of one core
+    ADAA1 tanh (analytic) x2ch             2.58 ms per 1 s of stereo audio  ->    0.3% of one core
+    2x oversampled tanh x2ch              11.57 ms per 1 s of stereo audio  ->    1.2% of one core
+    4x oversampled tanh x2ch              23.80 ms per 1 s of stereo audio  ->    2.4% of one core
+  96000 Hz:
+    existing 8-band EQ (f32 API)           4.29 ms per 1 s of stereo audio  ->    0.4% of one core
+    naive asym-tanh x2ch                   2.69 ms per 1 s of stereo audio  ->    0.3% of one core
+    triode table lookup x2ch               1.49 ms per 1 s of stereo audio  ->    0.1% of one core
+    ADAA1 tanh (analytic) x2ch             5.37 ms per 1 s of stereo audio  ->    0.5% of one core
+    2x oversampled tanh x2ch              25.33 ms per 1 s of stereo audio  ->    2.5% of one core
+    4x oversampled tanh x2ch              52.31 ms per 1 s of stereo audio  ->    5.2% of one core
+  192000 Hz:
+    existing 8-band EQ (f32 API)           9.71 ms per 1 s of stereo audio  ->    1.0% of one core
+    naive asym-tanh x2ch                   5.13 ms per 1 s of stereo audio  ->    0.5% of one core
+    triode table lookup x2ch               2.42 ms per 1 s of stereo audio  ->    0.2% of one core
+    ADAA1 tanh (analytic) x2ch            11.30 ms per 1 s of stereo audio  ->    1.1% of one core
+    2x oversampled tanh x2ch              49.61 ms per 1 s of stereo audio  ->    5.0% of one core
+    4x oversampled tanh x2ch             105.42 ms per 1 s of stereo audio  ->   10.5% of one core

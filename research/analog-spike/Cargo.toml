@@ -1,0 +1,13 @@
+[package]
+name = "analog-spike"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+kahawai-player-core = { path = "../../crates/kahawai-player-core" }
+
+[profile.release]
+opt-level = 3
+debug = false
+
+[workspace]

@@ -1,8 +1,8 @@
 # Analog emulation: tube and transistor "euphonics"
 
 Research summary and an itemized plan for adding tube and transistor
-character to the PCM playback chain. Branch: `analog-poc`. Status: **research
-and plan only. Nothing is implemented.**
+character to the PCM playback chain. Branch: `analog-poc`. Status: **Phase 0 (research and a throw-away prototype) done;
+nothing is in the player yet.** Findings are in section 10.
 
 Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md)
 (DSP effects section), [EQ.md](EQ.md) (pipeline and the `DspStage` idea).
@@ -60,7 +60,7 @@ aliasing, matters more than circuit detail.
 | Approach | What it is | Fit for us |
 |---|---|---|
 | **Static waveshaper** with asymmetry and filters around it | A memoryless curve (tanh, polynomial, or a table) placed between pre- and post-filters. The classic "tubes as filters + waveshapers" approach (**[cited]**: described as a common approach in the DAFx literature) | **Best first step.** Cheap, controllable, easy to test |
-| **Fitted tube curve** (Koren) | Norman Koren's phenomenological triode equations fit datasheet curves well (**[cited]**). A 12AX7 parameter set: mu about 100, Ex about 1.39, Kg1 about 1652, Kp 1000, Kvb 524 (**[cited]**, from a search result; confirm against Koren's page). Most physically informed tube simulations still use Koren's or Cardarilli's model (**[cited]**) | **Phase 2.** Use it to *derive* the static curve and its asymmetry, and to build a lookup table; do not solve the circuit per sample at first |
+| **Fitted tube curve** (Koren) | Norman Koren's phenomenological triode equations fit datasheet curves well (**[cited]**). Koren's own 12AX7 set: mu 100, Ex 1.4, Kg1 1060, Kp 600, Kvb 300 (**[cited]**, read from his page in Phase 0; a different fit with mu 100.26, Ex 1.394, Kg1 1651.8, Kp 1000, Kvb 524 also circulates, so the set to use is a Phase 0 decision). Most physically informed tube simulations still use Koren's or Cardarilli's model (**[cited]**) | **Phase 2.** Use it to *derive* the static curve and its asymmetry, and to build a lookup table; do not solve the circuit per sample at first |
 | **Wave digital filters (WDF)** | Simulates the whole stage (tube plus resistors and capacitors) with one nonlinear element solved without iteration. Well studied for triode stages (**[cited]**: Pakarinen and Karjalainen's enhanced WDF triode; the RT-WDF library) | A possible later upgrade (Phase 5). More faithful, more code and CPU |
 | **State-space / SPICE-style solvers** | Newton iteration per sample | Too heavy and fragile for a background playback thread |
 | **Neural black-box models** | Learn a device from recordings (**[cited]**: a 2018 paper on tube amplifier emulation) | Needs data and training tooling; hard to keep light and deterministic. Not for a first version |
@@ -100,12 +100,17 @@ Confirm by measuring aliasing (section 6).
 
 ### 3.4 Existing implementations (license matters)
 
-- **libmksim** (Rust, WDF, models tubes, diodes, transistors, op-amps; MIT
-  licensed, per its README as summarised in search) (**[cited]**). Worth a
-  code read as a reference, and possibly a dependency. Check maturity and
-  maintenance before relying on it.
-- **RT-WDF** (C++ WDF library, open source) (**[cited]**). License not
-  checked.
+- **libmksim** (Rust; WDF plus Newton solvers for tubes, diodes, transistors,
+  op-amps; MIT). **Phase 0 verdict: reference at most, not a dependency.**
+  The GitHub repository was created on 2026-03-08 and its four commits all
+  landed within 11 minutes, it has 3 stars, is not on crates.io, and its
+  README calls AVX-512 a placeholder. No track record.
+- **RT-WDF** (C++ WDF library). **Verdict: skip.** No license file (GitHub
+  shows none), last pushed in 2017, needs the Armadillo C++ library, and
+  the material I could read does not show a triode example.
+- **Antialiasing reference code:** Chowdhury's ADAA repository is
+  BSD-3-Clause (usable as a reference); Parker's DAFX-AntiAliasing repository
+  has no license (read, do not copy).
 - Some well-known open-source emulations are GPL (**[known]**, not checked
   for any specific project). Rule from the Backlog: do not copy code from
   a project until its license is confirmed compatible.
@@ -188,11 +193,11 @@ with something we can listen to and a green test suite.
 
 | # | Item | Output |
 |---|---|---|
-| 0.1 | Read the key sources in section 9 in full (Koren tube models, ADAA, WDF triode, transformer emulation) and confirm the parameter values | Notes appended here |
-| 0.2 | Choose reference behaviours: target harmonic profiles (2nd/3rd/5th versus drive level) for each flavour, from published measurements | A table of targets |
-| 0.3 | Check libmksim and RT-WDF: maturity, maintenance, license, API fit | Use / read-only reference / skip decision |
-| 0.4 | Measure the CPU budget: cost of the current chain per chunk at 192 kHz stereo, and the headroom left on this Mac | A number to design against |
-| 0.5 | Decide the open questions in section 7 | Decisions recorded |
+| 0.1 | Read the key sources in section 9 in full (Koren tube models, ADAA, WDF triode, transformer emulation) | **Partly done.** Koren's equations and parameters read and used; ADAA basics implemented and measured. WDF and transformer papers not yet read in full |
+| 0.2 | Choose reference behaviours: target harmonic profiles (2nd/3rd/5th versus drive level) for each flavour | **Provisional.** Profiles measured from the prototype (section 10.2); still to be checked against published measurements |
+| 0.3 | Check libmksim and RT-WDF: maturity, maintenance, license, API fit | **Done.** Neither is a dependency (section 3.4) |
+| 0.4 | Measure the CPU budget | **Done** for a prototype (section 10.4) |
+| 0.5 | Decide the open questions in section 7 | **Waiting on you.** Recommendations are in section 10.5 |
 
 ### Phase 1: the seam and a working static stage (M to L)
 
@@ -326,3 +331,127 @@ Phase 0.1):
 - Transformers: [a transformer model based on the Jiles-Atherton theory](https://www.researchgate.net/publication/270465159_A_transformer_model_based_on_the_Jiles-Atherton_theory_of_ferromagnetic_hysteresis),
   [real-time audio transformer emulation for virtual tube amplifiers](https://www.researchgate.net/publication/220057543_Real-Time_Audio_Transformer_Emulation_for_Virtual_Tube_Amplifiers)
 - [Deep learning for tube amplifier emulation](https://arxiv.org/pdf/1811.00334)
+
+---
+
+## 10. Phase 0 findings
+
+A throw-away prototype lives in [research/analog-spike/](research/analog-spike/)
+(a standalone Rust program, not part of the player; run it with
+`cargo run --release`, output saved in
+[RESULTS.txt](research/analog-spike/RESULTS.txt)). It is unoptimized research
+code, so treat the numbers as ballpark, measured on an Intel Core i9-9900K.
+
+### 10.1 What the prototype has
+
+- Four memoryless shapers: an asymmetric tanh (a bias term adds even
+  harmonics), a symmetric tanh, a hard clip, and a **12AX7 triode stage
+  computed from Koren's equations** (300 V supply, 100 kΩ load, about −1.5 V
+  bias) turned into a lookup table.
+- Anti-aliasing options: none, first-order ADAA (analytic antiderivative),
+  and 2x, 4x and 8x oversampling (Kaiser-windowed FIR, 32 taps per phase).
+- The existing 8-band EQ from the player, for a CPU baseline.
+
+### 10.2 Harmonic profiles (dB relative to the fundamental)
+
+| Shaper | Input level | 2nd | 3rd | 4th | 5th | THD |
+|---|---|---|---|---|---|---|
+| 12AX7 stage (Koren) | 0.1 | −42 | −79 | −128 | −153 | 0.8% |
+| | 0.3 | −33 | −60 | −99 | −115 | 2.4% |
+| | 0.6 | −26 | −48 | −82 | −91 | 4.8% |
+| | 1.0 | −22 | −38 | −71 | −76 | 8.4% |
+| Asymmetric tanh (bias 0.4, gain 1.5) | 0.1 | −31 | −60 | −82 | −130 | 2.8% |
+| | 0.3 | −22 | −40 | −54 | −88 | 8.0% |
+| | 1.0 | −17 | −20 | −29 | −41 | 18% |
+| Symmetric tanh (gain 2) | 0.1 | none | −50 | none | −98 | 0.3% |
+| | 0.3 | none | −31 | none | −61 | 2.8% |
+| | 1.0 | none | −16 | none | −28 | 17% |
+| Hard clip (gain 2) | 0.1 to 0.3 | none | none | none | none | 0% |
+| | 0.6 | none | −24 | none | −30 | 7.3% |
+| | 1.0 | none | −13 | none | −27 | 23% |
+
+What this shows:
+
+- The **triode stage behaves like the textbook**: the 2nd harmonic dominates
+  (about 20 dB above the 3rd), and it rises 1 dB per dB of input, while the
+  3rd rises 2 dB per dB. That is the "warm" signature and it falls out of
+  Koren's equations with no tuning.
+- A **symmetric curve gives only odd harmonics** (no 2nd or 4th), as
+  expected for push-pull and transistor stages.
+- A **hard clip is perfectly clean until it clips**, then produces strong odd
+  harmonics. That is the "hard transistor" flavour, and it is why a soft
+  knee is much more pleasant at moderate levels.
+- The asymmetric tanh is a workable, cheaper stand-in for the triode, but
+  its harmonics rise faster than the real curve's. Its 4th harmonic is much
+  higher than the triode's.
+
+These are **provisional targets** (item 0.2): they come from my model, not
+from published measurements of real tubes.
+
+### 10.3 Aliasing (the risk that decides the design)
+
+Level of everything in the audible band that is *not* a harmonic of the
+tone (that is aliasing), relative to the tone. Heavy test: asymmetric tanh
+at gain 3 and input 0.8, deliberately harsh.
+
+| Sample rate, tone | No protection | ADAA (1st order) | 2x oversampling | 4x | 8x |
+|---|---|---|---|---|---|
+| 44.1 kHz, 6 kHz | −26 dB | −38 dB | −63 dB | −106 dB | −105 dB |
+| 44.1 kHz, 9.5 kHz | −14 dB | −26 dB | −42 dB | −91 dB | −104 dB |
+| 96 kHz, 9.5 kHz | −51 dB | −75 dB | −101 dB | −133 dB | −130 dB |
+
+- At 44.1 kHz, unprotected aliasing is **very audible** (as loud as −14 to
+  −26 dB relative to the tone). It has to be handled.
+- **4x oversampling is clean** at 44.1 and 48 kHz (better than −90 dB).
+  2x is adequate for gentle drive but not for a hard test tone.
+- **First-order ADAA alone is not enough at 44.1 kHz** for heavy drive
+  (−26 to −38 dB), but it is good at 96 kHz and above (−75 dB). ADAA
+  combined with 2x oversampling is the standard compromise.
+- At 96 kHz and above, **2x is plenty**, and unprotected is already
+  −51 dB for this harsh case.
+
+A correction to my own first run: an early version of this test reported
+about −29 dB for every oversampling factor. That was a bug in the test
+(the filter's end-of-buffer edge and passband droop were being counted as
+aliasing), not a property of oversampling. The numbers above are after the
+fix.
+
+### 10.4 CPU (one second of stereo audio, one core, this machine)
+
+| Sample rate | Existing 8-band EQ | Naive shaper | Triode table | ADAA1 | 2x OS | 4x OS |
+|---|---|---|---|---|---|---|
+| 44.1 kHz | 0.2% | 0.1% | 0.1% | 0.2% | 1.1% | 2.1% |
+| 96 kHz | 0.4% | 0.2% | 0.1% | 0.5% | 2.3% | 4.8% |
+| 192 kHz | 0.8% | 0.5% | 0.2% | 1.1% | 4.7% | 9.8% |
+
+- The shaper itself is nearly free; **oversampling is the cost**, and even a
+  crude implementation of it (a direct FIR in f64) fits comfortably.
+- **CPU is not the constraint** for this feature. A 4x oversampled stage at
+  192 kHz is about 10% of a core in unoptimized code. A polyphase
+  half-band or f32 implementation should be several times cheaper
+  (**[guess]**).
+- Practical rule that follows: **4x at 44.1 and 48 kHz, 2x at 88.2 and 96
+  kHz, ADAA-only or none at 176.4 kHz and above.**
+
+### 10.5 Options and my recommendations
+
+| Question | Options | Recommendation |
+|---|---|---|
+| **Q1. Which flavours first?** | All four; or two | Start with **two: warm triode (table from Koren) and solid-state (symmetric soft curve)**. They are the most different, both are cheap, and they exercise the whole design. Add push-pull and hard transistor after |
+| **Q2. Oversampling or ADAA?** | ADAA only; oversampling only; both | **Oversampling first** (robust, easy to test), with the factor chosen by sample rate as above. Add ADAA later only to lower the factor, or on the hard-clip flavour where oversampling alone is weaker |
+| **Q3. Where in the chain?** | After EQ, before loudness and volume; or after loudness | **After EQ, before loudness and volume**, so drive does not depend on how loud you play |
+| **Q4. Latency** | Linear-phase filters; minimum-phase filters | Linear phase (it is what the prototype measured). The delay is a few milliseconds at 44.1 kHz, so compensate it in the playhead, or accept it. Revisit only if it shows up |
+| **Q5. Gain match** | Automatic; manual | **Automatic gain match by default** so an A/B is fair, with an Output trim |
+| **Q6. libmksim / RT-WDF** | Depend; reference; ignore | **Ignore as dependencies.** Read libmksim for ideas if useful. Build our own table-based triode and a simple stage |
+| **Triode model source** | Koren's set (mu 100, Ex 1.4, Kg1 1060, Kp 600, Kvb 300); the other circulating fit | Use Koren's page as the primary source and check the curve against the RCA/Philips datasheet plate curves before trusting it |
+| **Higher fidelity later** | WDF for one flavour; neural model | Only if listening tests say the table version is not enough |
+
+### 10.6 What is still open after Phase 0
+
+- Published harmonic measurements to replace the provisional targets (10.2).
+- Whether the table-based triode sounds right by ear; the prototype only
+  measures it.
+- Transformer and sag models (Phase 3) were researched but not prototyped.
+- A quick check of the prototype's triode curve against a datasheet
+  (the Koren model gave about 0.94 mA at a grid bias of −2 V and 250 V plate
+  for a 12AX7, which is plausible but not verified).
