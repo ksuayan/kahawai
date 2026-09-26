@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { Disc3, ListMusic, ListOrdered, MicVocal, Moon, Search, Settings, Sun } from "lucide-vue-next";
+import { Disc3, Info, ListMusic, ListOrdered, MicVocal, Moon, Search, Settings, Sun } from "lucide-vue-next";
 import { useNavStore, type NavState } from "../stores/nav";
+import { useOverlaysStore } from "../stores/overlays";
 import { useQueueStore } from "../stores/queue";
 import { useThemeStore } from "../stores/theme";
 import UiButton from "../ui/UiButton.vue";
@@ -9,6 +10,7 @@ import UiButton from "../ui/UiButton.vue";
 const nav = useNavStore();
 const queue = useQueueStore();
 const theme = useThemeStore();
+const overlays = useOverlaysStore();
 
 const items: { name: NavState["name"]; label: string; key: string; icon: Component }[] = [
   { name: "albums", label: "Albums", key: "1", icon: Disc3 },
@@ -72,6 +74,16 @@ const active = computed(() => {
       >
         <Sun v-if="theme.theme === 'dark'" />
         <Moon v-else />
+      </UiButton>
+      <UiButton
+        variant="icon"
+        size="md"
+        title="About Kahawai Player"
+        aria-label="About Kahawai Player"
+        data-testid="about-button"
+        @click="overlays.openAbout()"
+      >
+        <Info />
       </UiButton>
     </div>
   </aside>

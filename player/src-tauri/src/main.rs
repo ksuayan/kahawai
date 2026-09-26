@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod menu;
+
 use kahawai_core::{StreamFormat, Track};
 use kahawai_player_api::Client as ApiClient;
 use kahawai_player_audio::{
@@ -595,7 +597,11 @@ fn main() {
         .register_asynchronous_uri_scheme_protocol("artwork", |ctx, request, responder| {
             serve_artwork(ctx.app_handle().clone(), request, responder);
         })
+        .on_menu_event(menu::on_menu_event)
         .setup(|app| {
+            // macOS menu bar with a custom About item (the UI shows about.md).
+            #[cfg(target_os = "macos")]
+            app.set_menu(menu::build_app_menu(app.handle())?)?;
             // Persisted engine settings (server URL) live in the app config
             // dir; fall back to a temp file if the dir is unavailable.
             let settings_path = app

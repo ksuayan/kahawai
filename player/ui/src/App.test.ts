@@ -6,6 +6,7 @@ import { tauri } from "./test/tauri-mock";
 import { useNavStore } from "./stores/nav";
 import { useAbxStore } from "./stores/abx";
 import { useAnalogStore } from "./stores/analog";
+import { useOverlaysStore } from "./stores/overlays";
 import { useQueueStore } from "./stores/queue";
 import { useToastsStore } from "./stores/toasts";
 import { usePlayerStore } from "./stores/player";
@@ -283,5 +284,30 @@ describe("App: blind test keys", () => {
     expect(toasts.toasts.at(-1)?.title).toBe("Blind test: hearing B");
     expect(toasts.toasts.some((t) => t.title.startsWith("Analog warmth"))).toBe(false);
     expect(JSON.stringify(toasts.toasts)).not.toMatch(/300B|12AX7/);
+  });
+});
+
+describe("App: About", () => {
+  it("opens when the native menu's About item is chosen, and renders the page", async () => {
+    tauriApp();
+    online();
+    await bootApp();
+    expect(document.body.querySelector('[data-testid="about-dialog"]')).toBeNull();
+    tauri.emit("menu-action", "some.other.item"); // ignored
+    await settle();
+    expect(useOverlaysStore().aboutOpen).toBe(false);
+    tauri.emit("menu-action", "app.about");
+    await settle();
+    expect(useOverlaysStore().aboutOpen).toBe(true);
+    expect(document.body.querySelector('[data-testid="about-content"] h1')!.textContent).toBe("Kahawai Player");
+  });
+
+  it("does not listen for menu events outside the Tauri shell", async () => {
+    const before = tauri.listeners.get("menu-action")?.size ?? 0;
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = undefined;
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    mockFetch({});
+    await bootApp();
+    expect(tauri.listeners.get("menu-action")?.size ?? 0).toBe(before);
   });
 });

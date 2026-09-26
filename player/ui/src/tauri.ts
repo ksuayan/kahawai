@@ -217,6 +217,20 @@ export async function dopStatus(): Promise<DopStatus | undefined> {
  * subscription is refused (e.g. missing `core:event` capability), so the
  * caller can fall back to polling instead of silently going stale.
  */
+/**
+ * Native menu selections. The shell owns no behaviour: each item just forwards
+ * its id (for example "app.about") and the UI decides what it does.
+ */
+export async function onMenuAction(cb: (id: string) => void): Promise<UnlistenFn | null> {
+  if (!inTauri()) return null;
+  try {
+    return await listen<string>("menu-action", (event) => cb(event.payload));
+  } catch (err) {
+    console.error("[tauri] could not subscribe to menu-action:", err);
+    return null;
+  }
+}
+
 export async function onPlayerState(cb: (s: PlayerState) => void): Promise<UnlistenFn | null> {
   try {
     return await listen<PlayerState>("player-state", (event) => cb(event.payload));

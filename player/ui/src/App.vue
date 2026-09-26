@@ -16,8 +16,10 @@ import ToastHost from "./components/ToastHost.vue";
 import { useJobsStore } from "./stores/jobs";
 import { useLibraryStore } from "./stores/library";
 import { useNavStore } from "./stores/nav";
+import AboutDialog from "./components/AboutDialog.vue";
 import { useAbxStore } from "./stores/abx";
 import { useAnalogStore } from "./stores/analog";
+import { useOverlaysStore } from "./stores/overlays";
 import { useToastsStore } from "./stores/toasts";
 import { describeAnalog } from "./types";
 import { useDspStore } from "./stores/dsp";
@@ -26,6 +28,7 @@ import { usePlaylistsStore } from "./stores/playlists";
 import { useQueueStore } from "./stores/queue";
 import { useSettingsStore } from "./stores/settings";
 import { handleShortcut } from "./shortcuts";
+import { onMenuAction } from "./tauri";
 
 const nav = useNavStore();
 const settings = useSettingsStore();
@@ -38,18 +41,25 @@ const analog = useAnalogStore();
 const jobs = useJobsStore();
 const toasts = useToastsStore();
 const abx = useAbxStore();
+const overlays = useOverlaysStore();
 
 // Cleanup must be registered synchronously: inside the async onMounted below
 // there is no active component instance left after the first await.
 let stopWatch: (() => void) | undefined;
+let stopMenu: (() => void) | undefined;
 onUnmounted(() => {
   stopWatch?.();
+  stopMenu?.();
   player.dispose();
   window.removeEventListener("keydown", onKeydown);
 });
 
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
+  // Native menu (macOS): the shell forwards item ids; the UI owns what they do.
+  stopMenu = (await onMenuAction((id) => {
+    if (id === "app.about") overlays.openAbout();
+  })) ?? undefined;
   await settings.init(); // get_server_url + persisted playback prefs, then point the REST client at it
   await player.init(); // subscribe to player-state events
   await dsp.init(); // persisted EQ/loudness + device/DoP capability
@@ -131,6 +141,7 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
       </div>
       <NowPlayingBar />
       <ToastHost />
+      <AboutDialog />
     </template>
   </div>
 </template>

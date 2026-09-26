@@ -46,6 +46,28 @@ generally.
 - Underruns in this mode are true silence (a DoP-style silence pattern would
   be a burst of noise on a PCM stream).
 
+## About dialog
+
+**About Kahawai Player** (the `i` button in the sidebar, or the app menu's *About
+Kahawai Player* on macOS) shows the bundled Markdown, the same way Koa's About
+does:
+
+- [`about.md`](ui/src/content/about.md) is written by hand: what the player is, what it
+  does, how audio reaches your ears, privacy, copyright and trademarks, fonts, models
+  and standards. `{{version}}` is replaced with the Tauri bundle version
+  (`tauri.conf.json`, injected by `vite.config.ts`).
+- [`notices.md`](ui/src/content/notices.md) is **generated**: run
+  `python3 scripts/gen-notices.py` after changing dependencies. It reads the bundled
+  fonts' own license files, the UI's direct npm dependencies and the direct Rust
+  dependencies of the player (from `cargo metadata`), and calls out weak-copyleft
+  components (currently Symphonia, MPL-2.0).
+- Rendered by [`lib/about.ts`](ui/src/lib/about.ts) with `marked`. Links are shown as text
+  with their address (the window has no permission to open external addresses), and raw
+  HTML in the source is escaped.
+- The native menu ([`menu.rs`](src-tauri/src/menu.rs)) owns no behaviour: the About item
+  forwards its id in a `menu-action` event and the UI opens the dialog. The menu also
+  restores the standard Edit and Window items a Mac app needs.
+
 ## UI stack and tests (`player/ui`)
 
 Vue 3 + Pinia + strict TypeScript, styled with **Tailwind CSS v4** (design

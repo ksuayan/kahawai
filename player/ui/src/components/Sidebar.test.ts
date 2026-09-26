@@ -5,7 +5,7 @@ import { useNavStore } from "../stores/nav";
 import { useQueueStore } from "../stores/queue";
 import Sidebar from "./Sidebar.vue";
 
-const labels = (w: ReturnType<typeof mountApp>["wrapper"]) => w.findAll("button").filter((b) => b.attributes("data-testid") !== "theme-toggle").map((b) => b.text().replace(/\s+\d+$/, ""));
+const labels = (w: ReturnType<typeof mountApp>["wrapper"]) => w.findAll("button").filter((b) => !["theme-toggle", "about-button"].includes(b.attributes("data-testid") ?? "")).map((b) => b.text().replace(/\s+\d+$/, ""));
 
 describe("Sidebar", () => {
   it("lists the library sections and Settings", () => {
