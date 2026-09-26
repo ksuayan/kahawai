@@ -1,0 +1,9 @@
+   44100 Hz  existing 8-band EQ                    2.11 ms per 1 s of stereo audio ->   0.2% of one core
+   44100 Hz  analog: warm triode                  34.00 ms per 1 s of stereo audio ->   3.4% of one core
+   44100 Hz  analog: solid state                  33.38 ms per 1 s of stereo audio ->   3.3% of one core
+   96000 Hz  existing 8-band EQ                    4.18 ms per 1 s of stereo audio ->   0.4% of one core
+   96000 Hz  analog: warm triode                  38.13 ms per 1 s of stereo audio ->   3.8% of one core
+   96000 Hz  analog: solid state                  37.67 ms per 1 s of stereo audio ->   3.8% of one core
+  192000 Hz  existing 8-band EQ                    9.00 ms per 1 s of stereo audio ->   0.9% of one core
+  192000 Hz  analog: warm triode                   9.84 ms per 1 s of stereo audio ->   1.0% of one core
+  192000 Hz  analog: solid state                   8.53 ms per 1 s of stereo audio ->   0.9% of one core

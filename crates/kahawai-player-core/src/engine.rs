@@ -31,7 +31,8 @@ use serde::{Deserialize, Serialize};
 use crate::bitperfect::{f32_to_i24_le, BitPerfect};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
-use crate::dsp::{
+use crate::analog::{AnalogSettings, AnalogStage};
+use crate::dsp::{DspStage, 
     scan_track_lufs, EqBand, GainRamp, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
 };
 use crate::queue::{Queue, RepeatMode};
@@ -192,6 +193,10 @@ pub struct DspSettings {
     pub eq_enabled: bool,
     pub loudness_enabled: bool,
     pub loudness_target: f32,
+    /// Analog character stage (tube / transistor warmth). Older settings
+    /// files have none: it defaults to off.
+    #[serde(default)]
+    pub analog: AnalogSettings,
 }
 
 impl Default for DspSettings {
@@ -201,6 +206,7 @@ impl Default for DspSettings {
             eq_enabled: true,
             loudness_enabled: false,
             loudness_target: DEFAULT_LOUDNESS_TARGET,
+            analog: AnalogSettings::default(),
         }
     }
 }
@@ -436,6 +442,7 @@ pub struct Player {
     empty_streak: u32,
     // -- v1 DSP (PCM only; the DoP path never touches these) --
     eq: ParametricEq,
+    analog: AnalogStage,
     loudness: LoudnessNorm,
     /// Click-free gain transitions between tracks with different
     /// loudness gains (~50 ms linear ramp).
@@ -464,6 +471,7 @@ impl Player {
             resume_at_ms: None,
             empty_streak: 0,
             eq: ParametricEq::new(44100),
+            analog: AnalogStage::new(44100),
             loudness: LoudnessNorm::new(DEFAULT_LOUDNESS_TARGET),
             gain_ramp: GainRamp::new(2205),
             output_path: OutputPath::Pcm,
@@ -760,6 +768,12 @@ impl Player {
         self.eq.set_enabled(enabled);
     }
 
+    /// Analog character stage (PCM shared path only; DoP and bit-perfect
+    /// never call it).
+    pub fn set_analog(&mut self, settings: AnalogSettings) {
+        self.analog.set_settings(settings);
+    }
+
     pub fn set_loudness_enabled(&mut self, enabled: bool) {
         self.loudness.set_enabled(enabled);
     }
@@ -775,6 +789,7 @@ impl Player {
             eq_enabled: self.eq.enabled(),
             loudness_enabled: self.loudness.enabled(),
             loudness_target: self.loudness.target(),
+            analog: self.analog.settings(),
         }
     }
 
@@ -1073,6 +1088,7 @@ impl Player {
         // The EQ runs on what the sink receives (after any resampling), so
         // it is designed at the sink rate, not the file's.
         self.eq.set_sample_rate(sink_rate);
+        self.analog.prepare(sink_rate);
 
         // The playhead starts at the seek target for *both* seek styles.
         // (Passthrough skips decoded frames without counting them as
@@ -1211,6 +1227,7 @@ impl Player {
         // v1 DSP chain, fixed order: EQ -> loudness gain (ramped) -> volume.
         let mut chunk: Vec<f32> = out.to_vec();
         self.eq.process(&mut chunk, channels);
+        self.analog.process(&mut chunk, channels);
         self.gain_ramp.apply(&mut chunk);
         let vol = self.volume;
         if vol < 0.999 {
@@ -1447,6 +1464,7 @@ pub enum EngineCommand {
     SetEqBands(Vec<EqBand>),
     /// PCM only.
     SetEqEnabled(bool),
+    SetAnalog(AnalogSettings),
     /// Target integrated loudness in LUFS (e.g. -14.0). PCM only.
     SetLoudnessTarget(f32),
     /// PCM only; enables the pre-scan (one extra stream per first-play).
@@ -1570,6 +1588,7 @@ impl EngineController {
         let dsp = &settings.dsp;
         ctrl.send(EngineCommand::SetEqBands(dsp.eq_bands.clone()));
         ctrl.send(EngineCommand::SetEqEnabled(dsp.eq_enabled));
+        ctrl.send(EngineCommand::SetAnalog(dsp.analog));
         ctrl.send(EngineCommand::SetLoudnessTarget(dsp.loudness_target));
         ctrl.send(EngineCommand::SetLoudnessEnabled(dsp.loudness_enabled));
         // Playback preferences (persisted; default preserves pre-C3 behavior).
@@ -1767,6 +1786,13 @@ impl EngineController {
         self.update_dsp_settings(|dsp| dsp.eq_enabled = enabled);
         self.send(EngineCommand::SetEqEnabled(enabled));
     }
+    /// Analog character (tube / transistor warmth). Values are clamped to
+    /// their ranges; the result is saved and applied live.
+    pub fn set_analog(&self, settings: AnalogSettings) {
+        let settings = settings.clamped();
+        self.update_dsp_settings(|dsp| dsp.analog = settings);
+        self.send(EngineCommand::SetAnalog(settings));
+    }
 
     /// Persisted.
     pub fn set_loudness_target(&self, lufs: f32) {
@@ -1947,6 +1973,7 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
             }
         }
         EngineCommand::SetEqEnabled(b) => player.set_eq_enabled(b),
+        EngineCommand::SetAnalog(a) => player.set_analog(a),
         EngineCommand::SetLoudnessTarget(t) => player.set_loudness_target(t),
         EngineCommand::SetLoudnessEnabled(b) => player.set_loudness_enabled(b),
         EngineCommand::SetServerUrl(_) => {

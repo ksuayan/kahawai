@@ -6,6 +6,7 @@
 //! platform audio (cpal/rodio on desktop, AudioTrack/AVAudioPlayer on mobile)
 //! lives behind the [`AudioSink`] trait, implemented by each shell.
 
+pub mod analog;
 pub mod artwork;
 pub mod bitperfect;
 pub mod decode;
@@ -17,12 +18,13 @@ pub mod resample;
 pub mod sink;
 pub mod transport;
 
+pub use analog::{oversample_factor, AnalogFlavour, AnalogSettings, AnalogStage};
 pub use artwork::{fetch_from_server as fetch_artwork, ArtworkCache, CachedArt};
 pub use bitperfect::{f32_to_i24_le, BitPerfect};
 pub use decode::{DecodedSpec, StreamDecoder};
 pub use dop::{dop_pcm_rate, parse_wav_header, DopSpec, DopStream, DOP_BITS_PER_SAMPLE};
 pub use dsp::{
-    integrated_lufs, scan_track_lufs, usable_freq, validate_bands, EqBand, EqBandType, GainRamp, LoudnessNorm,
+    integrated_lufs, DspStage, scan_track_lufs, usable_freq, validate_bands, EqBand, EqBandType, GainRamp, LoudnessNorm,
     ParametricEq, DEFAULT_LOUDNESS_TARGET, MAX_EQ_BANDS, MAX_LOUDNESS_GAIN_DB,
     MIN_LOUDNESS_GAIN_DB, NYQUIST_FRACTION,
 };

@@ -20,7 +20,7 @@ use kahawai_player_audio::{
     CpalSink, SinkRouter,
 };
 use kahawai_player_core::{
-    fetch_artwork, validate_bands, ArtworkCache, BitPerfect, DsdStory, DspSettings,
+    fetch_artwork, validate_bands, AnalogSettings, ArtworkCache, BitPerfect, DsdStory, DspSettings,
     EngineController, EqBand, OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, RepeatMode,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -494,6 +494,14 @@ fn set_eq_bands(
     Ok(())
 }
 
+/// Analog character (tube / transistor warmth). Values are clamped by the
+/// engine, which saves them and applies them live. PCM shared path only.
+#[tauri::command]
+fn set_analog(app: AppHandle, state: State<'_, AppState>, settings: AnalogSettings) {
+    state.engine.set_analog(settings);
+    emit_state(&app, &state.engine);
+}
+
 #[tauri::command]
 fn set_eq_enabled(app: AppHandle, state: State<'_, AppState>, enabled: bool) {
     state.engine.set_eq_enabled(enabled);
@@ -663,6 +671,7 @@ fn main() {
             set_output_device,
             set_eq_bands,
             set_eq_enabled,
+            set_analog,
             set_loudness_target,
             set_loudness_enabled,
             get_dsp_settings,

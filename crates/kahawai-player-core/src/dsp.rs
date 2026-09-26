@@ -182,6 +182,40 @@ fn design_band(band: &EqBand, sample_rate: u32) -> Biquad {
     }
 }
 
+/// One stage of the PCM chain (EQ, analog character, later others). All
+/// stages work in place on interleaved f32 and are bit-transparent when off.
+pub trait DspStage: Send {
+    /// The sample rate the audio has when it reaches this stage.
+    fn prepare(&mut self, sample_rate: u32);
+    /// Process interleaved samples in place.
+    fn process(&mut self, interleaved: &mut [f32], channels: usize);
+    /// Delay the stage adds to the signal, in frames.
+    fn latency_frames(&self) -> u32 {
+        0
+    }
+    /// Forget history (a new track, a seek).
+    fn reset(&mut self);
+}
+
+impl DspStage for ParametricEq {
+    fn prepare(&mut self, sample_rate: u32) {
+        self.set_sample_rate(sample_rate);
+    }
+    fn process(&mut self, interleaved: &mut [f32], channels: usize) {
+        ParametricEq::process(self, interleaved, channels);
+    }
+    fn reset(&mut self) {
+        let rate = self.sample_rate;
+        let bands = self.bands.clone();
+        self.slots.clear();
+        self.primed = false;
+        self.mix = if self.enabled { 1.0 } else { 0.0 };
+        let designed = self.design_all(&bands);
+        self.slots = designed.into_iter().map(Slot::snapped).collect();
+        self.sample_rate = rate;
+    }
+}
+
 /// How long a live change (bands, on/off) takes to fade in, in seconds.
 /// Long enough to be free of clicks, short enough to feel immediate.
 const EQ_RAMP_SECONDS: f32 = 0.015;

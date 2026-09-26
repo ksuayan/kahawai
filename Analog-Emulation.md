@@ -1,8 +1,8 @@
 # Analog emulation: tube and transistor "euphonics"
 
 Research summary and an itemized plan for adding tube and transistor
-character to the PCM playback chain. Branch: `analog-poc`. Status: **Phase 0 (research and a throw-away prototype) done;
-nothing is in the player yet.** Findings are in section 10.
+character to the PCM playback chain. Branch: `analog-poc`. Status: **Phase 0 (research) and Phase 1 (working stage in the engine,
+no UI yet) done.** Findings are in section 10, Phase 1 results in section 11.
 
 Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md)
 (DSP effects section), [EQ.md](EQ.md) (pipeline and the `DspStage` idea).
@@ -199,16 +199,16 @@ with something we can listen to and a green test suite.
 | 0.4 | Measure the CPU budget | **Done** for a prototype (section 10.4) |
 | 0.5 | Decide the open questions in section 7 | **Waiting on you.** Recommendations are in section 10.5 |
 
-### Phase 1: the seam and a working static stage (M to L)
+### Phase 1: the seam and a working static stage (M to L) *(done, see section 11)*
 
-| # | Item | Notes / acceptance |
+| # | Item | Status |
 |---|---|---|
-| 1.1 | Extract the `DspStage` trait; make `ParametricEq` implement it | No behaviour change; all existing tests pass |
-| 1.2 | `AnalogStage`: input gain, asymmetric waveshaper (tanh-family with a bias term), dry/wet mix, auto gain match | Bypass is bit-transparent when off or mix is 0 |
-| 1.3 | Oversampling wrapper: polyphase half-band FIR, 2x and 4x, built once and reused | Aliasing test (6.2) passes |
-| 1.4 | Fade-in/out on parameter change and on/off (reuse the EQ's approach) | No click test passes |
-| 1.5 | Wire into `pump_pcm` after the EQ; PCM shared path only; DoP and bit-perfect bypass | Engine test mirrors `dop_bypasses_dsp_entirely` |
-| 1.6 | Engine command, snapshot fields and settings persistence (`engine-settings.json`) | Round-trip test |
+| 1.1 | Extract the `DspStage` trait; make `ParametricEq` implement it | Done |
+| 1.2 | `AnalogStage`: input gain, asymmetric waveshaper, dry/wet mix, auto gain match | Done (two flavours) |
+| 1.3 | Oversampling wrapper, 2x and 4x, built once and reused | Done (Kaiser FIR, streaming) |
+| 1.4 | Fade-in/out on parameter change and on/off | Done, including flavour changes |
+| 1.5 | Wire into `pump_pcm` after the EQ; PCM shared path only; DoP and bit-perfect bypass | Done |
+| 1.6 | Engine command, settings persistence | Done (no UI, no snapshot field) |
 
 ### Phase 2: derive curves from tube models (M)
 
@@ -455,3 +455,125 @@ fix.
 - A quick check of the prototype's triode curve against a datasheet
   (the Koren model gave about 0.94 mA at a grid bias of −2 V and 250 V plate
   for a 12AX7, which is plausible but not verified).
+
+---
+
+## 11. Phase 1 results
+
+Code: [analog.rs](crates/kahawai-player-core/src/analog.rs) (the stage),
+the `DspStage` trait in [dsp.rs](crates/kahawai-player-core/src/dsp.rs),
+and the wiring in [engine.rs](crates/kahawai-player-core/src/engine.rs).
+Tauri command: `set_analog`. **There is no UI yet (that is Phase 4).**
+
+### 11.1 What exists
+
+- **`DspStage` trait** (`prepare(sample_rate)`, `process(interleaved, channels)`,
+  `latency_frames()`, `reset()`), implemented by both the EQ and the analog
+  stage. The plan's sketch had `prepare(rate, channels)` and a `process`
+  without a channel count; the built version follows the EQ's existing
+  `process(samples, channels)` shape so nothing else had to change.
+- **`AnalogStage`**, with these settings (all clamped, saved in
+  `engine-settings.json` under `dsp.analog`, off by default; older settings
+  files load fine):
+
+| Setting | Meaning | Range / default |
+|---|---|---|
+| `enabled` | Stage on or off | off |
+| `flavour` | `warm_triode` (asymmetric, even harmonics) or `solid_state` (symmetric, odd harmonics) | warm_triode |
+| `drive` | How hard the signal is pushed into the curve | 0 to 1, default 0.4 |
+| `mix` | Parallel blend of the processed signal | 0 to 1, default 0.4 |
+| `output_db` | Output trim | plus or minus 6 dB, default 0 |
+| `auto_gain` | Match the processed level to the dry level (at a −12 dBFS RMS reference sine) | on |
+
+- **Oversampling by sample rate:** 4x up to 50 kHz, 2x up to 100 kHz, none
+  above (`oversample_factor`), as recommended in section 10.5.
+- **Latency:** while oversampling is active (up to 100 kHz) the FIR delays
+  the signal 32 frames: 0.73 ms at 44.1 kHz, 0.67 ms at 48 kHz, 0.33 ms at
+  96 kHz; none above 100 kHz. The dry path is delayed by the same amount so
+  the mix is time-aligned. The delay is **not** yet compensated in the
+  playhead (under a millisecond); `latency_frames()` reports it for later.
+- **Live changes:** drive, mix, output and gain match glide over about 15 ms;
+  on/off cross-fades; a flavour change fades out, swaps the curve, and fades
+  back in, so nothing clicks. Fully off, the stage is bit-transparent.
+- **Bypass rules:** it runs only on the shared PCM path, after the EQ and
+  before loudness and volume. DoP and bit-perfect never call it (the two
+  existing bit-identical tests now switch the stage on, hostile settings
+  included, and still pass).
+
+### 11.2 How the curves behave
+
+- **Warm triode** is an asymmetric tanh, `tanh(g x + bias) − tanh(bias)`,
+  scaled to unity small-signal gain, with the bias growing with the square
+  root of drive. At zero drive it is linear and clean; even a little drive is
+  lopsided. A DC blocker (10 Hz) removes the offset the asymmetry creates.
+  At moderate drive the 2nd harmonic sits about 24 dB above the 3rd
+  (drive 0.4, input level 0.2: 2nd −21 dB, 3rd −45 dB relative to the tone).
+- **Solid state** is a symmetric `tanh(g x) / g`: no even harmonics (better
+  than −70 dB in the test), a soft odd-harmonic edge that grows with level.
+- **Warm triode is still an approximation.** A first attempt with a fixed
+  bias of 0.4 lost the even-harmonic dominance as soon as it was driven
+  (2nd about equal to 3rd), which is why the bias now scales with drive.
+  Phase 2 replaces this curve with the one derived from the Koren tube
+  model.
+
+### 11.3 Tests (all pass)
+
+The stage's tests are in `analog.rs`, plus two engine tests:
+
+- bit-transparent when off, and again after fading out;
+- warm triode: 2nd harmonic well above the 3rd; solid state: no 2nd, audible
+  3rd;
+- harmonics grow with level and drive, and a quiet signal at zero drive stays
+  clean;
+- aliasing stays below the audible threshold: better than −60 dB at 44.1 and
+  48 kHz and better than −75 dB at 96 kHz, on the hard test tone that aliased
+  at −14 dB without protection;
+- dry and wet are time-aligned (a linear-regime tone comes out as the input
+  delayed by exactly the reported latency);
+- auto gain keeps the processed level within 1 dB of the dry level, for both
+  flavours at low and full drive;
+- live parameter changes and flavour changes do not click (the tests fail if
+  the fade is removed; I checked by shortening it);
+- settings are clamped, and missing fields take defaults;
+- engine: the stage colours PCM output, is off by default, and persists;
+  DoP and bit-perfect bytes are identical with it on.
+
+### 11.4 CPU (real stage, release build, one second of stereo audio)
+
+| Sample rate | Existing 8-band EQ | Warm triode | Solid state |
+|---|---|---|---|
+| 44.1 kHz (4x) | 0.2% | 3.4% | 3.3% |
+| 96 kHz (2x) | 0.4% | 3.8% | 3.8% |
+| 192 kHz (none) | 0.9% | 1.0% | 0.9% |
+
+Measured by [phase1_cost.rs](research/analog-spike/src/bin/phase1_cost.rs)
+(output in [PHASE1_COST.txt](research/analog-spike/PHASE1_COST.txt)).
+Plenty of room. The FIR is a straightforward implementation; there is
+obvious headroom for optimisation if it is ever needed.
+
+### 11.5 How to try it now (no UI yet)
+
+Quit the app, edit `engine-settings.json` in the app's data folder
+(`~/Library/Application Support/com.suayan.kahawai-player/` on macOS), and
+add this inside the `"dsp"` object:
+
+```json
+"analog": { "enabled": true, "flavour": "warm_triode", "drive": 0.5, "mix": 0.5,
+            "output_db": 0.0, "auto_gain": true }
+```
+
+Start the app and play something on the normal (shared) output. Use
+`"solid_state"` for the other flavour. It will not apply on DoP or
+bit-perfect output.
+
+### 11.6 Known limits and what is next
+
+- No UI, so no live A/B in the app yet (Phase 4).
+- The warm-triode curve is a placeholder for the Koren-derived one (Phase 2).
+- No ADAA yet (Phase 2), and no sag or transformer colour (Phase 3).
+- No clip protection: with the output trim up or hot material and high
+  drive, the result can exceed 0 dBFS. The gain-match reference is a
+  −12 dBFS RMS sine, so loud music will not be perfectly level-matched.
+- Switching the stage on from bypass shifts the un-delayed input to a
+  32-frame delayed path during the 15 ms fade; that is inaudible in
+  practice but is a small comb-filter moment.
