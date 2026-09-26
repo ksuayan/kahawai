@@ -1,7 +1,7 @@
 # Analog emulation: tube and transistor "euphonics"
 
 Research summary and an itemized plan for adding tube and transistor
-character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 3 done, plus ten flavours (section 15)** (research, a working stage in the engine,
+character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 3 done, plus 21 flavours (sections 15 and 16)** (research, a working stage in the engine,
 the triode curve derived from Koren's model, and antiderivative
 antialiasing), sag and transformer colour (section 14), plus **an A/B test panel in
 Settings** (section 13). Findings: section 10; Phase 1 results: 11;
@@ -999,3 +999,90 @@ Harmonics relative to the tone, at an input level of 0.1 / 0.3 / 0.6:
 - **Names:** the menu uses the tubes' type numbers (and their common European
   equivalents) as descriptions of a modelled stage, not as endorsements or
   claims about specific brands.
+
+---
+
+## 16. Eleven more flavours (21 in total)
+
+Seven more tubes and pentode pairs, three solid-state characters, and one
+utility. Menu order: small-signal tubes, power triodes, the pentode,
+push-pull, solid state, then the utility. Code:
+[analog.rs](crates/kahawai-player-core/src/analog.rs); menu text and typical
+Sag/Transformer in [types.ts](player/ui/src/types.ts).
+
+### 16.1 New tubes (Koren's library fits)
+
+| Flavour | Tube fit (library note) | mu | Ex | Kg1 | Kp | Kvb | Vct / screen | Operating point (code) |
+|---|---|---|---|---|---|---|---|---|
+| 12AX7A (Sylvania) | Sylvania technical manual, 1955 | 105.78 | 1.474 | 1618.2 | 432.76 | 35.6 | Vct 0.5 | 300 V / 100 kΩ, bias −0.8 V, plate 150 V |
+| 12AY7 | GE databook, 1955 | 44.16 | 1.113 | 1192.4 | 409.96 | 300 | Vct 0 | 300 V / 100 kΩ, bias −2.5 V, plate 150 V |
+| 6SL7GT | GE | 75.89 | 1.233 | 1735.2 | 1725.27 | 7.0 | Vct 0.5 | 300 V / 100 kΩ, bias −1.2 V, plate 150 V |
+| EL84 (single-ended) | Mullard | 21.29 | 1.240 | 401.7 | 111.04 | 17.9 | screen 250 V | 250 V, 48 mA, 5.2 kΩ AC, bias −7.6 V |
+| EL34 pair (class AB) | Mullard data book, 1962 | 12.02 | 1.169 | 353.9 | 61.11 | 29.9 | screen 400 V | 400 V, 35 mA idle each, 1.65 kΩ, bias −35.9 V |
+| 6L6GC pair (class AB) | GE data sheet | 9.88 | 1.442 | 1686.6 | 30.98 | 19.4 | screen 400 V | 400 V, 35 mA idle, 1 kΩ, bias −42.9 V |
+| KT88 pair (class AB) | M-O Valve | 12.38 | 1.246 | 340.4 | 26.48 | 36.5 | screen 400 V | 450 V, 50 mA idle, 1 kΩ, bias −50.1 V |
+
+Parameters are the lines in the same library file as section 15. The three
+pentode and beam-tetrode fits use the library's "PENTODE1" model:
+`E1 = Vg2/Kp · ln(1 + exp(Kp (1/mu + Vg1/Vg2)))`,
+`Ip = 2 · E1^Ex / Kg1 · atan(Vp / Kvb)`, with the screen held at a fixed
+voltage and its current ignored.
+
+- **EL84 cross-check:** for the published single-ended class-A operating point
+  (250 V, screen 250 V, 48 mA) the model's bias is −7.6 V against the
+  published −7.3 V; a test holds it within 1 V. The other pentode operating
+  points are typical values and have no such check.
+- **Class AB:** the pair is two of the same tube on opposite half-cycles,
+  biased near cutoff at the stated idle current, and the output is the
+  *difference of the two plate currents*. Where the two tubes hand over there
+  is a crossover region, so the 3rd harmonic is already present at low level.
+  A 2% mismatch between the tubes leaves a little even harmonic.
+
+### 16.2 Solid state and utility
+
+| Flavour | What it is |
+|---|---|
+| JFET | Square-law transfer `Id = Idss (1 − Vgs/Vp)²`, biased at half pinch-off, cut off on one side and clipped by gate conduction on the other. Nearly pure 2nd harmonic |
+| Silicon diode clipper | Antiparallel diode pair: `asinh(3u)/3`, a symmetric logarithmic soft clip |
+| Germanium diode clipper | A germanium diode against a silicon one: `asinh(6u)/6` on the positive half, `asinh(3u)/3` on the negative: lopsided |
+| Transformer and sag only | A linear curve: no tube or transistor colour, only the supply sag and the transformer's bass saturation |
+
+The JFET, diode and iron curves are simple closed forms, not fits to
+particular devices.
+
+### 16.3 Harmonics (drive 40%, sag and transformer 0, 1 kHz; input 0.1 / 0.3 / 0.6)
+
+| Flavour | 2nd (dB) | 3rd (dB) | Note |
+|---|---|---|---|
+| 12AX7A (Sylvania) | −45 / −36 / −37 | −79 / −59 / −28 | cleaner than the original 12AX7 fit |
+| 12AY7 | −44 / −35 / −41 | −72 / −52 / −26 | |
+| 6SL7GT | −57 / −48 / −29 | −93 / −74 / −29 | very clean, then abrupt |
+| EL84 (SE class A) | −33 / −40 / −32 | −44 / −22 / −14 | both kinds; the 3rd dominates at 0.3 |
+| EL34 pair | −54 / −49 / −53 | −40 / −37 / −14 | crossover 3rd from low level |
+| 6L6GC pair | −57 / −49 / −49 | −42 / −27 / −26 | |
+| KT88 pair | −56 / −48 / −50 | −37 / −24 / −19 | |
+| JFET | −26 / −16 / −12 | −158 / −99 / −23 | square law: 3rd absent until it clips |
+| Silicon diodes | none | −37 / −24 / −19 | symmetric |
+| Germanium diodes | −30 / −23 / −22 | −31 / −21 / −18 | lopsided: both kinds |
+| Transformer and sag only | none | none (−157) | linear |
+
+(The push-pull pentode rows include the 2% tube mismatch, which leaves the small 2nd harmonic; a perfectly matched pair would show none.)
+
+### 16.4 Aliasing and cost
+
+With the automatic plan on the hard test tone: every flavour is below −60 dB
+at 44.1 kHz and 192 kHz in the tests; measured across all of them, the worst
+are the class-AB pentode pairs (about −63 dB at 44.1 kHz, −68 dB at 96 and
+192 kHz) because their curves have steeper corners; the rest are −67 to −125
+dB. CPU is the same as any table flavour (the curve is a lookup); the pentode
+tables take about the same 20 ms to build on first use (per flavour).
+
+### 16.5 Caveats
+
+- Same as section 15.5: static curves, typical (not real) stages, datasheet
+  fits used outside their fitting region, nothing listened to.
+- The pentode and class-AB stages ignore the screen grid current, the screen
+  supply sag, the output transformer's real reflected load, and negative
+  feedback. Real amplifiers differ, often a lot; these are characters, not
+  amplifier simulations.
+- The JFET, diode and iron flavours are idealised.

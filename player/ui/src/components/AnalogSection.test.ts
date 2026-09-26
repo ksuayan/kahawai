@@ -4,6 +4,7 @@ import { $$, mountApp, openSelect, options, pick, settle } from "../test/helpers
 import { tauri } from "../test/tauri-mock";
 import { useAnalogStore } from "../stores/analog";
 import { usePlayerStore } from "../stores/player";
+import { ANALOG_FLAVOURS, FLAVOUR_INFO } from "../types";
 import AnalogSection from "./AnalogSection.vue";
 
 async function boot(state = makeState({ status: "playing", output_path: "pcm-shared" })) {
@@ -56,12 +57,9 @@ describe("Analog warmth settings", () => {
   it("offers both flavours and every anti-aliasing plan", async () => {
     await boot();
     await openSelect(document.body.querySelector('[aria-label="Flavour B"]') as HTMLElement);
-    expect(options().map((o) => o.textContent?.trim())).toEqual([
-      "12AX7 · high-mu preamp triode", "12AT7 (ECC81) · medium-high mu", "12AU7 (ECC82) · low mu, clean", "6SN7 · low-mu octal triode",
-      "6DJ8 (ECC88) · low-noise triode", "300B · single-ended power triode", "2A3 · single-ended power triode",
-      "Push-pull tubes (2A3 pair)", "Solid state · soft clip", "Hard transistor · near-hard clip",
-    ]);
-    pick(options()[5]); // 300B
+    expect(options()).toHaveLength(21);
+    expect(options().map((o) => o.textContent?.trim())).toEqual(ANALOG_FLAVOURS.map((f) => FLAVOUR_INFO[f].label));
+    pick(options()[8]); // 300B
     await settle();
     expect(useAnalogStore().b).toMatchObject({ flavour: "tube_300b", sag: 0.4, transformer: 0.5 });
     await openSelect(document.body.querySelector('[aria-label="Anti-aliasing B"]') as HTMLElement);

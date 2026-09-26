@@ -79,8 +79,9 @@ describe("analog A/B store", () => {
 });
 
 describe("analog flavours", () => {
-  it("has ten flavours, each with a label, a blurb and typical sag/transformer", () => {
-    expect(ANALOG_FLAVOURS).toHaveLength(10);
+  it("has 21 flavours, each with a label, a blurb and typical sag/transformer", () => {
+    expect(ANALOG_FLAVOURS).toHaveLength(21);
+    expect(new Set(ANALOG_FLAVOURS).size).toBe(21);
     for (const f of ANALOG_FLAVOURS) {
       const i = FLAVOUR_INFO[f];
       expect(i.label && i.short && i.blurb).toBeTruthy();
@@ -107,5 +108,16 @@ describe("analog flavours", () => {
 
   it("falls back to the 12AX7 for an unknown flavour in saved settings", () => {
     expect(clampAnalog({ ...DEFAULT_ANALOG_SETTINGS, flavour: "tube_9999" as never }).flavour).toBe("warm_triode");
+  });
+});
+
+describe("flavour list stays in step with the Rust core", () => {
+  it("has exactly the flavours the core's round-trip test names", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const rust = readFileSync(join(__dirname, "../../../../crates/kahawai-player-core/src/analog.rs"), "utf8");
+    const names = [...rust.matchAll(/\(AnalogFlavour::\w+, "([a-z0-9_]+)"\)/g)].map((m) => m[1]);
+    expect(names.length).toBeGreaterThan(0);
+    expect([...ANALOG_FLAVOURS].sort()).toEqual([...names].sort());
   });
 });

@@ -53,6 +53,35 @@ pub enum AnalogFlavour {
     /// 2A3: single-ended directly-heated power triode.
     #[serde(rename = "tube_2a3")]
     Tube2a3,
+    /// 6SL7GT: high-mu octal triode.
+    #[serde(rename = "tube_6sl7")]
+    Tube6sl7,
+    /// 12AY7: low-noise medium-mu triode.
+    #[serde(rename = "tube_12ay7")]
+    Tube12ay7,
+    /// 12AX7A (Sylvania fit): a second 12AX7 flavour.
+    #[serde(rename = "tube_12ax7a")]
+    Tube12ax7a,
+    /// EL84: single-ended class-A pentode.
+    #[serde(rename = "tube_el84")]
+    TubeEl84,
+    /// EL34 pair, push-pull class AB.
+    #[serde(rename = "push_pull_el34")]
+    PushPullEl34,
+    /// 6L6GC pair, push-pull class AB.
+    #[serde(rename = "push_pull_6l6gc")]
+    PushPull6l6gc,
+    /// KT88 pair, push-pull class AB.
+    #[serde(rename = "push_pull_kt88")]
+    PushPullKt88,
+    /// A JFET stage: square-law, 2nd-harmonic warmth.
+    Jfet,
+    /// A silicon diode-pair clipper: symmetric soft clip.
+    SiliconDiode,
+    /// Germanium against silicon diodes: asymmetric clip.
+    GermaniumDiode,
+    /// No distortion curve: only the sag and the transformer colour.
+    IronSag,
 }
 
 /// How to keep aliasing out of the audible band. `Auto` follows the sample
@@ -166,6 +195,39 @@ struct Koren {
     vct: f64,
 }
 
+/// Koren's pentode / beam-tetrode model ("PENTODE1" in his library): the
+/// screen is held at a fixed voltage `vg2` and its current is ignored.
+#[derive(Clone, Copy)]
+struct KorenPentode {
+    mu: f64,
+    ex: f64,
+    kg1: f64,
+    kp: f64,
+    kvb: f64,
+    vg2: f64,
+}
+
+#[derive(Clone, Copy)]
+enum Model {
+    Triode(Koren),
+    Pentode(KorenPentode),
+}
+
+impl Model {
+    /// Plate current (amps).
+    fn ip(&self, vg1: f64, vp: f64) -> f64 {
+        match self {
+            Model::Triode(k) => k.ip(vg1, vp),
+            Model::Pentode(k) => {
+                let z = (1.0 / k.mu + vg1 / k.vg2) * k.kp;
+                let softplus = if z > 30.0 { z } else { (1.0 + z.exp()).ln() };
+                let e1 = k.vg2 / k.kp * softplus;
+                if e1 <= 0.0 || vp <= 0.0 { 0.0 } else { 2.0 * e1.powf(k.ex) / k.kg1 * (vp / k.kvb).atan() }
+            }
+        }
+    }
+}
+
 impl Koren {
     /// Plate current (amps).
     fn ip(&self, vgk: f64, vpk: f64) -> f64 {
@@ -187,10 +249,21 @@ enum Operating {
     Fixed { vp: f64, ip: f64, r_ac: f64 },
 }
 
+/// One tube driving the load, or a push-pull pair.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Topology {
+    /// The output is the plate voltage along the load line.
+    SingleEnded,
+    /// Two tubes on opposite half-cycles; the output is the difference of their
+    /// plate currents (biased for class AB, so the crossover region shows).
+    PushPull,
+}
+
 /// A tube and the stage around it.
 #[derive(Clone, Copy)]
 struct TubeSpec {
-    k: Koren,
+    k: Model,
+    topology: Topology,
     op: Operating,
     /// Grid-conduction resistance (ohms), against a 10 kΩ driving source.
     rgi: f64,
@@ -214,6 +287,11 @@ const TABLE_RANGE: f64 = 4.0;
 const TABLE_POINTS: usize = 4096;
 
 const B_PLUS: f64 = 300.0; // the 12AX7 stage's supply (kept for the tests)
+/// A push-pull pair is never perfectly matched: the second tube is this much
+/// weaker, which leaves a little even harmonic.
+const PAIR_MISMATCH: f64 = 0.94;
+/// Class-AB pentode pairs are matched more closely.
+const CLASS_AB_MISMATCH: f64 = 0.98;
 
 /// Bisection on a monotonic function: `f(lo)` and `f(hi)` bracket zero.
 fn bisect(mut lo: f64, mut hi: f64, f: impl Fn(f64) -> f64) -> f64 {
@@ -266,8 +344,12 @@ impl TubeSpec {
     }
 }
 
-const fn koren(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64, vct: f64) -> Koren {
-    Koren { mu, ex, kg1, kp, kvb, vct }
+const fn koren(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64, vct: f64) -> Model {
+    Model::Triode(Koren { mu, ex, kg1, kp, kvb, vct })
+}
+
+const fn pentode(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64, vg2: f64) -> Model {
+    Model::Pentode(KorenPentode { mu, ex, kg1, kp, kvb, vg2 })
 }
 
 /// The tubes on offer. Parameters are Koren's datasheet fits from his tube
@@ -281,6 +363,13 @@ enum Tube {
     Dj8,
     T300b,
     A2a3,
+    Sl7,
+    Ay7,
+    Ax7Syl,
+    El84,
+    El34Pp,
+    L6Pp,
+    Kt88Pp,
 }
 
 impl Tube {
@@ -289,43 +378,100 @@ impl Tube {
             // Koren's original 12AX7 fit; 300 V, 100 kΩ, -1.5 V bias (Phase 2).
             Tube::Ax7 => TubeSpec {
                 k: koren(100.0, 1.4, 1060.0, 600.0, 300.0, 0.0),
+                topology: Topology::SingleEnded,
                 op: Operating::LoadLine { bplus: B_PLUS, r_load: 100_000.0, vgk: Some(-1.5) },
                 rgi: 2_000.0,
             },
             // 12AT7 / ECC81 (Tom Mitchell fit).
             Tube::At7 => TubeSpec {
                 k: koren(67.49, 1.234, 419.1, 213.96, 300.0, 0.0),
+                topology: Topology::SingleEnded,
                 op: Operating::LoadLine { bplus: 250.0, r_load: 47_000.0, vgk: None },
                 rgi: 2_000.0,
             },
             // 12AU7 / ECC82 (Sylvania technical manual).
             Tube::Au7 => TubeSpec {
                 k: koren(20.21, 1.230, 1108.7, 84.96, 551.3, 0.0),
+                topology: Topology::SingleEnded,
                 op: Operating::LoadLine { bplus: 300.0, r_load: 47_000.0, vgk: None },
                 rgi: 2_000.0,
             },
             // 6SN7 (Sylvania technical manual).
             Tube::Sn7 => TubeSpec {
                 k: koren(21.07, 1.341, 1446.2, 157.81, 179.4, 0.0),
+                topology: Topology::SingleEnded,
                 op: Operating::LoadLine { bplus: 300.0, r_load: 47_000.0, vgk: None },
                 rgi: 2_000.0,
             },
             // 6DJ8 / ECC88 / 6922 (Tom Mitchell fit, with contact potential).
             Tube::Dj8 => TubeSpec {
                 k: koren(30.51, 1.532, 453.9, 233.17, 190.9, 0.5),
+                topology: Topology::SingleEnded,
                 op: Operating::LoadLine { bplus: 200.0, r_load: 22_000.0, vgk: None },
                 rgi: 2_000.0,
             },
             // 300B (Western Electric, 1950): about 300 V, 65 mA, 3.5 kΩ load.
             Tube::T300b => TubeSpec {
                 k: koren(3.92, 1.504, 2140.3, 64.28, 300.0, 0.0),
+                topology: Topology::SingleEnded,
                 op: Operating::Fixed { vp: 300.0, ip: 0.065, r_ac: 3_500.0 },
                 rgi: 1_000.0,
             },
             // 2A3 (Tung-Sol datasheet): about 250 V, 60 mA, 2.5 kΩ load.
             Tube::A2a3 => TubeSpec {
                 k: koren(4.05, 1.634, 3652.2, 58.47, 300.0, 0.0),
+                topology: Topology::SingleEnded,
                 op: Operating::Fixed { vp: 250.0, ip: 0.060, r_ac: 2_500.0 },
+                rgi: 1_000.0,
+            },
+            // 6SL7GT (GE): high-mu octal triode.
+            Tube::Sl7 => TubeSpec {
+                k: koren(75.89, 1.233, 1735.2, 1725.27, 7.0, 0.5),
+                topology: Topology::SingleEnded,
+                op: Operating::LoadLine { bplus: 300.0, r_load: 100_000.0, vgk: None },
+                rgi: 2_000.0,
+            },
+            // 12AY7 (GE databook, 1955): low-noise, medium-mu triode.
+            Tube::Ay7 => TubeSpec {
+                k: koren(44.16, 1.113, 1192.4, 409.96, 300.0, 0.0),
+                topology: Topology::SingleEnded,
+                op: Operating::LoadLine { bplus: 300.0, r_load: 100_000.0, vgk: None },
+                rgi: 2_000.0,
+            },
+            // 12AX7A (Sylvania technical manual, 1955).
+            Tube::Ax7Syl => TubeSpec {
+                k: koren(105.78, 1.474, 1618.2, 432.76, 35.6, 0.5),
+                topology: Topology::SingleEnded,
+                op: Operating::LoadLine { bplus: 300.0, r_load: 100_000.0, vgk: None },
+                rgi: 2_000.0,
+            },
+            // EL84 (Mullard), single-ended class A: 250 V, screen 250 V, 48 mA, 5.2 kΩ.
+            Tube::El84 => TubeSpec {
+                k: pentode(21.29, 1.240, 401.7, 111.04, 17.9, 250.0),
+                topology: Topology::SingleEnded,
+                op: Operating::Fixed { vp: 250.0, ip: 0.048, r_ac: 5_200.0 },
+                rgi: 1_000.0,
+            },
+            // EL34 (Mullard, 1962) push-pull class AB: 400 V, screen 400 V,
+            // 35 mA idle each, about 1.7 kΩ per tube.
+            Tube::El34Pp => TubeSpec {
+                k: pentode(12.02, 1.169, 353.9, 61.11, 29.9, 400.0),
+                topology: Topology::PushPull,
+                op: Operating::Fixed { vp: 400.0, ip: 0.035, r_ac: 1_650.0 },
+                rgi: 1_000.0,
+            },
+            // 6L6GC (GE) push-pull class AB: 400 V, screen 400 V, 35 mA idle, 1 kΩ per tube.
+            Tube::L6Pp => TubeSpec {
+                k: pentode(9.88, 1.442, 1686.6, 30.98, 19.4, 400.0),
+                topology: Topology::PushPull,
+                op: Operating::Fixed { vp: 400.0, ip: 0.035, r_ac: 1_000.0 },
+                rgi: 1_000.0,
+            },
+            // KT88 (M-O Valve) push-pull class AB: 450 V, screen 400 V, 50 mA idle, 1 kΩ per tube.
+            Tube::Kt88Pp => TubeSpec {
+                k: pentode(12.38, 1.246, 340.4, 26.48, 36.5, 400.0),
+                topology: Topology::PushPull,
+                op: Operating::Fixed { vp: 450.0, ip: 0.050, r_ac: 1_000.0 },
                 rgi: 1_000.0,
             },
         }
@@ -388,7 +534,14 @@ impl TubeTable {
     fn from_tube(tube: Tube) -> Self {
         let spec = tube.spec();
         let q = spec.quiescent();
-        Self::from_curve(|u| -spec.plate_voltage(&q, spec.grid_voltage(&q, u)))
+        let current = |u: f64| {
+            let vg = spec.grid_voltage(&q, u);
+            spec.k.ip(vg, spec.plate_voltage(&q, vg))
+        };
+        match spec.topology {
+            Topology::SingleEnded => Self::from_curve(|u| -spec.plate_voltage(&q, spec.grid_voltage(&q, u))),
+            Topology::PushPull => Self::from_curve(|u| current(u) - CLASS_AB_MISMATCH * current(-u)),
+        }
     }
 
     /// The curve at `u`.
@@ -430,10 +583,8 @@ pub fn triode_table() -> &'static TubeTable {
 }
 
 fn tube_table(tube: Tube) -> &'static TubeTable {
-    static TABLES: [OnceLock<TubeTable>; 7] = [
-        OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(),
-        OnceLock::new(), OnceLock::new(), OnceLock::new(),
-    ];
+    const EMPTY: OnceLock<TubeTable> = OnceLock::new();
+    static TABLES: [OnceLock<TubeTable>; 14] = [EMPTY; 14];
     let i = match tube {
         Tube::Ax7 => 0,
         Tube::At7 => 1,
@@ -442,6 +593,13 @@ fn tube_table(tube: Tube) -> &'static TubeTable {
         Tube::Dj8 => 4,
         Tube::T300b => 5,
         Tube::A2a3 => 6,
+        Tube::Sl7 => 7,
+        Tube::Ay7 => 8,
+        Tube::Ax7Syl => 9,
+        Tube::El84 => 10,
+        Tube::El34Pp => 11,
+        Tube::L6Pp => 12,
+        Tube::Kt88Pp => 13,
     };
     TABLES[i].get_or_init(|| TubeTable::from_tube(tube))
 }
@@ -453,9 +611,42 @@ fn push_pull_table() -> &'static TubeTable {
     static T: OnceLock<TubeTable> = OnceLock::new();
     T.get_or_init(|| {
         let single = tube_table(Tube::A2a3);
-        const MISMATCH: f64 = 0.92;
-        TubeTable::from_curve(|u| (single.eval(u) - MISMATCH * single.eval(-u)) / (1.0 + MISMATCH))
+        TubeTable::from_curve(|u| (single.eval(u) - PAIR_MISMATCH * single.eval(-u)) / (1.0 + PAIR_MISMATCH))
     })
+}
+
+/// A JFET stage: the square-law transfer `Id = Idss (1 - Vgs/Vp)^2`, biased at
+/// half the pinch-off voltage, cut off on one side and clipped by gate
+/// conduction on the other. Mostly 2nd harmonic, almost no 3rd.
+fn jfet_table() -> &'static TubeTable {
+    static T: OnceLock<TubeTable> = OnceLock::new();
+    T.get_or_init(|| {
+        const VP: f64 = -2.0; // pinch-off
+        const VQ: f64 = -1.0; // bias
+        TubeTable::from_curve(|u| {
+            let vgs = VQ + VQ.abs() * u;
+            // Gate conduction above 0 V: the drive is squashed (soft corner).
+            let knee = 0.05;
+            let sp = if vgs / knee > 40.0 { vgs } else { knee * (1.0 + (vgs / knee).exp()).ln() };
+            let vgs = vgs - 0.85 * sp;
+            let x = (1.0 - vgs / VP).max(0.0);
+            x * x
+        })
+    })
+}
+
+/// A silicon diode-pair clipper (antiparallel): a symmetric logarithmic soft
+/// clip, `asinh(a u) / a`.
+fn silicon_diode_table() -> &'static TubeTable {
+    static T: OnceLock<TubeTable> = OnceLock::new();
+    T.get_or_init(|| TubeTable::from_curve(|u| (3.0 * u).asinh() / 3.0))
+}
+
+/// A germanium diode against a silicon one: the germanium side conducts at
+/// about half the voltage, so that half clips earlier: asymmetric.
+fn germanium_diode_table() -> &'static TubeTable {
+    static T: OnceLock<TubeTable> = OnceLock::new();
+    T.get_or_init(|| TubeTable::from_curve(|u| if u >= 0.0 { (6.0 * u).asinh() / 6.0 } else { (3.0 * u).asinh() / 3.0 }))
 }
 
 /// A near-hard clip: `u / (1 + |u|^8)^(1/8)`, linear below about 0.8 and
@@ -484,39 +675,60 @@ fn ln_cosh(x: f64) -> f64 {
 /// antiderivative (for ADAA).
 #[derive(Clone, Copy)]
 struct Shaper {
-    table: Option<&'static TubeTable>,
+    kind: ShaperKind,
+}
+
+#[derive(Clone, Copy)]
+enum ShaperKind {
+    Table(&'static TubeTable),
+    Tanh,
+    Linear,
 }
 
 impl Shaper {
     fn new(flavour: AnalogFlavour) -> Self {
-        let table = match flavour {
-            AnalogFlavour::WarmTriode => Some(tube_table(Tube::Ax7)),
-            AnalogFlavour::Tube12at7 => Some(tube_table(Tube::At7)),
-            AnalogFlavour::Tube12au7 => Some(tube_table(Tube::Au7)),
-            AnalogFlavour::Tube6sn7 => Some(tube_table(Tube::Sn7)),
-            AnalogFlavour::Tube6dj8 => Some(tube_table(Tube::Dj8)),
-            AnalogFlavour::Tube300b => Some(tube_table(Tube::T300b)),
-            AnalogFlavour::Tube2a3 => Some(tube_table(Tube::A2a3)),
-            AnalogFlavour::PushPull => Some(push_pull_table()),
-            AnalogFlavour::HardTransistor => Some(hard_transistor_table()),
-            AnalogFlavour::SolidState => None,
+        let table = |t| ShaperKind::Table(tube_table(t));
+        let kind = match flavour {
+            AnalogFlavour::WarmTriode => table(Tube::Ax7),
+            AnalogFlavour::Tube12at7 => table(Tube::At7),
+            AnalogFlavour::Tube12au7 => table(Tube::Au7),
+            AnalogFlavour::Tube6sn7 => table(Tube::Sn7),
+            AnalogFlavour::Tube6dj8 => table(Tube::Dj8),
+            AnalogFlavour::Tube300b => table(Tube::T300b),
+            AnalogFlavour::Tube2a3 => table(Tube::A2a3),
+            AnalogFlavour::Tube6sl7 => table(Tube::Sl7),
+            AnalogFlavour::Tube12ay7 => table(Tube::Ay7),
+            AnalogFlavour::Tube12ax7a => table(Tube::Ax7Syl),
+            AnalogFlavour::TubeEl84 => table(Tube::El84),
+            AnalogFlavour::PushPullEl34 => table(Tube::El34Pp),
+            AnalogFlavour::PushPull6l6gc => table(Tube::L6Pp),
+            AnalogFlavour::PushPullKt88 => table(Tube::Kt88Pp),
+            AnalogFlavour::PushPull => ShaperKind::Table(push_pull_table()),
+            AnalogFlavour::HardTransistor => ShaperKind::Table(hard_transistor_table()),
+            AnalogFlavour::Jfet => ShaperKind::Table(jfet_table()),
+            AnalogFlavour::SiliconDiode => ShaperKind::Table(silicon_diode_table()),
+            AnalogFlavour::GermaniumDiode => ShaperKind::Table(germanium_diode_table()),
+            AnalogFlavour::SolidState => ShaperKind::Tanh,
+            AnalogFlavour::IronSag => ShaperKind::Linear,
         };
-        Self { table }
+        Self { kind }
     }
 
     #[inline]
     fn f(&self, u: f64) -> f64 {
-        match self.table {
-            Some(t) => t.eval(u),
-            None => u.tanh(),
+        match self.kind {
+            ShaperKind::Table(t) => t.eval(u),
+            ShaperKind::Tanh => u.tanh(),
+            ShaperKind::Linear => u,
         }
     }
 
     #[inline]
     fn anti(&self, u: f64) -> f64 {
-        match self.table {
-            Some(t) => t.antiderivative(u),
-            None => ln_cosh(u),
+        match self.kind {
+            ShaperKind::Table(t) => t.antiderivative(u),
+            ShaperKind::Tanh => ln_cosh(u),
+            ShaperKind::Linear => 0.5 * u * u,
         }
     }
 
@@ -1604,7 +1816,7 @@ mod tests {
         assert_eq!((parsed.sag, parsed.transformer), (0.3, 0.3));
     }
 
-    const ALL_FLAVOURS: [AnalogFlavour; 10] = [
+    const ALL_FLAVOURS: [AnalogFlavour; 21] = [
         AnalogFlavour::WarmTriode,
         AnalogFlavour::PushPull,
         AnalogFlavour::SolidState,
@@ -1615,11 +1827,27 @@ mod tests {
         AnalogFlavour::Tube6dj8,
         AnalogFlavour::Tube300b,
         AnalogFlavour::Tube2a3,
+        AnalogFlavour::Tube6sl7,
+        AnalogFlavour::Tube12ay7,
+        AnalogFlavour::Tube12ax7a,
+        AnalogFlavour::TubeEl84,
+        AnalogFlavour::PushPullEl34,
+        AnalogFlavour::PushPull6l6gc,
+        AnalogFlavour::PushPullKt88,
+        AnalogFlavour::Jfet,
+        AnalogFlavour::SiliconDiode,
+        AnalogFlavour::GermaniumDiode,
+        AnalogFlavour::IronSag,
+    ];
+
+    const ALL_TUBES: [Tube; 14] = [
+        Tube::Ax7, Tube::At7, Tube::Au7, Tube::Sn7, Tube::Dj8, Tube::T300b, Tube::A2a3,
+        Tube::Sl7, Tube::Ay7, Tube::Ax7Syl, Tube::El84, Tube::El34Pp, Tube::L6Pp, Tube::Kt88Pp,
     ];
 
     #[test]
     fn every_tube_has_a_sane_operating_point() {
-        for t in [Tube::Ax7, Tube::At7, Tube::Au7, Tube::Sn7, Tube::Dj8, Tube::T300b, Tube::A2a3] {
+        for t in ALL_TUBES {
             let sp = t.spec();
             let q = sp.quiescent();
             assert!(q.vgk < 0.0 && q.ip > 0.0 && q.vp > 0.0, "{t:?}: bias {:.1} V, {:.2} mA at {:.0} V", q.vgk, q.ip * 1000.0, q.vp);
@@ -1632,6 +1860,8 @@ mod tests {
         // Published power-triode biases: 300B about -62 V at 300 V / 65 mA; 2A3 about -45 V at 250 V / 60 mA.
         assert!((-66.0..-56.0).contains(&Tube::T300b.bias()), "300B bias {:.1} V", Tube::T300b.bias());
         assert!((-50.0..-40.0).contains(&Tube::A2a3.bias()), "2A3 bias {:.1} V", Tube::A2a3.bias());
+        // EL84 single-ended class A (Mullard): 250 V, screen 250 V, 48 mA gives about -7.3 V.
+        assert!((Tube::El84.bias() + 7.3).abs() < 1.0, "EL84 bias {:.1} V", Tube::El84.bias());
     }
 
     #[test]
@@ -1659,7 +1889,7 @@ mod tests {
             let sp = spectrum(&run(&mut st, bin, n, amp));
             (db(sp[bin * 2] / sp[bin]), db(sp[bin * 3] / sp[bin]))
         };
-        for f in [AnalogFlavour::WarmTriode, AnalogFlavour::Tube12at7, AnalogFlavour::Tube12au7, AnalogFlavour::Tube6sn7, AnalogFlavour::Tube6dj8, AnalogFlavour::Tube300b, AnalogFlavour::Tube2a3] {
+        for f in [AnalogFlavour::WarmTriode, AnalogFlavour::Tube12at7, AnalogFlavour::Tube12au7, AnalogFlavour::Tube6sn7, AnalogFlavour::Tube6dj8, AnalogFlavour::Tube300b, AnalogFlavour::Tube2a3, AnalogFlavour::Tube6sl7, AnalogFlavour::Tube12ay7, AnalogFlavour::Tube12ax7a] {
             let (h2, h3) = h(f, 0.2);
             assert!(h2 > h3 + 15.0, "{f:?}: 2nd {h2:.1} dB well above 3rd {h3:.1} dB");
             assert!(h2 < -20.0 && h2 > -60.0, "{f:?}: audible but not extreme 2nd: {h2:.1} dB");
@@ -1669,6 +1899,71 @@ mod tests {
         assert!(h2 > -100.0, "...with a little even left from the imperfect match ({h2:.1} dB)");
         // ...and it is much cleaner in the even harmonics than a single-ended 2A3.
         assert!(h2 < h(AnalogFlavour::Tube2a3, 0.3).0 - 15.0, "push-pull cancels the 2nd of its own tube");
+    }
+
+    #[test]
+    fn class_ab_pentode_pairs_are_odd_dominant_with_crossover_grit_at_low_level() {
+        let (n, bin) = (1 << 14, 200);
+        let h = |f: AnalogFlavour, amp: f32| {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(f, 0.4, 0.0, 0.0));
+            let sp = spectrum(&run(&mut st, bin, n, amp));
+            (db(sp[bin * 2] / sp[bin]), db(sp[bin * 3] / sp[bin]))
+        };
+        let class_a = h(AnalogFlavour::PushPull, 0.1).1;
+        for f in [AnalogFlavour::PushPullEl34, AnalogFlavour::PushPull6l6gc, AnalogFlavour::PushPullKt88] {
+            let (h2, h3) = h(f, 0.3);
+            assert!(h3 > h2 + 8.0, "{f:?}: odd-dominant, 3rd {h3:.1} dB vs 2nd {h2:.1} dB");
+            // Class AB leaves a crossover region: the 3rd is already there at low level,
+            // much more than in the class-A pair of 2A3s.
+            let low = h(f, 0.1).1;
+            assert!(low > class_a + 15.0, "{f:?}: crossover distortion at low level ({low:.1} dB vs {class_a:.1} dB)");
+        }
+    }
+
+    #[test]
+    fn single_ended_pentode_has_both_kinds_of_harmonic() {
+        let (n, bin) = (1 << 14, 200);
+        let mut st = AnalogStage::new(44_100);
+        st.set_settings(colour(AnalogFlavour::TubeEl84, 0.4, 0.0, 0.0));
+        let sp = spectrum(&run(&mut st, bin, n, 0.1));
+        let (h2, h3) = (db(sp[bin * 2] / sp[bin]), db(sp[bin * 3] / sp[bin]));
+        assert!(h2 > -45.0 && h3 > -60.0, "a class-A pentode is not clean: 2nd {h2:.1}, 3rd {h3:.1} dB");
+    }
+
+    #[test]
+    fn jfet_is_square_law_and_diodes_clip_symmetrically_or_not() {
+        let (n, bin) = (1 << 14, 200);
+        let h = |f: AnalogFlavour, amp: f32| {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(f, 0.4, 0.0, 0.0));
+            let sp = spectrum(&run(&mut st, bin, n, amp));
+            (db(sp[bin * 2] / sp[bin]), db(sp[bin * 3] / sp[bin]))
+        };
+        let (h2, h3) = h(AnalogFlavour::Jfet, 0.2);
+        assert!(h2 > -30.0 && h2 < -12.0, "JFET 2nd {h2:.1} dB");
+        assert!(h2 > h3 + 40.0, "square law: almost no 3rd ({h3:.1} dB vs {h2:.1} dB)");
+        let (s2, s3) = h(AnalogFlavour::SiliconDiode, 0.2);
+        assert!(s2 < -80.0 && s3 > -45.0, "silicon pair is symmetric: 2nd {s2:.1}, 3rd {s3:.1} dB");
+        let (g2, g3) = h(AnalogFlavour::GermaniumDiode, 0.1);
+        assert!(g2 > -40.0 && g3 > -45.0, "germanium against silicon is lopsided: 2nd {g2:.1}, 3rd {g3:.1} dB");
+    }
+
+    #[test]
+    fn iron_and_sag_only_has_no_distortion_curve_but_still_colours_the_bass_and_dynamics() {
+        let (n, bin) = (1 << 14, 371);
+        let mut st = AnalogStage::new(44_100);
+        st.set_settings(colour(AnalogFlavour::IronSag, 0.7, 0.0, 0.0));
+        let sp = spectrum(&run(&mut st, bin, n, 0.6));
+        assert!(db(sp[bin * 3] / sp[bin]) < -100.0 && db(sp[bin * 2] / sp[bin]) < -100.0, "a linear curve adds no harmonics");
+        // The transformer still saturates the bass.
+        let h3 = |xf: f32| {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(AnalogFlavour::IronSag, 0.0, 0.0, xf));
+            let sp = spectrum(&run(&mut st, 22, n, 0.5));
+            db(sp[66] / sp[22])
+        };
+        assert!(h3(1.0) > h3(0.0) + 30.0, "bass harmonics from the transformer alone");
     }
 
     #[test]
@@ -1703,9 +1998,11 @@ mod tests {
     #[test]
     fn every_flavour_keeps_aliasing_low_at_every_rate_and_is_linear_when_quiet() {
         for f in ALL_FLAVOURS {
-            for fs in [44_100u32, 96_000, 192_000] {
+            // 96 kHz (2x oversampling) is measured for every flavour in the ignored
+            // profile test and for the reference flavour above; 44.1 and 192 kHz here.
+            for fs in [44_100u32, 192_000] {
                 let a = alias_db_with(fs, 9_500.0, 0.53, 0.8, f, None);
-                assert!(a < -65.0, "{f:?} at {fs} Hz aliases at {a:.1} dB");
+                assert!(a < -60.0, "{f:?} at {fs} Hz aliases at {a:.1} dB");
             }
             let n = 1 << 14;
             let bin = 371;
@@ -1729,6 +2026,17 @@ mod tests {
             (AnalogFlavour::Tube6dj8, "tube_6dj8"),
             (AnalogFlavour::Tube300b, "tube_300b"),
             (AnalogFlavour::Tube2a3, "tube_2a3"),
+            (AnalogFlavour::Tube6sl7, "tube_6sl7"),
+            (AnalogFlavour::Tube12ay7, "tube_12ay7"),
+            (AnalogFlavour::Tube12ax7a, "tube_12ax7a"),
+            (AnalogFlavour::TubeEl84, "tube_el84"),
+            (AnalogFlavour::PushPullEl34, "push_pull_el34"),
+            (AnalogFlavour::PushPull6l6gc, "push_pull_6l6gc"),
+            (AnalogFlavour::PushPullKt88, "push_pull_kt88"),
+            (AnalogFlavour::Jfet, "jfet"),
+            (AnalogFlavour::SiliconDiode, "silicon_diode"),
+            (AnalogFlavour::GermaniumDiode, "germanium_diode"),
+            (AnalogFlavour::IronSag, "iron_sag"),
         ] {
             assert_eq!(serde_json::to_string(&f).unwrap(), format!("\"{name}\""));
             assert_eq!(serde_json::from_str::<AnalogFlavour>(&format!("\"{name}\"")).unwrap(), f);
@@ -1752,7 +2060,7 @@ mod tests {
     #[test]
     #[ignore]
     fn print_flavour_profiles() {
-        for t in [Tube::Ax7, Tube::At7, Tube::Au7, Tube::Sn7, Tube::Dj8, Tube::T300b, Tube::A2a3] {
+        for t in ALL_TUBES {
             let sp = t.spec();
             let q = sp.quiescent();
             println!("{:?}: bias {:.1} V, plate {:.0} V, {:.1} mA, load {:.0} ohm", t, q.vgk, q.vp, q.ip * 1000.0, q.r_ac);

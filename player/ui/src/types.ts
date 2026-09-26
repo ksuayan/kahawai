@@ -137,27 +137,49 @@ export interface EqBandRow extends EqBand {
 /** Analog warmth (tube / transistor character); mirrors `AnalogSettings` in the Rust core. */
 export type AnalogFlavour =
   | "warm_triode"
+  | "tube_12ax7a"
   | "tube_12at7"
   | "tube_12au7"
+  | "tube_12ay7"
   | "tube_6sn7"
+  | "tube_6sl7"
   | "tube_6dj8"
   | "tube_300b"
   | "tube_2a3"
+  | "tube_el84"
   | "push_pull"
+  | "push_pull_el34"
+  | "push_pull_6l6gc"
+  | "push_pull_kt88"
   | "solid_state"
-  | "hard_transistor";
+  | "jfet"
+  | "silicon_diode"
+  | "germanium_diode"
+  | "hard_transistor"
+  | "iron_sag";
 export type AntiAliasChoice = "auto" | "x1" | "x1_adaa" | "x2" | "x2_adaa" | "x4" | "x4_adaa";
 export const ANALOG_FLAVOURS: AnalogFlavour[] = [
   "warm_triode",
+  "tube_12ax7a",
   "tube_12at7",
   "tube_12au7",
+  "tube_12ay7",
   "tube_6sn7",
+  "tube_6sl7",
   "tube_6dj8",
   "tube_300b",
   "tube_2a3",
+  "tube_el84",
   "push_pull",
+  "push_pull_el34",
+  "push_pull_6l6gc",
+  "push_pull_kt88",
   "solid_state",
+  "jfet",
+  "silicon_diode",
+  "germanium_diode",
   "hard_transistor",
+  "iron_sag",
 ];
 
 export interface FlavourInfo {
@@ -229,6 +251,83 @@ export const FLAVOUR_INFO: Record<AnalogFlavour, FlavourInfo> = {
     blurb: "Fuller and firmer: even harmonics cancel, odd ones and compression take over as it is driven.",
     sag: 0.5,
     transformer: 0.5,
+  },
+  tube_12ax7a: {
+    label: "12AX7A (Sylvania) · high-mu preamp triode",
+    short: "12AX7A",
+    blurb: "A second 12AX7 fit with a slightly different curve: a touch more even harmonic at low levels.",
+    sag: 0.3,
+    transformer: 0.2,
+  },
+  tube_12ay7: {
+    label: "12AY7 · low-noise, medium-mu triode",
+    short: "12AY7",
+    blurb: "Between the 12AU7 and the 12AT7: clean, with a gentle lift in the 2nd harmonic.",
+    sag: 0.15,
+    transformer: 0,
+  },
+  tube_6sl7: {
+    label: "6SL7GT · high-mu octal triode",
+    short: "6SL7",
+    blurb: "Very clean until pushed, then it turns over abruptly: a big-headroom high-gain tube.",
+    sag: 0.15,
+    transformer: 0,
+  },
+  tube_el84: {
+    label: "EL84 · single-ended pentode",
+    short: "EL84",
+    blurb: "Class A pentode: brighter and grittier than a triode, with both even and odd harmonics.",
+    sag: 0.4,
+    transformer: 0.5,
+  },
+  push_pull_el34: {
+    label: "Push-pull EL34 · class AB",
+    short: "EL34 pair",
+    blurb: "British-style power stage: odd harmonics, firm compression, and a touch of crossover grit at low level.",
+    sag: 0.5,
+    transformer: 0.5,
+  },
+  push_pull_6l6gc: {
+    label: "Push-pull 6L6GC · class AB",
+    short: "6L6GC pair",
+    blurb: "American-style power stage: cleaner and stiffer than EL34s.",
+    sag: 0.3,
+    transformer: 0.4,
+  },
+  push_pull_kt88: {
+    label: "Push-pull KT88 · class AB",
+    short: "KT88 pair",
+    blurb: "A big, tight, high-power stage with plenty of headroom.",
+    sag: 0.3,
+    transformer: 0.5,
+  },
+  jfet: {
+    label: "JFET · square-law warmth",
+    short: "JFET",
+    blurb: "Nearly pure 2nd harmonic with almost no 3rd, a very smooth kind of warmth.",
+    sag: 0,
+    transformer: 0,
+  },
+  silicon_diode: {
+    label: "Silicon diode clipper · soft, symmetric",
+    short: "Silicon diodes",
+    blurb: "A logarithmic soft clip: odd harmonics that build gradually. Overdrive-pedal territory when pushed.",
+    sag: 0,
+    transformer: 0,
+  },
+  germanium_diode: {
+    label: "Germanium diode clipper · asymmetric",
+    short: "Germanium diodes",
+    blurb: "One half clips earlier than the other: even and odd harmonics together, and a rougher edge.",
+    sag: 0,
+    transformer: 0,
+  },
+  iron_sag: {
+    label: "Transformer and sag only · no distortion curve",
+    short: "Iron and sag",
+    blurb: "No tube or transistor curve: just the transformer's bass colour and the supply sag. Try it with high Sag and Transformer.",
+    sag: 0.5,
+    transformer: 0.7,
   },
   solid_state: {
     label: "Solid state · soft clip",
