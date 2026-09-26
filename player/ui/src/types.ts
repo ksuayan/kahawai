@@ -194,6 +194,20 @@ export function formatBadge(t: Track): string {
   return parts.join(" · ");
 }
 
+/** Full detail behind the format badge: "24-bit / 96 kHz · 2647 kbps · 2 ch". */
+export function qualityTitle(t: Track): string {
+  const parts: string[] = [];
+  if (t.bit_depth && t.sample_rate) {
+    parts.push(`${t.bit_depth}-bit / ${Math.round(t.sample_rate / 100) / 10} kHz`);
+  } else if (t.sample_rate) {
+    parts.push(`${Math.round(t.sample_rate / 100) / 10} kHz`);
+  }
+  if (t.bitrate) parts.push(`${t.bitrate} kbps`);
+  if (t.channels) parts.push(`${t.channels} ch`);
+  const label = t.format.toUpperCase().replace("_", " ");
+  return parts.length ? `${label} · ${parts.join(" · ")}` : label;
+}
+
 /** "MQA · 48k" (the master's rate) or just "MQA". */
 export function mqaLabel(t: Track): string {
   const r = t.original_sample_rate;

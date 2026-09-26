@@ -6,6 +6,7 @@ import {
   isPlayable,
   mqaLabel,
   mqaTitle,
+  qualityTitle,
   trackTitle,
   unplayableReason,
   validFormatsFor,
@@ -73,5 +74,26 @@ describe("MQA labelling", () => {
     expect(tip).toContain("plays as ordinary FLAC");
     expect(tip).toContain("Bit-perfect output");
     expect(mqaTitle(makeTrack({ mqa: true }))).not.toContain("master");
+  });
+});
+
+describe("qualityTitle (badge tooltip)", () => {
+  it("spells out bit depth, rate, bitrate and channels", () => {
+    expect(qualityTitle(makeTrack({ format: "m4a", bit_depth: 24, sample_rate: 96000, bitrate: 2647, channels: 2 }))).toBe(
+      "M4A · 24-bit / 96 kHz · 2647 kbps · 2 ch",
+    );
+    expect(qualityTitle(makeTrack({ format: "flac", bit_depth: 16, sample_rate: 44100, bitrate: 900, channels: 2 }))).toBe(
+      "FLAC · 16-bit / 44.1 kHz · 900 kbps · 2 ch",
+    );
+  });
+
+  it("copes with lossy files (no bit depth) and missing fields", () => {
+    expect(qualityTitle(makeTrack({ format: "mp3", bit_depth: null, sample_rate: 48000, bitrate: 320, channels: 2 }))).toBe(
+      "MP3 · 48 kHz · 320 kbps · 2 ch",
+    );
+    expect(qualityTitle(makeTrack({ format: "sacd_iso", bit_depth: null, sample_rate: null, bitrate: null, channels: null }))).toBe("SACD ISO");
+    expect(qualityTitle(makeTrack({ format: "dsf", bit_depth: 1, sample_rate: 2822400, bitrate: 5644, channels: 2 }))).toBe(
+      "DSF · 1-bit / 2822.4 kHz · 5644 kbps · 2 ch",
+    );
   });
 });

@@ -6,6 +6,7 @@ import {
   isPlayable,
   mqaLabel,
   mqaTitle,
+  qualityTitle,
   trackTitle,
   unplayableReason,
   type Track,
@@ -57,7 +58,7 @@ function onDblClick(): void {
         {{ [track.artist, track.album].filter(Boolean).join(" — ") }}
       </div>
     </div>
-    <UiBadge>{{ formatBadge(track) }}</UiBadge>
+    <UiBadge :title="qualityTitle(track)" data-testid="format-badge">{{ formatBadge(track) }}</UiBadge>
     <UiBadge v-if="track.mqa" variant="accent" :title="mqaTitle(track)" data-testid="mqa-badge">{{ mqaLabel(track) }}</UiBadge>
     <span class="shrink-0 tabular-nums text-dim">{{ formatDuration(track.duration_ms) }}</span>
     <TrackMenu v-if="showMenu" :track="track" />

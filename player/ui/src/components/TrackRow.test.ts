@@ -41,6 +41,11 @@ describe("TrackRow", () => {
     expect(mountRow({ track: makeTrack({ mqa: false }) }).find('[data-testid="mqa-badge"]').exists()).toBe(false);
   });
 
+  it("puts the full quality detail in the format badge tooltip", () => {
+    const w = mountRow({ track: makeTrack({ format: "flac", bit_depth: 24, sample_rate: 96000, bitrate: 2400, channels: 2 }) });
+    expect(w.get('[data-testid="format-badge"]').attributes("title")).toBe("FLAC · 24-bit / 96 kHz · 2400 kbps · 2 ch");
+  });
+
   it("plays on double-click when playable", async () => {
     const track = makeTrack();
     const w = mountRow({ track });

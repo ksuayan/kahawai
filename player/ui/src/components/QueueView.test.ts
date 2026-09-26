@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { makeState, makeTrack, mockFetch } from "../test/fixtures";
+import { makeAlbum, makeState, makeTrack, mockFetch } from "../test/fixtures";
 import { $$, bodyOf, dialog, mountApp, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
 import { usePlayerStore } from "../stores/player";
+import { useLibraryStore } from "../stores/library";
 import { useQueueStore } from "../stores/queue";
 import QueueView from "./QueueView.vue";
 
@@ -44,6 +45,52 @@ describe("QueueView", () => {
     expect(rows(w)[0].text()).toContain("Alpha");
     expect(rows(w)[0].text()).toContain("AA");
     expect(rows(w)[2].text()).toContain("Gamma");
+  });
+
+  describe("track details (like the album track list)", () => {
+    const hires = makeTrack({ title: "Smoke Signals", artist: "Phoebe Bridgers", album: "Stranger in the Alps", format: "m4a", bit_depth: 24, sample_rate: 96000, bitrate: 2647, channels: 2, album_id: 42 });
+    const mqa = makeTrack({ title: "Brahms Lullaby", format: "flac", bit_depth: 24, sample_rate: 48000, bitrate: 1400, mqa: true, original_sample_rate: 48000 });
+
+    it("shows each track's format and quality badge with the full detail on hover", async () => {
+      const w = await mountQueue([hires, a]);
+      const badges = w.findAll('[data-testid="format-badge"]');
+      expect(badges.map((b) => b.text())).toEqual(["M4A · 24/96k", "FLAC · 16/44.1k"]);
+      expect(badges[0].attributes("title")).toBe("M4A · 24-bit / 96 kHz · 2647 kbps · 2 ch");
+    });
+
+    it("shows artist and album on the second line", async () => {
+      const w = await mountQueue([hires]);
+      expect(w.get('[data-testid="detail-line"]').text()).toBe("Phoebe Bridgers — Stranger in the Alps");
+    });
+
+    it("badges MQA tracks with the master rate, and only those", async () => {
+      const w = await mountQueue([mqa, hires]);
+      expect(rows(w)[0].get('[data-testid="mqa-badge"]').text()).toBe("MQA · 48k");
+      expect(rows(w)[0].get('[data-testid="mqa-badge"]').attributes("title")).toContain("plays as ordinary FLAC");
+      expect(rows(w)[1].find('[data-testid="mqa-badge"]').exists()).toBe(false);
+    });
+
+    it("shows the album cover for a track (not a blank placeholder), when the library has it", async () => {
+      (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+      const { wrapper } = mountApp(QueueView, {}, {}, () => {
+        const q = useQueueStore();
+        q.tracks = [{ ...hires }, { ...a }];
+        q.index = 0;
+        useLibraryStore().albums = [makeAlbum({ id: 42, artwork_hash: "cafe42" })];
+      });
+      await settle();
+      const covers = wrapper.findAll('[data-testid="queue-row"]').map((r) => r.find("img").exists() && r.get("img").attributes("src"));
+      expect(covers).toEqual(["artwork://localhost/cafe42", false]);
+    });
+
+    it("keeps the badges next to the duration, before the row buttons", async () => {
+      const w = await mountQueue([hires]);
+      const kids = Array.from(rows(w)[0].element.children).map((c) => c.getAttribute("data-testid") ?? c.tagName);
+      const iFormat = kids.indexOf("format-badge");
+      expect(iFormat).toBeGreaterThan(-1);
+      expect(rows(w)[0].text()).toContain("3:20");
+      expect(kids.indexOf("format-badge")).toBeLessThan(kids.length - 2);
+    });
   });
 
   it("highlights the row that is playing", async () => {

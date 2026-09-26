@@ -1,10 +1,22 @@
 <script setup lang="ts">
 import { ChevronDown, ChevronUp, GripVertical, Repeat, Repeat1, Shuffle, X } from "lucide-vue-next";
 import { ref } from "vue";
+import { useLibraryStore } from "../stores/library";
 import { usePlaylistsStore } from "../stores/playlists";
 import { usePlayerStore } from "../stores/player";
 import { useQueueStore } from "../stores/queue";
-import { formatDuration, isPlayable, trackTitle, unplayableReason, type Track } from "../types";
+import {
+  formatBadge,
+  formatDuration,
+  isPlayable,
+  mqaLabel,
+  mqaTitle,
+  qualityTitle,
+  trackTitle,
+  unplayableReason,
+  type Track,
+} from "../types";
+import UiBadge from "../ui/UiBadge.vue";
 import PromptDialog from "../ui/PromptDialog.vue";
 import StateMessage from "../ui/StateMessage.vue";
 import UiButton from "../ui/UiButton.vue";
@@ -14,6 +26,7 @@ import Artwork from "./Artwork.vue";
 const queue = useQueueStore();
 const player = usePlayerStore();
 const playlists = usePlaylistsStore();
+const lib = useLibraryStore();
 
 const dragged = ref<number | null>(null);
 const dropTarget = ref<number | null>(null);
@@ -52,6 +65,15 @@ async function onDrop(i: number, e: DragEvent): Promise<void> {
 function onDragEnd(): void {
   dragged.value = null;
   dropTarget.value = null;
+}
+
+/** Cover of the track's album (the queue holds tracks, not albums). */
+function coverOf(t: Track): string | null {
+  return lib.albums.find((a) => a.id === t.album_id)?.artwork_hash ?? null;
+}
+
+function detailLine(t: Track): string {
+  return [t.artist, t.album].filter(Boolean).join(" — ");
 }
 
 function rowTitle(t: Track): string {
@@ -136,11 +158,13 @@ async function saveAsPlaylist(name: string): Promise<void> {
       >
         <GripVertical class="size-4 shrink-0 cursor-grab text-faint" aria-hidden="true" />
         <span class="w-7 shrink-0 text-right tabular-nums text-faint">{{ i + 1 }}</span>
-        <Artwork :hash="null" :size="32" :radius="4" />
+        <Artwork :hash="coverOf(t)" :size="36" :radius="4" />
         <div class="min-w-0 flex-1">
           <div class="truncate">{{ trackTitle(t) }}</div>
-          <div v-if="t.artist" class="truncate text-xs text-dim">{{ t.artist }}</div>
+          <div v-if="detailLine(t)" class="truncate text-xs text-dim" data-testid="detail-line">{{ detailLine(t) }}</div>
         </div>
+        <UiBadge :title="qualityTitle(t)" data-testid="format-badge">{{ formatBadge(t) }}</UiBadge>
+        <UiBadge v-if="t.mqa" variant="accent" :title="mqaTitle(t)" data-testid="mqa-badge">{{ mqaLabel(t) }}</UiBadge>
         <span class="shrink-0 tabular-nums text-dim">{{ formatDuration(t.duration_ms) }}</span>
         <span class="flex shrink-0 gap-0.5">
           <UiButton variant="icon" title="Move up" aria-label="Move up" :disabled="i === 0" @click="queue.moveUp(i)"><ChevronUp /></UiButton>
