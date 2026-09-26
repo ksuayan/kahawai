@@ -5,6 +5,7 @@ mod api;
 mod db;
 mod dop;
 mod dsd;
+mod dsd_meta;
 mod jobs;
 mod resample;
 mod scanner;

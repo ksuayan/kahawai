@@ -14,9 +14,12 @@
 //!   bitrate) come from **lofty** alone, not symphonia: one metadata path,
 //!   and lofty's `FileProperties` proved reliable against ffmpeg-generated
 //!   fixtures for MP3/FLAC/OGG/M4A/WAV (see tests below).
-//! - Formats the server cannot stream yet (DSF/DFF/SACD ISO — spec §2, S5)
-//!   are still cataloged with `decodable = 0` and NULL technical fields:
-//!   browsable now, playable later.
+//! - DSF/DFF are parsed with the server's own DSD parser (`dsd.rs`: rate,
+//!   channels, duration) and their ID3v2 tags are read by `dsd_meta.rs`
+//!   (lofty cannot open DSD). They are cataloged like any other track and are
+//!   `decodable`: the server plays them through its DSD→PCM/DoP paths.
+//! - A DSF/DFF that does not parse, and SACD ISOs, are still cataloged with
+//!   `decodable = 0` and NULL technical fields: browsable, not playable.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -66,6 +69,8 @@ struct FileAnalysis {
     channels: Option<u8>,
     bitrate: Option<u32>,
     artwork: Option<ArtworkData>,
+    /// The server can play it (directly, or via its DSD paths).
+    decodable: bool,
 }
 
 struct ArtworkData {
@@ -112,6 +117,17 @@ pub async fn run_scan_with_progress(
         .map_err(db::cvt)?;
     let mut known: HashMap<String, (String, Option<i64>, Option<i64>, i64)> =
         HashMap::with_capacity(rows.len());
+    // DSD rows cataloged before DSD support (no rate = never analyzed) are
+    // re-read even though the file itself is unchanged.
+    let stale: HashSet<String> = sqlx::query(
+        "SELECT path FROM tracks WHERE format IN ('dsf', 'dff') AND sample_rate IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db::cvt)?
+    .iter()
+    .map(|r| r.get::<String, _>("path"))
+    .collect();
     for r in &rows {
         known.insert(
             r.get("path"),
@@ -165,7 +181,9 @@ pub async fn run_scan_with_progress(
 
             // Fast path: unchanged since last scan.
             match known.get(&path_str) {
-                Some((_, ksize, kmtime, _)) if *ksize == Some(size) && *kmtime == mtime => {
+                Some((_, ksize, kmtime, _))
+                    if *ksize == Some(size) && *kmtime == mtime && !stale.contains(&path_str) =>
+                {
                     report.files_skipped += 1;
                 }
                 previous => {
@@ -178,7 +196,7 @@ pub async fn run_scan_with_progress(
                         Ok(a) => {
                             let hash_changed =
                                 previous.map(|(h, _, _, _)| h.as_str()) != Some(a.hash.as_str());
-                            if is_new || hash_changed {
+                            if is_new || hash_changed || stale.contains(&path_str) {
                                 // One transaction per track: track row, album,
                                 // artists, artwork, and FTS all land together.
                                 let mut tx = pool.begin().await.map_err(db::cvt)?;
@@ -328,6 +346,7 @@ fn analyze_file(path: &Path) -> Result<FileAnalysis, MusicError> {
         channels: None,
         bitrate: None,
         artwork: None,
+        decodable: format.is_directly_streamable(),
     };
 
     // Best effort: undecodable-yet sources (DSD/ISO) may not parse; they are
@@ -363,9 +382,15 @@ fn analyze_file(path: &Path) -> Result<FileAnalysis, MusicError> {
                 }
             }
         }
+        // lofty cannot open DSD containers; `apply_dsd` below handles them.
+        Err(_) if matches!(a.format, AudioFormat::Dsf | AudioFormat::Dff) => {}
         Err(e) => {
             warn!(path = %a.path, error = %e, "lofty read failed; cataloging without metadata");
         }
+    }
+
+    if matches!(a.format, AudioFormat::Dsf | AudioFormat::Dff) {
+        apply_dsd(path, &mut a);
     }
 
     // A track with no title tag still needs a display name: the file stem.
@@ -376,6 +401,54 @@ fn analyze_file(path: &Path) -> Result<FileAnalysis, MusicError> {
             .map(str::to_string);
     }
     Ok(a)
+}
+
+/// Technical properties and tags of a DSF/DFF file. `decodable` becomes true
+/// only when the container parses, so a corrupt "DSF" stays unplayable.
+fn apply_dsd(path: &Path, a: &mut FileAnalysis) {
+    let info = match std::fs::File::open(path)
+        .map(std::io::BufReader::new)
+        .map_err(MusicError::Io)
+        .and_then(|mut r| crate::dsd::parse_dsd(&mut r))
+    {
+        Ok(info) => info,
+        Err(e) => {
+            warn!(path = %a.path, error = %e, "DSD parse failed; cataloging without metadata");
+            return;
+        }
+    };
+    // `sample_rate` is the DSD rate (2,822,400 for DSD64): the player uses it
+    // to pick the DoP rate; 1-bit samples.
+    a.sample_rate = Some(info.dsd_rate);
+    a.bit_depth = Some(1);
+    a.channels = u8::try_from(info.channels).ok();
+    let ms = info.samples_per_channel.saturating_mul(1000) / u64::from(info.dsd_rate.max(1));
+    a.duration_ms = (ms > 0).then_some(ms);
+    a.bitrate = u32::try_from(u64::from(info.dsd_rate) * info.channels as u64 / 1000).ok();
+    a.decodable = true;
+
+    if let Some(t) = crate::dsd_meta::read_tags(path, &info) {
+        a.title = t.title.or(a.title.take());
+        a.artist = t.artist;
+        a.album = t.album;
+        a.album_artist = t.album_artist;
+        a.genre = t.genre;
+        a.year = t.year;
+        a.track_no = t.track_no;
+        a.disc_no = t.disc_no;
+        if let Some(p) = t.picture {
+            let mime = if p.mime.starts_with("image/") {
+                p.mime
+            } else {
+                sniff_mime(&p.data).to_string()
+            };
+            a.artwork = Some(ArtworkData {
+                hash: blake3::hash(&p.data).to_hex().to_string(),
+                bytes: p.data,
+                mime,
+            });
+        }
+    }
 }
 
 /// Guess an image MIME type from magic bytes, for pictures lofty couldn't type.
@@ -688,7 +761,7 @@ async fn upsert_track(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     a: &FileAnalysis,
 ) -> Result<(), MusicError> {
-    let decodable = i64::from(a.format.is_directly_streamable());
+    let decodable = i64::from(a.decodable);
 
     let artwork_hash: Option<String> = match &a.artwork {
         Some(art) => {
@@ -2104,5 +2177,241 @@ mod album_grouping_tests {
         .await;
         assert_eq!(consolidate_albums(&pool).await.unwrap(), 0);
         assert_eq!(count(&pool, "albums").await, 3);
+    }
+}
+
+/// DSF / DFF files: parsed by the server's own DSD reader and tagged through
+/// their ID3v2 block (lofty cannot open them). Regression: they used to be
+/// cataloged with no title/artist/album, no duration, and `decodable = 0`, so
+/// they never appeared in the Albums grid and could not be played.
+#[cfg(test)]
+mod dsd_scan_tests {
+    use super::fixtures::count;
+    use super::*;
+    use crate::dsd_meta::fixture::{dff, dsf, id3, PNG};
+
+    fn write(lib: &Path, rel: &str, bytes: &[u8]) {
+        let p = lib.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
+
+    async fn scan_dir(files: &[(&str, Vec<u8>)]) -> (SqlitePool, tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        for (rel, bytes) in files {
+            write(&lib, rel, bytes);
+        }
+        let pool = db::open(&dir.path().join("t.db")).await.unwrap();
+        run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        (pool, dir, lib)
+    }
+
+    fn sketches(n: u32, title: &str) -> Vec<u8> {
+        dsf(
+            2,
+            Some(&id3(
+                &[
+                    ("TIT2", title),
+                    ("TPE1", "Miles Davis"),
+                    ("TALB", "Sketches of Spain"),
+                    ("TRCK", &format!("{n}/5")),
+                    ("TDRC", "1960"),
+                    ("TCON", "Jazz"),
+                ],
+                Some(PNG),
+            )),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_tagged_dsf_is_cataloged_with_tags_technical_fields_and_playable() {
+        let (pool, _d, _l) = scan_dir(&[(
+            "Sketches/01 - Concierto.dsf",
+            sketches(1, "Concierto De Aranjuez"),
+        )])
+        .await;
+        let r = sqlx::query(
+            "SELECT format, decodable, missing, title, artist, album, genre, year, track_no,
+                    sample_rate, bit_depth, channels, duration_ms, bitrate, album_id, artwork_hash
+             FROM tracks",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(r.get::<String, _>("format"), "dsf");
+        assert_eq!(r.get::<i64, _>("decodable"), 1, "the server plays DSD");
+        assert_eq!(r.get::<String, _>("title"), "Concierto De Aranjuez");
+        assert_eq!(r.get::<String, _>("artist"), "Miles Davis");
+        assert_eq!(r.get::<String, _>("album"), "Sketches of Spain");
+        assert_eq!(r.get::<String, _>("genre"), "Jazz");
+        assert_eq!(r.get::<i64, _>("year"), 1960);
+        assert_eq!(r.get::<i64, _>("track_no"), 1);
+        assert_eq!(
+            r.get::<i64, _>("sample_rate"),
+            2_822_400,
+            "the DSD rate, which the player uses for DoP"
+        );
+        assert_eq!(r.get::<i64, _>("bit_depth"), 1);
+        assert_eq!(r.get::<i64, _>("channels"), 2);
+        let ms = r.get::<i64, _>("duration_ms");
+        assert!((1990..=2010).contains(&ms), "duration {ms} ms");
+        assert_eq!(r.get::<i64, _>("bitrate"), 5644);
+        assert!(
+            r.get::<Option<i64>, _>("album_id").is_some(),
+            "it belongs to an album, so the grid shows it"
+        );
+        assert!(
+            r.get::<Option<String>, _>("artwork_hash").is_some(),
+            "embedded cover extracted"
+        );
+    }
+
+    #[tokio::test]
+    async fn dsf_tracks_group_into_one_album_and_appear_in_the_catalog() {
+        let (pool, _d, _l) = scan_dir(&[
+            ("Sketches/01.dsf", sketches(1, "One")),
+            ("Sketches/02.dsf", sketches(2, "Two")),
+            ("Sketches/03.dsf", sketches(3, "Three")),
+        ])
+        .await;
+        let a = sqlx::query(
+            "SELECT a.title, a.artist, a.year, COUNT(t.id) AS n FROM albums a JOIN tracks t ON t.album_id = a.id GROUP BY a.id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].get::<String, _>("title"), "Sketches of Spain");
+        assert_eq!(a[0].get::<String, _>("artist"), "Miles Davis");
+        assert_eq!(a[0].get::<i64, _>("n"), 3);
+        // Searchable by title.
+        let hits: i64 =
+            sqlx::query("SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH 'Sketches'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(hits, 3);
+    }
+
+    #[tokio::test]
+    async fn a_tagged_dff_is_cataloged_too() {
+        let tags = id3(
+            &[
+                ("TIT2", "Moon Ray"),
+                ("TPE1", "Roy Haynes Quartet"),
+                ("TALB", "Out of the Afternoon"),
+            ],
+            None,
+        );
+        let (pool, _d, _l) = scan_dir(&[("Roy/01 Moon Ray.dff", dff(2, Some(&tags)))]).await;
+        let r = sqlx::query(
+            "SELECT format, decodable, title, album, sample_rate, duration_ms FROM tracks",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(r.get::<String, _>("format"), "dff");
+        assert_eq!(r.get::<i64, _>("decodable"), 1);
+        assert_eq!(r.get::<String, _>("title"), "Moon Ray");
+        assert_eq!(r.get::<String, _>("album"), "Out of the Afternoon");
+        assert_eq!(r.get::<i64, _>("sample_rate"), 2_822_400);
+        assert!(r.get::<i64, _>("duration_ms") >= 1990);
+    }
+
+    #[tokio::test]
+    async fn an_untagged_dsf_is_still_playable_with_technical_fields_and_a_filename_title() {
+        let (pool, _d, _l) = scan_dir(&[("Loose/01 My Foolish Heart.dsf", dsf(1, None))]).await;
+        let r = sqlx::query("SELECT decodable, title, album, sample_rate, duration_ms FROM tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(r.get::<i64, _>("decodable"), 1);
+        assert_eq!(r.get::<String, _>("title"), "01 My Foolish Heart");
+        assert!(r.get::<Option<String>, _>("album").is_none());
+        assert_eq!(r.get::<i64, _>("sample_rate"), 2_822_400);
+        assert!(r.get::<i64, _>("duration_ms") >= 990);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_dsf_is_cataloged_but_stays_unplayable() {
+        let (pool, _d, _l) = scan_dir(&[("Bad/broken.dsf", vec![0xABu8; 4096])]).await;
+        let r = sqlx::query("SELECT decodable, sample_rate, title FROM tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(r.get::<i64, _>("decodable"), 0);
+        assert!(r.get::<Option<i64>, _>("sample_rate").is_none());
+        assert_eq!(r.get::<String, _>("title"), "broken");
+    }
+
+    #[tokio::test]
+    async fn rescanning_unchanged_dsd_skips_it() {
+        let (pool, _d, lib) = scan_dir(&[
+            ("A/01.dsf", sketches(1, "One")),
+            ("A/02.dsf", sketches(2, "Two")),
+        ])
+        .await;
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!((r.files_added, r.files_updated, r.files_skipped), (0, 0, 2));
+    }
+
+    /// The real-world upgrade path: the catalog already holds DSD rows from the
+    /// old scanner (filename title, NULL everything, decodable = 0) and the
+    /// files have not changed. A scan must still refresh them.
+    #[tokio::test]
+    async fn a_scan_upgrades_dsd_rows_cataloged_by_the_old_scanner() {
+        let (pool, _d, lib) = scan_dir(&[
+            ("Sketches/01.dsf", sketches(1, "One")),
+            ("Sketches/02.dsf", sketches(2, "Two")),
+        ])
+        .await;
+        // Put the catalog back into the pre-fix state.
+        sqlx::query(
+            "UPDATE tracks SET artist = NULL, album = NULL, album_id = NULL, genre = NULL, year = NULL,
+                track_no = NULL, sample_rate = NULL, bit_depth = NULL, channels = NULL, duration_ms = NULL,
+                bitrate = NULL, artwork_hash = NULL, decodable = 0, title = 'old-' || id",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM album_artists")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM albums")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count(&pool, "albums").await, 0);
+
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            r.files_updated, 2,
+            "refreshed although the files did not change"
+        );
+        let rows = sqlx::query(
+            "SELECT title, album, decodable, sample_rate FROM tracks ORDER BY track_no",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let titles: Vec<String> = rows.iter().map(|x| x.get("title")).collect();
+        assert_eq!(titles, vec!["One", "Two"]);
+        assert!(rows.iter().all(|x| x.get::<i64, _>("decodable") == 1));
+        assert_eq!(count(&pool, "albums").await, 1);
+
+        // ...and once upgraded they are skipped again.
+        let again = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!((again.files_updated, again.files_skipped), (0, 2));
     }
 }
