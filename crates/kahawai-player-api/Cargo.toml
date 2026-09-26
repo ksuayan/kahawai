@@ -1,0 +1,17 @@
+[package]
+name = "kahawai-player-api"
+version = "0.1.0"
+edition = "2021"
+description = "Async HTTP client for the music server API (browse, playlists, jobs, stream URLs)"
+
+[dependencies]
+kahawai-core = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }

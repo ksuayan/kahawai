@@ -1,0 +1,1424 @@
+//! Library scanner: walk music dirs, BLAKE3-hash, extract metadata via lofty,
+//! write the SQLite catalog, incremental rescan. (Spec §3.1, S1.)
+//!
+//! Design notes:
+//! - The walk + per-file analysis (hash + lofty) run in `spawn_blocking`
+//!   workers; all SQLite I/O stays on the async side. One scan at a time is
+//!   enforced by the `scan_lock` in `AppState`.
+//! - Incremental rescan: a file whose (path, size, mtime) is unchanged is
+//!   skipped without hashing. A changed file is re-hashed; if the content
+//!   hash matches, only the stat columns are refreshed, otherwise the full
+//!   metadata row is rewritten. Files gone from disk are marked
+//!   `missing = 1`, never deleted (relink-friendly, spec §3.1).
+//! - Technical properties (duration, sample rate, bit depth, channels,
+//!   bitrate) come from **lofty** alone, not symphonia: one metadata path,
+//!   and lofty's `FileProperties` proved reliable against ffmpeg-generated
+//!   fixtures for MP3/FLAC/OGG/M4A/WAV (see tests below).
+//! - Formats the server cannot stream yet (DSF/DFF/SACD ISO — spec §2, S5)
+//!   are still cataloged with `decodable = 0` and NULL technical fields:
+//!   browsable now, playable later.
+
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::{Path, PathBuf},
+    time::{Instant, UNIX_EPOCH},
+};
+
+use kahawai_core::{AudioFormat, MusicError};
+use lofty::prelude::*;
+use lofty::tag::{Accessor, ItemKey};
+use sqlx::{sqlite::SqlitePool, Row};
+use tracing::{info, warn};
+
+use crate::db;
+
+/// Outcome of one scan run. Recorded in `scan_log`.
+#[derive(Debug, Default)]
+pub struct ScanReport {
+    pub files_seen: u64,
+    pub audio_files: u64,
+    pub files_added: u64,
+    pub files_updated: u64,
+    pub files_skipped: u64,
+    pub files_missing: u64,
+    pub elapsed_secs: f64,
+}
+
+/// Everything the blocking worker learns about one file.
+struct FileAnalysis {
+    path: String,
+    hash: String,
+    size: i64,
+    mtime: Option<i64>,
+    format: AudioFormat,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    genre: Option<String>,
+    year: Option<u16>,
+    track_no: Option<u32>,
+    disc_no: Option<u32>,
+    duration_ms: Option<u64>,
+    sample_rate: Option<u32>,
+    bit_depth: Option<u8>,
+    channels: Option<u8>,
+    bitrate: Option<u32>,
+    artwork: Option<ArtworkData>,
+}
+
+struct ArtworkData {
+    mime: String,
+    bytes: Vec<u8>,
+    hash: String,
+}
+
+/// Run a full scan of `dirs`, writing to the catalog. Async; per-file
+/// analysis is offloaded to blocking workers.
+/// [`run_scan`] with a progress callback. `on_progress(processed, total)`
+/// fires once per audio file, so `processed / total` is monotonic 0→1.
+/// Total comes from a first metadata-only walk (S9: "two-phase walk, count
+/// then scan"); the hashing walk below dominates the cost.
+pub async fn run_scan_with_progress(
+    pool: &SqlitePool,
+    dirs: &[PathBuf],
+    on_progress: impl Fn(u64, u64) + Send + Sync,
+) -> Result<ScanReport, MusicError> {
+    let start = Instant::now();
+    let total_audio: u64 = dirs
+        .iter()
+        .map(|dir| {
+            walkdir::WalkDir::new(dir)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file() && is_audio(e.path()))
+                .count() as u64
+        })
+        .sum();
+    let mut processed_audio: u64 = 0;
+    let scan_id: i64 =
+        sqlx::query("INSERT INTO scan_log (started_at) VALUES (datetime('now')) RETURNING id")
+            .fetch_one(pool)
+            .await
+            .map_err(db::cvt)?
+            .get("id");
+
+    // path -> (hash, size, mtime, missing) for change detection.
+    let rows = sqlx::query("SELECT path, hash, file_size, file_mtime, missing FROM tracks")
+        .fetch_all(pool)
+        .await
+        .map_err(db::cvt)?;
+    let mut known: HashMap<String, (String, Option<i64>, Option<i64>, i64)> =
+        HashMap::with_capacity(rows.len());
+    for r in &rows {
+        known.insert(
+            r.get("path"),
+            (
+                r.get("hash"),
+                r.get("file_size"),
+                r.get("file_mtime"),
+                r.get("missing"),
+            ),
+        );
+    }
+
+    let mut report = ScanReport::default();
+    let mut seen: HashSet<String> = HashSet::with_capacity(known.len().max(1024));
+
+    for dir in dirs {
+        let walker = walkdir::WalkDir::new(dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok());
+        for entry in walker {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            report.files_seen += 1;
+            let path = entry.path();
+            if !is_audio(path) {
+                continue;
+            }
+            report.audio_files += 1;
+            processed_audio += 1;
+            on_progress(processed_audio, total_audio);
+            let path_str = path.to_string_lossy().to_string();
+            // The file exists on disk; record that before analysis so a
+            // failed read doesn't mark a present file as missing.
+            seen.insert(path_str.clone());
+
+            let (size, mtime) = match std::fs::metadata(path) {
+                Ok(m) => (
+                    m.len() as i64,
+                    m.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64),
+                ),
+                Err(e) => {
+                    warn!(path = %path_str, error = %e, "stat failed; skipping");
+                    continue;
+                }
+            };
+
+            // Fast path: unchanged since last scan.
+            match known.get(&path_str) {
+                Some((_, ksize, kmtime, _)) if *ksize == Some(size) && *kmtime == mtime => {
+                    report.files_skipped += 1;
+                }
+                previous => {
+                    let is_new = previous.is_none();
+                    let owned = path.to_path_buf();
+                    let analysis = tokio::task::spawn_blocking(move || analyze_file(&owned))
+                        .await
+                        .map_err(|e| MusicError::JobFailed(format!("scan worker panicked: {e}")))?;
+                    match analysis {
+                        Ok(a) => {
+                            let hash_changed =
+                                previous.map(|(h, _, _, _)| h.as_str()) != Some(a.hash.as_str());
+                            if is_new || hash_changed {
+                                // One transaction per track: track row, album,
+                                // artists, artwork, and FTS all land together.
+                                let mut tx = pool.begin().await.map_err(db::cvt)?;
+                                upsert_track(&mut tx, &a).await?;
+                                tx.commit().await.map_err(db::cvt)?;
+                                if is_new {
+                                    report.files_added += 1;
+                                } else {
+                                    report.files_updated += 1;
+                                }
+                            } else {
+                                // Touched but identical content: refresh stat columns only.
+                                sqlx::query(
+                                    "UPDATE tracks SET file_size = ?, file_mtime = ?, missing = 0 WHERE path = ?",
+                                )
+                                .bind(a.size)
+                                .bind(a.mtime)
+                                .bind(&path_str)
+                                .execute(pool)
+                                .await
+                                .map_err(db::cvt)?;
+                                report.files_updated += 1;
+                            }
+                        }
+                        Err(e) => {
+                            warn!(path = %path_str, error = %e, "analyze failed; skipping file");
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if report.files_seen % 200 == 0 {
+                let mins = (start.elapsed().as_secs_f64() / 60.0).max(1e-9);
+                info!(
+                    files_seen = report.files_seen,
+                    audio_files = report.audio_files,
+                    files_per_min = (report.files_seen as f64 / mins) as u64,
+                    "scan progress"
+                );
+            }
+        }
+    }
+
+    // Anything in the catalog but not on disk is marked missing, not deleted.
+    // files_missing counts newly-missing files only, matching the delta
+    // semantics of files_added / files_updated.
+    for (path_str, (_, _, _, was_missing)) in &known {
+        if !seen.contains(path_str) && *was_missing == 0 {
+            sqlx::query("UPDATE tracks SET missing = 1 WHERE path = ?")
+                .bind(path_str)
+                .execute(pool)
+                .await
+                .map_err(db::cvt)?;
+            report.files_missing += 1;
+        }
+    }
+
+    report.elapsed_secs = start.elapsed().as_secs_f64();
+    sqlx::query(
+        "UPDATE scan_log SET finished_at = datetime('now'), files_scanned = ?,
+         files_added = ?, files_updated = ?, files_missing = ?, files_skipped = ?
+         WHERE id = ?",
+    )
+    .bind(report.files_seen as i64)
+    .bind(report.files_added as i64)
+    .bind(report.files_updated as i64)
+    .bind(report.files_missing as i64)
+    .bind(report.files_skipped as i64)
+    .bind(scan_id)
+    .execute(pool)
+    .await
+    .map_err(db::cvt)?;
+
+    info!(
+        files_seen = report.files_seen,
+        audio_files = report.audio_files,
+        added = report.files_added,
+        updated = report.files_updated,
+        skipped = report.files_skipped,
+        missing = report.files_missing,
+        elapsed_secs = report.elapsed_secs,
+        "scan complete"
+    );
+    Ok(report)
+}
+
+fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| AudioFormat::from_extension(ext) != AudioFormat::Unknown)
+        .unwrap_or(false)
+}
+
+/// Hash + read one file. Runs on a blocking worker: no `.await` here.
+fn analyze_file(path: &Path) -> Result<FileAnalysis, MusicError> {
+    let meta = std::fs::metadata(path).map_err(MusicError::Io)?;
+    let size = meta.len() as i64;
+    let mtime = meta
+        .modified()
+        .map_err(MusicError::Io)?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| MusicError::Io(std::io::Error::other(e)))
+        .map(|d| d.as_secs() as i64)
+        .ok();
+    let format = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(AudioFormat::from_extension)
+        .unwrap_or(AudioFormat::Unknown);
+
+    // Stream through BLAKE3 in 64 KiB chunks: O(1) memory regardless of size.
+    let mut f = std::fs::File::open(path).map_err(MusicError::Io)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).map_err(MusicError::Io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let hash = hasher.finalize().to_hex().to_string();
+
+    let mut a = FileAnalysis {
+        path: path.to_string_lossy().to_string(),
+        hash,
+        size,
+        mtime,
+        format,
+        title: None,
+        artist: None,
+        album: None,
+        album_artist: None,
+        genre: None,
+        year: None,
+        track_no: None,
+        disc_no: None,
+        duration_ms: None,
+        sample_rate: None,
+        bit_depth: None,
+        channels: None,
+        bitrate: None,
+        artwork: None,
+    };
+
+    // Best effort: undecodable-yet sources (DSD/ISO) may not parse; they are
+    // still cataloged with whatever came through, technical fields NULL.
+    match lofty::read_from_path(path) {
+        Ok(tagged) => {
+            let props = tagged.properties();
+            let dur = props.duration();
+            a.duration_ms = (dur.as_millis() > 0).then_some(dur.as_millis() as u64);
+            a.sample_rate = props.sample_rate();
+            a.bit_depth = props.bit_depth();
+            a.channels = props.channels();
+            a.bitrate = props.audio_bitrate();
+            if let Some(tag) = tagged.primary_tag() {
+                a.title = tag.title().map(|c| c.into_owned());
+                a.artist = tag.artist().map(|c| c.into_owned());
+                a.album = tag.album().map(|c| c.into_owned());
+                a.album_artist = tag.get_string(&ItemKey::AlbumArtist).map(str::to_string);
+                a.genre = tag.genre().map(|c| c.into_owned());
+                a.year = tag.year().and_then(|y| u16::try_from(y).ok());
+                a.track_no = tag.track();
+                a.disc_no = tag.disk();
+                if let Some(pic) = tag.pictures().iter().find(|p| !p.data().is_empty()) {
+                    let mime = pic
+                        .mime_type()
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_else(|| sniff_mime(pic.data()).to_string());
+                    a.artwork = Some(ArtworkData {
+                        hash: blake3::hash(pic.data()).to_hex().to_string(),
+                        bytes: pic.data().to_vec(),
+                        mime,
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            warn!(path = %a.path, error = %e, "lofty read failed; cataloging without metadata");
+        }
+    }
+
+    // A track with no title tag still needs a display name: the file stem.
+    if a.title.is_none() {
+        a.title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string);
+    }
+    Ok(a)
+}
+
+/// Guess an image MIME type from magic bytes, for pictures lofty couldn't type.
+fn sniff_mime(data: &[u8]) -> &'static str {
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if data.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if data.starts_with(b"GIF8") {
+        "image/gif"
+    } else if data.starts_with(b"BM") {
+        "image/bmp"
+    } else if data.len() > 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Catalog writes
+// ---------------------------------------------------------------------------
+
+async fn ensure_artist(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    name: &str,
+) -> Result<i64, MusicError> {
+    sqlx::query("INSERT OR IGNORE INTO artists (name) VALUES (?)")
+        .bind(name)
+        .execute(&mut **tx)
+        .await
+        .map_err(db::cvt)?;
+    let id: i64 = sqlx::query("SELECT id FROM artists WHERE name = ?")
+        .bind(name)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db::cvt)?
+        .get(0);
+    Ok(id)
+}
+
+/// Find or create the album row for a track.
+///
+/// Grouping key is (title, album-artist tag). The display artist starts as
+/// the album-artist tag, else the track artist; when a second distinct artist
+/// shows up under the same key the display is promoted to "Various Artists"
+/// so compilations without an explicit album-artist tag still group.
+async fn resolve_album(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    title: &str,
+    album_artist: Option<&str>,
+    track_artist: Option<&str>,
+    year: Option<u16>,
+    artwork_hash: Option<&str>,
+) -> Result<i64, MusicError> {
+    let display = album_artist.or(track_artist);
+    let rows = sqlx::query("SELECT id, artist, year, artwork_hash FROM albums WHERE title = ?")
+        .bind(title)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db::cvt)?;
+
+    let norm = |o: Option<String>| o.unwrap_or_default();
+    struct AlbumChoice {
+        id: i64,
+        artist: Option<String>,
+        year: Option<i64>,
+        artwork_hash: Option<String>,
+    }
+    let mut chosen: Option<AlbumChoice> = None;
+    for r in &rows {
+        let id: i64 = r.get("id");
+        let artist: Option<String> = r.get("artist");
+        if norm(artist.clone()) == album_artist.unwrap_or("") {
+            chosen = Some(AlbumChoice {
+                id,
+                artist,
+                year: r.get("year"),
+                artwork_hash: r.get("artwork_hash"),
+            });
+            break;
+        }
+    }
+    if chosen.is_none() && album_artist.is_none() {
+        // Untagged compilation bucket: reuse the "Various Artists" row if one
+        // was already promoted for this title.
+        for r in &rows {
+            let artist: Option<String> = r.get("artist");
+            if artist.as_deref() == Some("Various Artists") {
+                let id: i64 = r.get("id");
+                chosen = Some(AlbumChoice {
+                    id,
+                    artist,
+                    year: r.get("year"),
+                    artwork_hash: r.get("artwork_hash"),
+                });
+                break;
+            }
+        }
+    }
+
+    if let Some(choice) = chosen {
+        let mut new_artist: Option<String> = None;
+        match (choice.artist.as_deref(), display) {
+            (Some(cur), Some(d)) if cur != d && cur != "Various Artists" => {
+                new_artist = Some("Various Artists".to_string());
+            }
+            _ => {}
+        }
+        let new_year = (choice.year.is_none() && year.is_some()).then(|| year.unwrap() as i64);
+        let new_art = (choice.artwork_hash.is_none() && artwork_hash.is_some())
+            .then(|| artwork_hash.unwrap());
+        if new_artist.is_some() || new_year.is_some() || new_art.is_some() {
+            sqlx::query(
+                "UPDATE albums SET artist = COALESCE(?, artist), year = COALESCE(?, year),
+                 artwork_hash = COALESCE(?, artwork_hash) WHERE id = ?",
+            )
+            .bind(new_artist)
+            .bind(new_year)
+            .bind(new_art)
+            .bind(choice.id)
+            .execute(&mut **tx)
+            .await
+            .map_err(db::cvt)?;
+        }
+        return Ok(choice.id);
+    }
+
+    let id: i64 = sqlx::query(
+        "INSERT INTO albums (title, artist, year, artwork_hash) VALUES (?, ?, ?, ?) RETURNING id",
+    )
+    .bind(title)
+    .bind(display)
+    .bind(year.map(|y| y as i64))
+    .bind(artwork_hash)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db::cvt)?
+    .get("id");
+    Ok(id)
+}
+
+async fn upsert_track(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    a: &FileAnalysis,
+) -> Result<(), MusicError> {
+    let decodable = i64::from(a.format.is_directly_streamable());
+
+    let artwork_hash: Option<String> = match &a.artwork {
+        Some(art) => {
+            sqlx::query("INSERT OR IGNORE INTO artwork (hash, mime, bytes) VALUES (?, ?, ?)")
+                .bind(&art.hash)
+                .bind(&art.mime)
+                .bind(&art.bytes)
+                .execute(&mut **tx)
+                .await
+                .map_err(db::cvt)?;
+            Some(art.hash.clone())
+        }
+        None => None,
+    };
+
+    let album_id: Option<i64> = match &a.album {
+        Some(title) => Some(
+            resolve_album(
+                tx,
+                title,
+                a.album_artist.as_deref(),
+                a.artist.as_deref(),
+                a.year,
+                artwork_hash.as_deref(),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+
+    let track_id: i64 = match sqlx::query("SELECT id FROM tracks WHERE path = ?")
+        .bind(&a.path)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db::cvt)?
+    {
+        Some(r) => {
+            let id: i64 = r.get("id");
+            sqlx::query(
+                "UPDATE tracks SET hash = ?, format = ?, sample_rate = ?, bit_depth = ?,
+                     channels = ?, duration_ms = ?, bitrate = ?, title = ?, album = ?,
+                     artist = ?, album_id = ?, track_no = ?, disc_no = ?, genre = ?,
+                     year = ?, artwork_hash = ?, file_size = ?, file_mtime = ?,
+                     missing = 0, decodable = ? WHERE id = ?",
+            )
+            .bind(&a.hash)
+            .bind(a.format.wire_name())
+            .bind(a.sample_rate.map(i64::from))
+            .bind(a.bit_depth.map(i64::from))
+            .bind(a.channels.map(i64::from))
+            .bind(a.duration_ms.map(|v| v as i64))
+            .bind(a.bitrate.map(i64::from))
+            .bind(&a.title)
+            .bind(&a.album)
+            .bind(&a.artist)
+            .bind(album_id)
+            .bind(a.track_no.map(i64::from))
+            .bind(a.disc_no.map(i64::from))
+            .bind(&a.genre)
+            .bind(a.year.map(|y| y as i64))
+            .bind(&artwork_hash)
+            .bind(a.size)
+            .bind(a.mtime)
+            .bind(decodable)
+            .bind(id)
+            .execute(&mut **tx)
+            .await
+            .map_err(db::cvt)?;
+            sqlx::query("DELETE FROM track_artists WHERE track_id = ?")
+                .bind(id)
+                .execute(&mut **tx)
+                .await
+                .map_err(db::cvt)?;
+            id
+        }
+        None => sqlx::query(
+            "INSERT INTO tracks (path, hash, format, sample_rate, bit_depth, channels,
+                     duration_ms, bitrate, title, album, artist, album_id, track_no, disc_no,
+                     genre, year, artwork_hash, file_size, file_mtime, missing, decodable)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                     RETURNING id",
+        )
+        .bind(&a.path)
+        .bind(&a.hash)
+        .bind(a.format.wire_name())
+        .bind(a.sample_rate.map(i64::from))
+        .bind(a.bit_depth.map(i64::from))
+        .bind(a.channels.map(i64::from))
+        .bind(a.duration_ms.map(|v| v as i64))
+        .bind(a.bitrate.map(i64::from))
+        .bind(&a.title)
+        .bind(&a.album)
+        .bind(&a.artist)
+        .bind(album_id)
+        .bind(a.track_no.map(i64::from))
+        .bind(a.disc_no.map(i64::from))
+        .bind(&a.genre)
+        .bind(a.year.map(|y| y as i64))
+        .bind(&artwork_hash)
+        .bind(a.size)
+        .bind(a.mtime)
+        .bind(decodable)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db::cvt)?
+        .get("id"),
+    };
+
+    // Multi-artist: every split name gets a track_artists row; all distinct
+    // track artists (plus the album-artist tag) link the album so artist
+    // detail pages surface compilation appearances.
+    if let Some(artist) = &a.artist {
+        for name in split_artists(artist) {
+            let aid = ensure_artist(tx, &name).await?;
+            sqlx::query("INSERT INTO track_artists (track_id, artist_id) VALUES (?, ?)")
+                .bind(track_id)
+                .bind(aid)
+                .execute(&mut **tx)
+                .await
+                .map_err(db::cvt)?;
+            if let Some(album_id) = album_id {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO album_artists (album_id, artist_id) VALUES (?, ?)",
+                )
+                .bind(album_id)
+                .bind(aid)
+                .execute(&mut **tx)
+                .await
+                .map_err(db::cvt)?;
+            }
+        }
+    }
+    if let Some(aa) = &a.album_artist {
+        for name in split_artists(aa) {
+            let aid = ensure_artist(tx, &name).await?;
+            if let Some(album_id) = album_id {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO album_artists (album_id, artist_id) VALUES (?, ?)",
+                )
+                .bind(album_id)
+                .bind(aid)
+                .execute(&mut **tx)
+                .await
+                .map_err(db::cvt)?;
+            }
+        }
+    }
+
+    // FTS5 is maintained manually (plain table, no triggers): delete + insert.
+    sqlx::query("DELETE FROM search_fts WHERE rowid = ?")
+        .bind(track_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db::cvt)?;
+    sqlx::query("INSERT INTO search_fts (rowid, title, album, artist) VALUES (?, ?, ?, ?)")
+        .bind(track_id)
+        .bind(a.title.as_deref().unwrap_or(""))
+        .bind(a.album.as_deref().unwrap_or(""))
+        .bind(a.artist.as_deref().unwrap_or(""))
+        .execute(&mut **tx)
+        .await
+        .map_err(db::cvt)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Artist-name splitting
+// ---------------------------------------------------------------------------
+
+/// Separators that introduce featured artists, matched case-insensitively.
+/// Ordered longest-first so `"ft. "` wins over `"ft "`.
+const FEAT_PREFIXES: &[&str] = &["featuring ", "feat. ", "feat ", "ft. ", "ft "];
+
+fn strip_feat_prefix(s: &str) -> Option<&str> {
+    let t = s.trim_start();
+    FEAT_PREFIXES.iter().find_map(|p| {
+        (t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p)).then(|| t[p.len()..].trim())
+    })
+}
+
+/// Split an artist tag into individual artist names.
+///
+/// Rule (documented, v1):
+/// 1. Featured artists are extracted first: case-insensitive `feat.` / `ft.`
+///    / `featuring`, with or without surrounding parentheses —
+///    `"A (feat. B)"` and `"A feat. B"` both yield main `"A"` + extra `"B"`.
+/// 2. What remains splits on `;`, and on `/` only when the slash touches
+///    whitespace (`"A / B"` splits; `"AC/DC"` does not).
+/// 3. Trim, drop empties, dedupe case-insensitively, keep first-seen order.
+///
+/// Deliberately NOT split: `,`, `&`, "and" — band names like
+/// "Crosby, Stills & Nash" or "Simon & Garfunkel" must survive intact.
+pub fn split_artists(raw: &str) -> Vec<String> {
+    // Pass 1: lift parenthesized "(feat. X)" segments out.
+    let mut main = String::with_capacity(raw.len());
+    let mut extras: Vec<String> = Vec::new();
+    let mut rest = raw;
+    while let Some(open) = rest.find('(') {
+        main.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find(')') {
+            Some(close) => {
+                let inner = after[..close].trim();
+                match strip_feat_prefix(inner) {
+                    Some(feat) if !feat.is_empty() => {
+                        extras.push(feat.to_string());
+                        main.push(' ');
+                    }
+                    _ => main.push_str(&rest[open..open + 1 + close + 1]),
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                main.push_str(&rest[open..]);
+                rest = "";
+                break;
+            }
+        }
+    }
+    main.push_str(rest);
+
+    // Pass 2: bare "feat. X" suffixes (no parens).
+    let mut chunks: Vec<String> = Vec::new();
+    for seed in std::iter::once(main).chain(extras) {
+        chunks.extend(split_bare_feat(&seed));
+    }
+
+    // Pass 3: ';' and whitespace-adjacent '/'; trim; dedupe.
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    for chunk in &chunks {
+        for piece in split_multi(chunk) {
+            let name = piece.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if seen.insert(name.to_ascii_lowercase()) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Split `s` on bare feat-word separators (`"A feat. B"` → `["A", "B"]`).
+/// `to_ascii_lowercase` preserves byte length, so byte indices stay valid.
+fn split_bare_feat(s: &str) -> Vec<String> {
+    let lower = s.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < lower.len() {
+        let hit = FEAT_PREFIXES.iter().find_map(|p| {
+            if (i == 0 || bytes[i - 1] == b' ') && lower[i..].starts_with(p) {
+                Some(p.len())
+            } else {
+                None
+            }
+        });
+        match hit {
+            Some(len) => {
+                parts.push(s[start..i].to_string());
+                i += len;
+                start = i;
+            }
+            None => i += 1,
+        }
+    }
+    parts.push(s[start..].to_string());
+    parts
+}
+
+/// Split on `;`, and on `/` only when it touches whitespace on either side.
+fn split_multi(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let (idx, c) = chars[i];
+        let is_sep = c == ';'
+            || (c == '/'
+                && ((i > 0 && chars[i - 1].1.is_whitespace())
+                    || (i + 1 < chars.len() && chars[i + 1].1.is_whitespace())));
+        if is_sep {
+            parts.push(s[start..idx].trim());
+            start = idx + c.len_utf8();
+        }
+        i += 1;
+    }
+    parts.push(s[start..].trim());
+    parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_artists_basic_separators() {
+        assert_eq!(split_artists("Miles Davis"), vec!["Miles Davis"]);
+        assert_eq!(
+            split_artists("John Coltrane; Miles Davis"),
+            vec!["John Coltrane", "Miles Davis"]
+        );
+        assert_eq!(split_artists("A / B"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn split_artists_preserves_band_names() {
+        // Commas, ampersands, and tight slashes are NOT separators.
+        assert_eq!(
+            split_artists("Crosby, Stills & Nash"),
+            vec!["Crosby, Stills & Nash"]
+        );
+        assert_eq!(split_artists("AC/DC"), vec!["AC/DC"]);
+        assert_eq!(
+            split_artists("Simon & Garfunkel"),
+            vec!["Simon & Garfunkel"]
+        );
+    }
+
+    #[test]
+    fn split_artists_extracts_featured() {
+        assert_eq!(
+            split_artists("Thelonious Monk feat. Dizzy Gillespie"),
+            vec!["Thelonious Monk", "Dizzy Gillespie"]
+        );
+        assert_eq!(split_artists("A (feat. B)"), vec!["A", "B"]);
+        assert_eq!(split_artists("A (Featuring B & C)"), vec!["A", "B & C"]);
+        assert_eq!(split_artists("A ft. B"), vec!["A", "B"]);
+        // Non-feat parens are left alone.
+        assert_eq!(split_artists("A (Remaster)"), vec!["A (Remaster)"]);
+    }
+
+    #[test]
+    fn split_artists_trims_and_dedupes() {
+        assert_eq!(split_artists("A; a ; B"), vec!["A", "B"]);
+        assert_eq!(split_artists("  "), Vec::<String>::new());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test fixtures: a small tagged library generated with ffmpeg (hermetic:
+// temp dirs only, no network; requires the ffmpeg binary).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub mod fixtures {
+    use super::*;
+    use std::process::Command;
+
+    pub struct TrackSpec<'a> {
+        pub dir: &'a str,
+        pub file: &'a str,
+        /// ffmpeg audio codec: "flac" | "libmp3lame" | "libvorbis" | "aac" | "pcm_s16le"
+        pub codec: &'a str,
+        pub title: &'a str,
+        pub artist: &'a str,
+        pub album: &'a str,
+        pub album_artist: Option<&'a str>,
+        pub track_no: u32,
+        pub year: Option<&'a str>,
+        pub genre: Option<&'a str>,
+        pub art: bool,
+    }
+
+    fn ffmpeg(args: &[&str]) {
+        let st = Command::new("ffmpeg")
+            .args(args)
+            .status()
+            .expect("ffmpeg binary is required for scanner fixtures");
+        assert!(st.success(), "ffmpeg failed: {args:?}");
+    }
+
+    pub fn cover_png(dir: &Path) -> PathBuf {
+        let p = dir.join("cover.png");
+        ffmpeg(&[
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=16x16:duration=1",
+            "-frames:v",
+            "1",
+            p.to_str().unwrap(),
+        ]);
+        p
+    }
+
+    pub fn make_track(lib: &Path, cover: Option<&Path>, spec: &TrackSpec) {
+        let dir = lib.join(spec.dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join(spec.file);
+        let mut tags: Vec<String> = vec![
+            format!("title={}", spec.title),
+            format!("artist={}", spec.artist),
+            format!("album={}", spec.album),
+            format!("track={}", spec.track_no),
+        ];
+        if let Some(aa) = spec.album_artist {
+            tags.push(format!("album_artist={aa}"));
+        }
+        if let Some(y) = spec.year {
+            tags.push(format!("date={y}"));
+        }
+        if let Some(g) = spec.genre {
+            tags.push(format!("genre={g}"));
+        }
+
+        let out_s = out.to_str().unwrap().to_string();
+        let mut args: Vec<&str> = vec![
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1:sample_rate=44100",
+        ];
+        let cover_s;
+        if let Some(c) = cover {
+            cover_s = c.to_str().unwrap().to_string();
+            args.extend(["-i", &cover_s]);
+        }
+        if cover.is_some() {
+            args.extend([
+                "-map",
+                "0:a",
+                "-map",
+                "1:v",
+                "-c:v",
+                "copy",
+                "-disposition:v",
+                "attached_pic",
+            ]);
+        }
+        let codec = spec.codec.to_string();
+        // Stereo so the scanner records channels=2. Placed here (after all
+        // inputs) so ffmpeg treats it as an output option.
+        args.extend(["-ac", "2"]);
+        args.extend(["-c:a", &codec]);
+        if spec.codec == "libmp3lame" {
+            args.extend(["-id3v2_version", "3"]);
+        }
+        let meta_args: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+        let mut owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        // lofty does not read the RIFF INFO tags ffmpeg writes on WAV, so the
+        // WAV fixture skips ffmpeg metadata and is tagged with lofty itself.
+        let tag_wav_with_lofty = spec.codec == "pcm_s16le";
+        if !tag_wav_with_lofty {
+            for t in &meta_args {
+                owned.push("-metadata".to_string());
+                owned.push(t.clone());
+            }
+        }
+        owned.push(out_s);
+        let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+        ffmpeg(&refs);
+        assert!(out.exists(), "fixture not created: {}", out.display());
+        if tag_wav_with_lofty {
+            tag_wav_fixture(&out, spec);
+        }
+    }
+
+    /// lofty reads ID3v2 on WAV but not the RIFF INFO tags ffmpeg writes, so
+    /// the WAV fixture is tagged with lofty itself after ffmpeg encodes it.
+    fn tag_wav_fixture(out: &Path, spec: &TrackSpec) {
+        use lofty::tag::{Tag, TagType};
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_title(spec.title.to_owned());
+        tag.set_artist(spec.artist.to_owned());
+        tag.set_album(spec.album.to_owned());
+        if let Some(aa) = spec.album_artist {
+            assert!(
+                tag.insert_text(ItemKey::AlbumArtist, aa.to_owned()),
+                "insert album artist"
+            );
+        }
+        tag.set_track(spec.track_no);
+        if let Some(y) = spec.year {
+            tag.set_year(y.parse::<u32>().expect("year parses"));
+        }
+        if let Some(g) = spec.genre {
+            tag.set_genre(g.to_owned());
+        }
+        tag.save_to_path(out, lofty::config::WriteOptions::default())
+            .expect("lofty wav tag write");
+    }
+
+    /// The standard fixture library: 3 albums (one compilation), 5 codecs,
+    /// multi-artist tags, one embedded cover.
+    ///
+    /// - "Blue Train" / John Coltrane: 2 FLAC + 1 WAV (one with cover art)
+    /// - "Kind of Blue" / Miles Davis: 2 MP3
+    /// - "Jazz Compilation" / Various Artists: 2 OGG + 1 M4A, mixed artists
+    pub fn build_library(root: &Path) -> PathBuf {
+        let lib = root.join("lib");
+        let cover = cover_png(root);
+        let tracks = [
+            TrackSpec {
+                dir: "Blue Train",
+                file: "01.flac",
+                codec: "flac",
+                title: "Blue Train",
+                artist: "John Coltrane",
+                album: "Blue Train",
+                album_artist: Some("John Coltrane"),
+                track_no: 1,
+                year: Some("1957"),
+                genre: Some("Jazz"),
+                art: true,
+            },
+            TrackSpec {
+                dir: "Blue Train",
+                file: "02.flac",
+                codec: "flac",
+                title: "Moment's Notice",
+                artist: "John Coltrane",
+                album: "Blue Train",
+                album_artist: Some("John Coltrane"),
+                track_no: 2,
+                year: Some("1957"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+            TrackSpec {
+                dir: "Blue Train",
+                file: "03.wav",
+                codec: "pcm_s16le",
+                title: "Locomotion",
+                artist: "John Coltrane",
+                album: "Blue Train",
+                album_artist: Some("John Coltrane"),
+                track_no: 3,
+                year: Some("1957"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+            TrackSpec {
+                dir: "Kind of Blue",
+                file: "01.mp3",
+                codec: "libmp3lame",
+                title: "So What",
+                artist: "Miles Davis",
+                album: "Kind of Blue",
+                album_artist: Some("Miles Davis"),
+                track_no: 1,
+                year: Some("1959"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+            TrackSpec {
+                dir: "Kind of Blue",
+                file: "02.mp3",
+                codec: "libmp3lame",
+                title: "Freddie Freeloader",
+                artist: "Miles Davis",
+                album: "Kind of Blue",
+                album_artist: Some("Miles Davis"),
+                track_no: 2,
+                year: Some("1959"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+            TrackSpec {
+                dir: "Jazz Compilation",
+                file: "01.ogg",
+                codec: "libvorbis",
+                title: "Take Five",
+                artist: "Dave Brubeck",
+                album: "Jazz Compilation",
+                album_artist: Some("Various Artists"),
+                track_no: 1,
+                year: Some("1998"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+            TrackSpec {
+                dir: "Jazz Compilation",
+                file: "02.ogg",
+                codec: "libvorbis",
+                title: "My Favorite Things",
+                artist: "John Coltrane; Miles Davis",
+                album: "Jazz Compilation",
+                album_artist: Some("Various Artists"),
+                track_no: 2,
+                year: Some("1998"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+            TrackSpec {
+                dir: "Jazz Compilation",
+                file: "03.m4a",
+                codec: "aac",
+                title: "Round Midnight",
+                artist: "Thelonious Monk feat. Dizzy Gillespie",
+                album: "Jazz Compilation",
+                album_artist: Some("Various Artists"),
+                track_no: 3,
+                year: Some("1998"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+        ];
+        for t in &tracks {
+            make_track(&lib, t.art.then_some(cover.as_path()), t);
+        }
+        lib
+    }
+
+    /// Count rows in a table. Test helper.
+    pub async fn count(pool: &SqlitePool, table: &str) -> i64 {
+        sqlx::query(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .get(0)
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::fixtures::*;
+    use super::*;
+
+    async fn scanned_pool() -> (SqlitePool, tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = build_library(dir.path());
+        let pool = db::open(&dir.path().join("test.db")).await.unwrap();
+        run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        (pool, dir, lib)
+    }
+
+    #[tokio::test]
+    async fn scan_populates_catalog() {
+        let (pool, _dir, _lib) = scanned_pool().await;
+        assert_eq!(count(&pool, "tracks").await, 8);
+        assert_eq!(count(&pool, "albums").await, 3);
+
+        // Compilation grouped under one album.
+        let comp: i64 = sqlx::query("SELECT COUNT(*) FROM tracks WHERE album = 'Jazz Compilation'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(comp, 3);
+        let comp_albums: i64 =
+            sqlx::query("SELECT COUNT(*) FROM albums WHERE title = 'Jazz Compilation'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(comp_albums, 1);
+
+        // Technical fields came through lofty for a FLAC track.
+        let r = sqlx::query(
+            "SELECT title, artist, album, genre, year, track_no, duration_ms,
+                    sample_rate, bit_depth, channels, decodable, missing, format, hash
+             FROM tracks WHERE title = 'Blue Train'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(r.get::<String, _>("artist"), "John Coltrane");
+        assert_eq!(r.get::<String, _>("genre"), "Jazz");
+        assert_eq!(r.get::<i64, _>("year"), 1957);
+        assert_eq!(r.get::<i64, _>("track_no"), 1);
+        assert_eq!(r.get::<i64, _>("duration_ms"), 1000);
+        assert_eq!(r.get::<i64, _>("sample_rate"), 44100);
+        assert_eq!(r.get::<i64, _>("channels"), 2);
+        assert_eq!(r.get::<i64, _>("decodable"), 1);
+        assert_eq!(r.get::<i64, _>("missing"), 0);
+        assert_eq!(r.get::<String, _>("format"), "flac");
+        let hash: String = r.get("hash");
+        assert_eq!(hash.len(), 64, "BLAKE3 hex digest");
+
+        // Multi-artist ";" split recorded in track_artists.
+        let duo: i64 = sqlx::query(
+            "SELECT COUNT(*) FROM track_artists ta JOIN tracks t ON t.id = ta.track_id
+             WHERE t.title = 'My Favorite Things'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get(0);
+        assert_eq!(duo, 2);
+
+        // feat. extraction created a separate artist row.
+        let dizzy: i64 = sqlx::query("SELECT COUNT(*) FROM artists WHERE name = 'Dizzy Gillespie'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(dizzy, 1);
+
+        // Embedded artwork deduplicated into the artwork table.
+        assert_eq!(count(&pool, "artwork").await, 1);
+        let art_album: Option<String> =
+            sqlx::query("SELECT artwork_hash FROM albums WHERE title = 'Blue Train'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("artwork_hash");
+        assert!(art_album.unwrap().len() == 64);
+
+        // FTS5 populated.
+        let fts: i64 = sqlx::query("SELECT COUNT(*) FROM search_fts")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(fts, 8);
+
+        // scan_log recorded the run.
+        let log = sqlx::query("SELECT files_added, files_skipped, finished_at FROM scan_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(log.get::<i64, _>("files_added"), 8);
+        assert_eq!(log.get::<i64, _>("files_skipped"), 0);
+        let finished: Option<String> = log.get("finished_at");
+        assert!(finished.is_some());
+    }
+
+    #[tokio::test]
+    async fn second_scan_is_a_noop() {
+        let (pool, _dir, lib) = scanned_pool().await;
+        let report = run_scan_with_progress(&pool, &[lib], |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(report.files_added, 0);
+        assert_eq!(report.files_updated, 0);
+        assert_eq!(report.files_missing, 0);
+        assert_eq!(report.files_skipped, 8);
+        assert_eq!(count(&pool, "tracks").await, 8);
+    }
+
+    /// DSD/ISO sources are catalog-only: lofty cannot parse them, so they land
+    /// with NULL technical fields and decodable=false, never failing the scan.
+    #[tokio::test]
+    async fn scan_catalogs_undecodable_dsd_without_technical_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        // Byte stand-ins: real DSD/ISO payloads aren't needed — the point is
+        // that lofty can't parse these, exercising the catalog-only path.
+        for name in ["track01.dsf", "track02.dff", "album.iso"] {
+            std::fs::write(lib.join(name), vec![0xABu8; 4096]).unwrap();
+        }
+        let pool = db::open(&dir.path().join("t.db")).await.unwrap();
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_added, 3);
+
+        let rows = sqlx::query(
+            "SELECT format, decodable, missing, title, sample_rate, bit_depth,
+                    channels, duration_ms, bitrate
+             FROM tracks ORDER BY path",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        let fmts: Vec<String> = rows.iter().map(|r| r.get("format")).collect();
+        assert_eq!(fmts, vec!["sacd_iso", "dsf", "dff"]);
+        for r in &rows {
+            assert_eq!(r.get::<i64, _>("decodable"), 0);
+            assert_eq!(r.get::<i64, _>("missing"), 0);
+            assert!(r.get::<Option<i64>, _>("sample_rate").is_none());
+            assert!(r.get::<Option<i64>, _>("bit_depth").is_none());
+            assert!(r.get::<Option<i64>, _>("channels").is_none());
+            assert!(r.get::<Option<i64>, _>("duration_ms").is_none());
+            assert!(r.get::<Option<i64>, _>("bitrate").is_none());
+        }
+        // File-stem fallback titles, no album rows without album tags.
+        let titles: Vec<String> = rows.iter().map(|r| r.get("title")).collect();
+        assert_eq!(titles, vec!["album", "track01", "track02"]);
+        assert_eq!(count(&pool, "albums").await, 0);
+    }
+
+    #[tokio::test]
+    async fn scan_detects_added_removed_and_changed() {
+        let (pool, dir, lib) = scanned_pool().await;
+
+        // Added file.
+        make_track(
+            &lib,
+            None,
+            &TrackSpec {
+                dir: "Kind of Blue",
+                file: "03.mp3",
+                codec: "libmp3lame",
+                title: "Blue in Green",
+                artist: "Miles Davis",
+                album: "Kind of Blue",
+                album_artist: Some("Miles Davis"),
+                track_no: 3,
+                year: Some("1959"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+        );
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_added, 1);
+        assert_eq!(count(&pool, "tracks").await, 9);
+
+        // Removed file: marked missing, never deleted.
+        std::fs::remove_file(lib.join("Kind of Blue").join("03.mp3")).unwrap();
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_missing, 1);
+        assert_eq!(count(&pool, "tracks").await, 9);
+        let missing: i64 = sqlx::query("SELECT missing FROM tracks WHERE title = 'Blue in Green'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("missing");
+        assert_eq!(missing, 1);
+
+        // Changed file: rewritten with a new title tag -> re-hashed, updated.
+        std::fs::remove_file(lib.join("Kind of Blue").join("01.mp3")).unwrap();
+        make_track(
+            &lib,
+            None,
+            &TrackSpec {
+                dir: "Kind of Blue",
+                file: "01.mp3",
+                codec: "libmp3lame",
+                title: "So What (Remaster)",
+                artist: "Miles Davis",
+                album: "Kind of Blue",
+                album_artist: Some("Miles Davis"),
+                track_no: 1,
+                year: Some("1959"),
+                genre: Some("Jazz"),
+                art: false,
+            },
+        );
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_updated, 1);
+        let title: String =
+            sqlx::query("SELECT title FROM tracks WHERE path LIKE '%Kind of Blue/01.mp3'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("title");
+        assert_eq!(title, "So What (Remaster)");
+        // FTS follows the update.
+        let fts: i64 =
+            sqlx::query("SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH '\"Remaster\"*'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(fts, 1);
+
+        // Touched file (mtime changed, content identical): stat refresh, same hash.
+        let wav = lib.join("Blue Train").join("03.wav");
+        let before: String = sqlx::query("SELECT hash FROM tracks WHERE title = 'Locomotion'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("hash");
+        let new_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&wav)
+            .unwrap()
+            .set_modified(new_mtime)
+            .unwrap();
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_updated, 1);
+        let after: String = sqlx::query("SELECT hash FROM tracks WHERE title = 'Locomotion'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("hash");
+        assert_eq!(before, after, "identical content keeps its hash");
+
+        // scan_log has one row per run.
+        let runs: i64 = sqlx::query("SELECT COUNT(*) FROM scan_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(runs, 5);
+        let _ = dir; // keep tempdir alive
+    }
+}

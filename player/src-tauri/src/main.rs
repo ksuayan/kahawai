@@ -1,0 +1,518 @@
+//! Kahawai Player — Tauri 2 shell (C2).
+//!
+//! The shell is deliberately thin: it owns an [`EngineController`] on its
+//! dedicated playback thread, forwards the engine's state events to the
+//! Vue UI as `player-state`, and resolves `play_track` ids through
+//! [`kahawai_player_api`]. All playback logic lives in `kahawai-player-core`; audio output
+//! is a [`SinkRouter`] of [`CpalSink`] (shared-mode PCM) and the platform
+//! exclusive DoP sink (macOS hog-mode CoreAudio; a no-op stub elsewhere).
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use kahawai_core::{StreamFormat, Track};
+use kahawai_player_api::Client as ApiClient;
+use kahawai_player_audio::{
+    CpalSink, SinkRouter, dop_capable_rates, exclusive_dop_sink,
+    list_output_devices as audio_list_output_devices,
+};
+use kahawai_player_core::{
+    DsdStory, DspSettings, EngineController, EqBand, OutputPath, PlayerEvent, PlayerSnapshot,
+    PlayerStatus, RepeatMode, validate_bands,
+};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Shared shell state. The engine is `Arc` so the event-forwarding thread
+/// can drain events while commands borrow it.
+struct AppState {
+    engine: Arc<EngineController>,
+    api: Mutex<ApiClient>,
+    settings_path: PathBuf,
+}
+
+/// `player-state` payload. Field names match `ui/src/types.ts PlayerState`
+/// exactly (snake_case).
+#[derive(Debug, Clone, serde::Serialize)]
+struct PlayerStateDto {
+    status: &'static str,
+    track: Option<Track>,
+    queue_ids: Vec<i64>,
+    queue_index: Option<usize>,
+    position_ms: u64,
+    duration_ms: Option<u64>,
+    format: Option<&'static str>,
+    chain: Option<String>,
+    /// "pcm-shared" | "dop-exclusive" — drives the Exclusive DoP badge.
+    output_path: &'static str,
+    volume: f32,
+    error: Option<String>,
+    /// "off" | "all" | "one".
+    repeat: &'static str,
+    shuffle: bool,
+}
+
+fn status_str(s: PlayerStatus) -> &'static str {
+    match s {
+        PlayerStatus::Stopped => "stopped",
+        PlayerStatus::Loading => "loading",
+        PlayerStatus::Playing => "playing",
+        PlayerStatus::Paused => "paused",
+    }
+}
+
+fn format_str(f: StreamFormat) -> &'static str {
+    match f {
+        StreamFormat::Passthrough => "passthrough",
+        StreamFormat::Flac => "flac",
+        StreamFormat::Opus => "opus",
+        StreamFormat::Mp3 => "mp3",
+        StreamFormat::Dop => "dop",
+    }
+}
+
+fn output_path_str(p: OutputPath) -> &'static str {
+    match p {
+        OutputPath::Pcm => "pcm-shared",
+        OutputPath::Dop => "dop-exclusive",
+    }
+}
+
+fn repeat_str(m: RepeatMode) -> &'static str {
+    match m {
+        RepeatMode::Off => "off",
+        RepeatMode::All => "all",
+        RepeatMode::One => "one",
+    }
+}
+
+impl From<PlayerSnapshot> for PlayerStateDto {
+    fn from(s: PlayerSnapshot) -> Self {
+        Self {
+            status: status_str(s.status),
+            track: s.track,
+            queue_ids: s.queue_ids,
+            queue_index: s.queue_index,
+            position_ms: s.position_ms,
+            duration_ms: s.duration_ms,
+            format: s.format.map(format_str),
+            chain: s.chain,
+            output_path: output_path_str(s.output_path),
+            volume: s.volume,
+            error: s.error,
+            repeat: repeat_str(s.repeat),
+            shuffle: s.shuffle,
+        }
+    }
+}
+
+fn emit_state(app: &AppHandle, engine: &EngineController) {
+    let dto = PlayerStateDto::from(engine.snapshot());
+    if let Err(e) = app.emit("player-state", dto) {
+        eprintln!("[shell] player-state emit failed: {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_state(state: State<'_, AppState>) -> PlayerStateDto {
+    PlayerStateDto::from(state.engine.snapshot())
+}
+
+#[tauri::command]
+fn get_server_url(state: State<'_, AppState>) -> String {
+    state.engine.server_url()
+}
+
+#[tauri::command]
+fn set_server_url(app: AppHandle, state: State<'_, AppState>, url: String) -> Result<(), String> {
+    let url = url.trim().trim_end_matches('/').to_string();
+    if url.is_empty() {
+        return Err("server URL must not be empty".to_string());
+    }
+    *state
+        .api
+        .lock()
+        .map_err(|_| "api lock poisoned".to_string())? = ApiClient::new(url.clone());
+    state.engine.set_server_url(&url);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
+/// Play one track by catalog id. Metadata is resolved through the browse
+/// API; the track becomes a one-item queue.
+#[tauri::command]
+async fn play_track(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let api: ApiClient = state
+        .api
+        .lock()
+        .map_err(|_| "api lock poisoned".to_string())?
+        .clone();
+    let track = api.track(id).await.map_err(|e| e.to_string())?;
+    state.engine.play_queue(vec![track], 0);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
+/// Replace the queue with full `Track` objects (the UI owns the list) and
+/// start at `index`.
+#[tauri::command]
+fn queue_play(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tracks: Vec<Track>,
+    index: usize,
+) -> Result<(), String> {
+    state.engine.play_queue(tracks, index);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
+#[tauri::command]
+fn pause(app: AppHandle, state: State<'_, AppState>) {
+    state.engine.pause();
+    emit_state(&app, &state.engine);
+}
+
+#[tauri::command]
+fn resume(app: AppHandle, state: State<'_, AppState>) {
+    state.engine.resume();
+    emit_state(&app, &state.engine);
+}
+
+#[tauri::command]
+fn toggle(app: AppHandle, state: State<'_, AppState>) {
+    state.engine.toggle();
+    emit_state(&app, &state.engine);
+}
+
+#[tauri::command]
+fn stop(app: AppHandle, state: State<'_, AppState>) {
+    state.engine.stop();
+    emit_state(&app, &state.engine);
+}
+
+#[tauri::command]
+fn seek_ms(app: AppHandle, state: State<'_, AppState>, ms: u64) {
+    state.engine.seek_ms(ms);
+    emit_state(&app, &state.engine);
+}
+
+#[tauri::command]
+fn next(app: AppHandle, state: State<'_, AppState>) {
+    state.engine.next();
+    emit_state(&app, &state.engine);
+}
+
+#[tauri::command]
+fn prev(app: AppHandle, state: State<'_, AppState>) {
+    state.engine.prev();
+    emit_state(&app, &state.engine);
+}
+
+/// Frontend aliases: the Vue bridge invokes `next_track` / `prev_track`.
+#[tauri::command]
+fn next_track(app: AppHandle, state: State<'_, AppState>) {
+    next(app, state);
+}
+
+#[tauri::command]
+fn prev_track(app: AppHandle, state: State<'_, AppState>) {
+    prev(app, state);
+}
+
+/// Global format override; `None` clears it (ladder decides per track).
+#[tauri::command]
+fn set_format(app: AppHandle, state: State<'_, AppState>, fmt: Option<StreamFormat>) {
+    state.engine.set_global_format(fmt);
+    emit_state(&app, &state.engine);
+}
+
+#[tauri::command]
+fn set_track_format(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    track_id: i64,
+    fmt: Option<StreamFormat>,
+) {
+    state.engine.set_track_format(track_id, fmt);
+    emit_state(&app, &state.engine);
+}
+
+#[tauri::command]
+fn set_volume(app: AppHandle, state: State<'_, AppState>, v: f32) {
+    state.engine.set_volume(v.clamp(0.0, 1.0));
+    emit_state(&app, &state.engine);
+}
+
+// ---------------------------------------------------------------------------
+// C3: queue actions, repeat/shuffle, DSD story
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn set_repeat(app: AppHandle, state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    let m = match mode.as_str() {
+        "off" => RepeatMode::Off,
+        "all" => RepeatMode::All,
+        "one" => RepeatMode::One,
+        _ => return Err(format!("unknown repeat mode: {mode}")),
+    };
+    state.engine.set_repeat(m);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_shuffle(app: AppHandle, state: State<'_, AppState>, on: bool) {
+    state.engine.set_shuffle(on);
+    emit_state(&app, &state.engine);
+}
+
+/// Append tracks to the end of the queue ("add to queue"); current
+/// playback is undisturbed.
+#[tauri::command]
+fn queue_append(app: AppHandle, state: State<'_, AppState>, tracks: Vec<Track>) {
+    state.engine.append_tracks(tracks);
+    emit_state(&app, &state.engine);
+}
+
+/// Insert tracks right after the current queue item ("play next").
+#[tauri::command]
+fn queue_insert_next(app: AppHandle, state: State<'_, AppState>, tracks: Vec<Track>) {
+    state.engine.insert_tracks_next(tracks);
+    emit_state(&app, &state.engine);
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PlaybackPrefsDto {
+    /// "native" | "convert".
+    dsd_story: &'static str,
+    global_format: Option<&'static str>,
+}
+
+/// Persisted playback preferences (DSD story + global format override).
+/// The UI calls this once at startup; repeat/shuffle ride in `get_state`.
+#[tauri::command]
+fn get_playback_prefs(state: State<'_, AppState>) -> PlaybackPrefsDto {
+    let (story, fmt) = state.engine.playback_prefs();
+    PlaybackPrefsDto {
+        dsd_story: match story {
+            DsdStory::Native => "native",
+            DsdStory::Convert => "convert",
+        },
+        global_format: fmt.map(format_str),
+    }
+}
+
+/// DSD handling preference: "native" (request DoP when nothing overrides)
+/// or "convert" (DSD → PCM, the pre-C3 default). Persisted to the engine
+/// settings file.
+#[tauri::command]
+fn set_dsd_story(app: AppHandle, state: State<'_, AppState>, story: String) -> Result<(), String> {
+    let s = match story.as_str() {
+        "native" => DsdStory::Native,
+        "convert" => DsdStory::Convert,
+        _ => return Err(format!("unknown DSD story: {story}")),
+    };
+    state.engine.set_dsd_story(s);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// C2: audio devices, DSP (EQ + loudness), DoP capability
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DeviceDto {
+    name: String,
+    is_default: bool,
+}
+
+/// Shared-mode output devices (informational; the engine uses the default).
+/// Infallible: enumeration failures yield an empty list.
+#[tauri::command]
+fn get_output_devices() -> Vec<DeviceDto> {
+    audio_list_output_devices()
+        .into_iter()
+        .map(|d| DeviceDto {
+            name: d.name,
+            is_default: d.is_default,
+        })
+        .collect()
+}
+
+/// Replace the parametric EQ bands (≤ 8; validated before anything is
+/// sent to the engine). PCM only — DoP bypasses EQ entirely.
+#[tauri::command]
+fn set_eq_bands(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    bands: Vec<EqBand>,
+) -> Result<(), String> {
+    validate_bands(&bands).map_err(|e| e.to_string())?;
+    state.engine.set_eq_bands(bands);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_eq_enabled(app: AppHandle, state: State<'_, AppState>, enabled: bool) {
+    state.engine.set_eq_enabled(enabled);
+    emit_state(&app, &state.engine);
+}
+
+/// Loudness target in LUFS (default −14). Enabling triggers one extra
+/// stream per first-play (pre-scan); gains are cached by (track, format).
+/// PCM only — DoP bypasses loudness.
+#[tauri::command]
+fn set_loudness_target(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    lufs: f32,
+) -> Result<(), String> {
+    if !lufs.is_finite() || !(-40.0..=-1.0).contains(&lufs) {
+        return Err(format!("loudness target out of range: {lufs}"));
+    }
+    state.engine.set_loudness_target(lufs);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_loudness_enabled(app: AppHandle, state: State<'_, AppState>, enabled: bool) {
+    state.engine.set_loudness_enabled(enabled);
+    emit_state(&app, &state.engine);
+}
+
+/// Persisted DSP settings (the settings file is the source of truth; the
+/// engine's setters write it synchronously). The UI calls this once at
+/// startup to mirror the engine.
+#[tauri::command]
+fn get_dsp_settings(state: State<'_, AppState>) -> Result<DspSettings, String> {
+    #[derive(serde::Deserialize)]
+    struct File {
+        #[serde(default)]
+        dsp: DspSettings,
+    }
+    let text = std::fs::read_to_string(&state.settings_path).map_err(|e| e.to_string())?;
+    let file: File = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(file.dsp)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DopStatusDto {
+    /// DoP PCM rates the default output device accepts right now
+    /// (176400 / 352800 / 705600). Empty on non-macOS.
+    supported_rates: Vec<u32>,
+    /// True on macOS: the exclusive hog-mode path exists.
+    exclusive_available: bool,
+}
+
+#[tauri::command]
+fn dop_status() -> DopStatusDto {
+    let rates = dop_capable_rates();
+    DopStatusDto {
+        exclusive_available: cfg!(target_os = "macos"),
+        supported_rates: rates,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App setup
+// ---------------------------------------------------------------------------
+
+fn main() {
+    tauri::Builder::default()
+        .setup(|app| {
+            // Persisted engine settings (server URL) live in the app config
+            // dir; fall back to a temp file if the dir is unavailable.
+            let settings_path = app
+                .path()
+                .app_config_dir()
+                .map(|d| d.join("engine-settings.json"))
+                .unwrap_or_else(|_| std::env::temp_dir().join("kahawai-player-settings.json"));
+            if let Some(parent) = settings_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            // Real sinks (C2): shared-mode PCM + exclusive DoP router.
+            let sink = SinkRouter::new(Box::new(CpalSink::new()), Some(exclusive_dop_sink()));
+            let engine = Arc::new(EngineController::new(Box::new(sink), settings_path.clone()));
+            let server_url = engine.server_url();
+            let api = Mutex::new(ApiClient::new(server_url));
+
+            let handle = app.handle();
+            let engine2 = engine.clone();
+            app.manage(AppState {
+                engine,
+                api,
+                settings_path,
+            });
+
+            // Forward engine state events to the UI. The engine already
+            // emits at ~4 Hz while playing and immediately on track/state
+            // changes; this thread just bridges them into Tauri events.
+            let handle2 = handle.clone();
+            std::thread::Builder::new()
+                .name("player-state-forward".into())
+                .spawn(move || {
+                    loop {
+                        for event in engine2.drain_events() {
+                            if let PlayerEvent::State(snap) = event {
+                                let dto = PlayerStateDto::from(snap);
+                                if let Err(e) = handle2.emit("player-state", dto) {
+                                    eprintln!("[shell] player-state emit failed: {e}");
+                                }
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                })
+                .expect("spawn player-state-forward thread");
+
+            // Initial snapshot so the UI renders before the first change.
+            let state: State<'_, AppState> = app.state();
+            emit_state(&handle, &state.engine);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_state,
+            get_server_url,
+            set_server_url,
+            play_track,
+            queue_play,
+            pause,
+            resume,
+            toggle,
+            stop,
+            seek_ms,
+            next,
+            prev,
+            next_track,
+            prev_track,
+            set_format,
+            set_track_format,
+            set_volume,
+            set_repeat,
+            set_shuffle,
+            queue_append,
+            queue_insert_next,
+            get_playback_prefs,
+            set_dsd_story,
+            get_output_devices,
+            set_eq_bands,
+            set_eq_enabled,
+            set_loudness_target,
+            set_loudness_enabled,
+            get_dsp_settings,
+            dop_status,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

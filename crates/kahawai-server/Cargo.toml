@@ -1,0 +1,50 @@
+[package]
+name = "kahawai-server"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted music streaming server: catalog + HTTP Range streaming"
+
+[[bin]]
+name = "kahawai-server"
+path = "src/main.rs"
+
+[dependencies]
+kahawai-core = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+blake3 = { workspace = true }
+flacenc = { workspace = true }
+lofty = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+symphonia = { workspace = true }
+symphonia-adapter-libopus = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+bytes = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+walkdir = { workspace = true }
+
+# Optional system/bundled encoder backends. Off by default so a bare VM
+# (this CI box, a fresh checkout) still builds and tests green.
+#  - encode-opus: Opus *encoding* via opusic-sys (bundled libopus build).
+#    Opus *decoding* (Opus sources) needs no feature: the adapter above
+#    already bundles libopus.
+#  - encode-mp3: MP3 encoding via mp3lame-sys (bundles LAME 3.100 source,
+#    built with autotools — needs a C toolchain, no system headers).
+opusic-sys = { version = "0.7", optional = true }
+mp3lame-sys = { version = "0.1", optional = true }
+
+[features]
+default = []
+encode-opus = ["dep:opusic-sys"]
+encode-mp3 = ["dep:mp3lame-sys"]
+
+[dev-dependencies]
+tempfile = "3"

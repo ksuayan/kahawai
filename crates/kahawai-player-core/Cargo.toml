@@ -1,0 +1,18 @@
+[package]
+name = "kahawai-player-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared kahawai-player-core: queue/shuffle/repeat + audio sink abstraction (no platform deps)"
+
+[dependencies]
+kahawai-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+symphonia = { workspace = true }
+symphonia-adapter-libopus = { workspace = true }
+ureq = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+flacenc = { workspace = true }

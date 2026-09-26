@@ -1,0 +1,60 @@
+<script setup lang="ts">
+import { computed } from "vue";
+import {
+  formatBadge,
+  formatDuration,
+  isPlayable,
+  trackTitle,
+  unplayableReason,
+  type Track,
+} from "../types";
+import Artwork from "./Artwork.vue";
+import TrackMenu from "./TrackMenu.vue";
+
+const props = withDefaults(
+  defineProps<{
+    track: Track;
+    number?: number | null;
+    showArtwork?: boolean;
+    artworkHash?: string | null;
+    current?: boolean;
+    /** Show the ⋯ action menu (play next / add to queue / playlist / ISO). */
+    showMenu?: boolean;
+  }>(),
+  { showArtwork: false, current: false, showMenu: true },
+);
+
+const emit = defineEmits<{
+  (e: "play", track: Track): void;
+}>();
+
+const playable = computed(() => isPlayable(props.track));
+const title = computed(() => trackTitle(props.track));
+const reason = computed(() => unplayableReason(props.track));
+
+function onDblClick(): void {
+  if (playable.value) emit("play", props.track);
+}
+</script>
+
+<template>
+  <div
+    class="track-row"
+    :class="{ current, unplayable: !playable }"
+    :title="playable ? title : `${title} — ${reason}`"
+    @dblclick="onDblClick"
+  >
+    <span class="num">{{ number ?? track.track_no ?? "–" }}</span>
+    <Artwork v-if="showArtwork" :hash="artworkHash" :size="36" :radius="4" />
+    <div class="main">
+      <div class="title">{{ title }}</div>
+      <div v-if="track.artist || track.album" class="artist-line">
+        {{ [track.artist, track.album].filter(Boolean).join(" — ") }}
+      </div>
+    </div>
+    <span class="badge">{{ formatBadge(track) }}</span>
+    <span class="dur">{{ formatDuration(track.duration_ms) }}</span>
+    <TrackMenu v-if="showMenu" :track="track" />
+    <slot />
+  </div>
+</template>

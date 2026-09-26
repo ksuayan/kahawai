@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["crates/kahawai-core", "crates/kahawai-server", "crates/kahawai-player-core", "crates/kahawai-player-api", "crates/kahawai-player-audio"]
+# The Tauri shell needs system WebKit/GTK dev libraries that don't exist on
+# every build machine (notably this Linux VM). It is a separate crate with
+# its own lockfile; see player/src-tauri. Everything else must pass
+# `cargo check/test/clippy` on any target.
+exclude = ["player/src-tauri"]
+
+[workspace.dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+blake3 = "1"
+bytes = "1"
+lofty = "0.22"
+kahawai-core = { path = "crates/kahawai-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
+symphonia = { version = "0.6", features = ["mp3", "aac"] }
+symphonia-adapter-libopus = "0.3"
+flacenc = "0.5"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml = "0.8"
+tower = { version = "0.5", features = ["util", "timeout"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+# Player client crates.
+ureq = { version = "3", features = ["rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+cpal = "0.16"
+ringbuf = "0.4"
+coreaudio-sys = "0.2"

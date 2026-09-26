@@ -1,0 +1,15 @@
+[package]
+name = "kahawai-player-audio"
+version = "0.1.0"
+edition = "2021"
+description = "Real audio sinks for the music player: cpal shared-mode PCM plus CoreAudio hog-mode DoP (macOS)"
+
+[dependencies]
+kahawai-core = { workspace = true }
+kahawai-player-core = { path = "../kahawai-player-core" }
+cpal = { workspace = true }
+ringbuf = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-sys = { workspace = true }

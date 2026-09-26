@@ -1,0 +1,13 @@
+[package]
+name = "kahawai-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared types, config, format logic, and errors for the music streaming server and player"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

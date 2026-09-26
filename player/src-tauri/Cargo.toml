@@ -1,0 +1,21 @@
+[package]
+name = "kahawai-player"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+# Excluded from the workspace (root Cargo.toml) because this Linux VM has
+# no GTK/WebKit dev packages; the shell is built on macOS.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+kahawai-core = { path = "../../crates/kahawai-core" }
+kahawai-player-core = { path = "../../crates/kahawai-player-core" }
+kahawai-player-api = { path = "../../crates/kahawai-player-api" }
+kahawai-player-audio = { path = "../../crates/kahawai-player-audio" }
