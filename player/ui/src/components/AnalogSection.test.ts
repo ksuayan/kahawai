@@ -25,7 +25,7 @@ describe("Analog warmth settings", () => {
     expect(wrapper.get('[data-testid="ab-a"]').attributes("aria-pressed")).toBe("true");
     expect(wrapper.get('[data-testid="ab-b"]').attributes("aria-pressed")).toBe("false");
     expect(wrapper.get('[data-testid="slot-a-summary"]').text()).toBe("Off (dry signal)");
-    expect(wrapper.get('[data-testid="slot-b-summary"]').text()).toContain("Warm triode · drive 40% · mix 40%");
+    expect(wrapper.get('[data-testid="slot-b-summary"]').text()).toContain("12AX7 · drive 40% · mix 40%");
   });
 
   it("A/B buttons and the switch button change what the engine plays", async () => {
@@ -56,10 +56,14 @@ describe("Analog warmth settings", () => {
   it("offers both flavours and every anti-aliasing plan", async () => {
     await boot();
     await openSelect(document.body.querySelector('[aria-label="Flavour B"]') as HTMLElement);
-    expect(options().map((o) => o.textContent?.trim())).toEqual(["Warm triode (12AX7 model)", "Solid state (symmetric soft clip)"]);
-    pick(options()[1]);
+    expect(options().map((o) => o.textContent?.trim())).toEqual([
+      "12AX7 · high-mu preamp triode", "12AT7 (ECC81) · medium-high mu", "12AU7 (ECC82) · low mu, clean", "6SN7 · low-mu octal triode",
+      "6DJ8 (ECC88) · low-noise triode", "300B · single-ended power triode", "2A3 · single-ended power triode",
+      "Push-pull tubes (2A3 pair)", "Solid state · soft clip", "Hard transistor · near-hard clip",
+    ]);
+    pick(options()[5]); // 300B
     await settle();
-    expect(useAnalogStore().b.flavour).toBe("solid_state");
+    expect(useAnalogStore().b).toMatchObject({ flavour: "tube_300b", sag: 0.4, transformer: 0.5 });
     await openSelect(document.body.querySelector('[aria-label="Anti-aliasing B"]') as HTMLElement);
     expect(options().map((o) => o.textContent?.trim())).toEqual([
       "Auto (by sample rate)", "1x, no protection", "1x + ADAA", "2x oversampling", "2x oversampling + ADAA", "4x oversampling", "4x oversampling + ADAA",

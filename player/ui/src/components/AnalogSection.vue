@@ -5,6 +5,7 @@ import { usePlayerStore } from "../stores/player";
 import {
   ANALOG_FLAVOURS,
   ANTI_ALIAS_CHOICES,
+  FLAVOUR_INFO,
   type AnalogFlavour,
   type AnalogSettings,
   type AntiAliasChoice,
@@ -27,11 +28,7 @@ const player = usePlayerStore();
 const unsupported = computed(() => player.isExclusive);
 const slots: Slot[] = ["a", "b"];
 
-const flavourLabel: Record<AnalogFlavour, string> = {
-  warm_triode: "Warm triode (12AX7 model)",
-  solid_state: "Solid state (symmetric soft clip)",
-};
-const flavourOptions: UiSelectOption[] = ANALOG_FLAVOURS.map((f) => ({ value: f, label: flavourLabel[f] }));
+const flavourOptions: UiSelectOption[] = ANALOG_FLAVOURS.map((f) => ({ value: f, label: FLAVOUR_INFO[f].label }));
 
 const aliasLabel: Record<AntiAliasChoice, string> = {
   auto: "Auto (by sample rate)",
@@ -48,7 +45,7 @@ const pct = (v: number): number => Math.round(v * 100);
 
 function summary(s: AnalogSettings): string {
   if (!s.enabled) return "Off (dry signal)";
-  return `${s.flavour === "warm_triode" ? "Warm triode" : "Solid state"} · drive ${pct(s.drive)}% · mix ${pct(s.mix)}%`;
+  return `${FLAVOUR_INFO[s.flavour].short} · drive ${pct(s.drive)}% · mix ${pct(s.mix)}%`;
 }
 
 const status = computed(() => (player.analogPlan ? `Now playing with ${player.analogPlan}.` : "The stage is off, or nothing is playing on the shared output."));
@@ -57,7 +54,7 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
 <template>
   <SettingsSection title="Analog warmth (experimental)">
     <UiHint>
-      Adds the character of a tube or transistor stage to the shared PCM output, after the EQ. Set up two versions and
+      Adds the character of a tube or transistor stage to the shared PCM output, after the EQ. Choose from several tubes (12AX7, 12AT7, 12AU7, 6SN7, 6DJ8, 300B, 2A3), a push-pull pair, or solid-state stages; choosing a flavour also sets Sag and Transformer to typical values for it. Set up two versions and
       switch between them while music plays: compare the effect against the dry signal, or one flavour or
       anti-aliasing plan against another. Changes fade in without clicks. It does not apply to DoP or bit-perfect
       output.
@@ -115,8 +112,9 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
                 trigger-class="w-full"
                 :model-value="analog[s].flavour"
                 :options="flavourOptions"
-                @update:model-value="(v) => analog.update(s, { flavour: v as AnalogFlavour })"
+                @update:model-value="(v) => analog.setFlavour(s, v as AnalogFlavour)"
               />
+              <span class="text-xs text-faint" :data-testid="`flavour-${s}-blurb`">{{ FLAVOUR_INFO[analog[s].flavour].blurb }}</span>
             </label>
 
             <div class="flex flex-col gap-1 text-dim">

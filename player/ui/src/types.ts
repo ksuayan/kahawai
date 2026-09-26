@@ -135,9 +135,116 @@ export interface EqBandRow extends EqBand {
 }
 
 /** Analog warmth (tube / transistor character); mirrors `AnalogSettings` in the Rust core. */
-export type AnalogFlavour = "warm_triode" | "solid_state";
+export type AnalogFlavour =
+  | "warm_triode"
+  | "tube_12at7"
+  | "tube_12au7"
+  | "tube_6sn7"
+  | "tube_6dj8"
+  | "tube_300b"
+  | "tube_2a3"
+  | "push_pull"
+  | "solid_state"
+  | "hard_transistor";
 export type AntiAliasChoice = "auto" | "x1" | "x1_adaa" | "x2" | "x2_adaa" | "x4" | "x4_adaa";
-export const ANALOG_FLAVOURS: AnalogFlavour[] = ["warm_triode", "solid_state"];
+export const ANALOG_FLAVOURS: AnalogFlavour[] = [
+  "warm_triode",
+  "tube_12at7",
+  "tube_12au7",
+  "tube_6sn7",
+  "tube_6dj8",
+  "tube_300b",
+  "tube_2a3",
+  "push_pull",
+  "solid_state",
+  "hard_transistor",
+];
+
+export interface FlavourInfo {
+  /** Menu label. */
+  label: string;
+  /** Short name for summaries. */
+  short: string;
+  /** One line on what to expect. */
+  blurb: string;
+  /** Typical Sag and Transformer for this kind of stage (applied when it is chosen). */
+  sag: number;
+  transformer: number;
+}
+
+/** What each flavour is. The tube models are Koren's datasheet fits. */
+export const FLAVOUR_INFO: Record<AnalogFlavour, FlavourInfo> = {
+  warm_triode: {
+    label: "12AX7 · high-mu preamp triode",
+    short: "12AX7",
+    blurb: "Soft, even-harmonic warmth from a high-gain preamp triode. The default.",
+    sag: 0.3,
+    transformer: 0.2,
+  },
+  tube_12at7: {
+    label: "12AT7 (ECC81) · medium-high mu",
+    short: "12AT7",
+    blurb: "A little cleaner than the 12AX7, with a slightly firmer, more open sound.",
+    sag: 0.15,
+    transformer: 0,
+  },
+  tube_12au7: {
+    label: "12AU7 (ECC82) · low mu, clean",
+    short: "12AU7",
+    blurb: "Low gain and low distortion: the mildest tube colour.",
+    sag: 0.15,
+    transformer: 0,
+  },
+  tube_6sn7: {
+    label: "6SN7 · low-mu octal triode",
+    short: "6SN7",
+    blurb: "Smooth and full-bodied, a favourite line-stage tube.",
+    sag: 0.15,
+    transformer: 0,
+  },
+  tube_6dj8: {
+    label: "6DJ8 (ECC88) · low-noise triode",
+    short: "6DJ8",
+    blurb: "Medium mu with a taut, detailed character.",
+    sag: 0.15,
+    transformer: 0,
+  },
+  tube_300b: {
+    label: "300B · single-ended power triode",
+    short: "300B",
+    blurb: "The classic single-ended amplifier: rich 2nd harmonic, gentle overload, with transformer and sag.",
+    sag: 0.4,
+    transformer: 0.5,
+  },
+  tube_2a3: {
+    label: "2A3 · single-ended power triode",
+    short: "2A3",
+    blurb: "Like the 300B, a little lighter and quicker.",
+    sag: 0.4,
+    transformer: 0.5,
+  },
+  push_pull: {
+    label: "Push-pull tubes (2A3 pair)",
+    short: "Push-pull",
+    blurb: "Fuller and firmer: even harmonics cancel, odd ones and compression take over as it is driven.",
+    sag: 0.5,
+    transformer: 0.5,
+  },
+  solid_state: {
+    label: "Solid state · soft clip",
+    short: "Solid state",
+    blurb: "Symmetric and clean, with a soft odd-harmonic edge; like a transformer-coupled console preamp.",
+    sag: 0,
+    transformer: 0.3,
+  },
+  hard_transistor: {
+    label: "Hard transistor · near-hard clip",
+    short: "Hard transistor",
+    blurb: "Clean until it clips, then harsh. For effect, not for fidelity.",
+    sag: 0,
+    transformer: 0,
+  },
+};
 export const ANTI_ALIAS_CHOICES: AntiAliasChoice[] = ["auto", "x1", "x1_adaa", "x2", "x2_adaa", "x4", "x4_adaa"];
 
 export interface AnalogSettings {

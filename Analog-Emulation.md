@@ -1,7 +1,7 @@
 # Analog emulation: tube and transistor "euphonics"
 
 Research summary and an itemized plan for adding tube and transistor
-character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 3 done** (research, a working stage in the engine,
+character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 3 done, plus ten flavours (section 15)** (research, a working stage in the engine,
 the triode curve derived from Koren's model, and antiderivative
 antialiasing), sag and transformer colour (section 14), plus **an A/B test panel in
 Settings** (section 13). Findings: section 10; Phase 1 results: 11;
@@ -861,3 +861,141 @@ now sets the anti-aliasing plan explicitly; after the A/B panel added the
 - Whether the defaults (30% sag, 30% transformer) suit the music you play;
   they are guesses.
 - Datasheet tuning of the triode curve, and published harmonic measurements.
+
+---
+
+## 15. More flavours: tube variants, push-pull, hard transistor
+
+The Flavour menu now offers **ten** characters (Settings, Analog warmth, in
+each A/B slot). Choosing one also sets **Sag** and **Transformer** to typical
+values for that kind of stage (you can adjust them afterwards). Code:
+[analog.rs](crates/kahawai-player-core/src/analog.rs); labels and typical
+values in [types.ts](player/ui/src/types.ts) (`FLAVOUR_INFO`).
+
+### 15.1 The list
+
+| Flavour (menu) | What it is | Sag / transformer |
+|---|---|---|
+| 12AX7 · high-mu preamp triode | The Phase 2 default (Koren's original fit) | 30% / 20% |
+| 12AT7 (ECC81) · medium-high mu | Small-signal triode | 15% / 0% |
+| 12AU7 (ECC82) · low mu, clean | Small-signal triode, mildest colour | 15% / 0% |
+| 6SN7 · low-mu octal triode | Line-stage triode | 15% / 0% |
+| 6DJ8 (ECC88) · low-noise triode | Medium mu, with contact potential | 15% / 0% |
+| 300B · single-ended power triode | Power stage into a 3.5 kΩ transformer load | 40% / 50% |
+| 2A3 · single-ended power triode | Power stage into a 2.5 kΩ transformer load | 40% / 50% |
+| Push-pull tubes (2A3 pair) | Two 2A3 stages, outputs subtracted | 50% / 50% |
+| Solid state · soft clip | Symmetric `tanh` (Phase 1) | 0% / 30% |
+| Hard transistor · near-hard clip | Symmetric near-hard clip | 0% / 0% |
+
+Small-signal tubes get no transformer by default (a preamp stage has none);
+the power stages and push-pull get one. These pairings are my guesses.
+
+### 15.2 How the tubes are modelled
+
+- **Parameters** are Koren's datasheet fits, verified in his tube library
+  file ([Koren_Tubes.txt](https://polonai.se/audiofreaks/Koren_Tubes.txt),
+  the LTspice library derived from his Glass Audio 1996 article; the
+  12AX7 line is his original fit and the others are per-datasheet fits):
+
+| Tube | mu | Ex | Kg1 | Kp | Kvb | Vct | Source noted in the library |
+|---|---|---|---|---|---|---|---|
+| 12AX7 | 100 | 1.4 | 1060 | 600 | 300 | 0 | Koren's original |
+| 12AT7 | 67.49 | 1.234 | 419.1 | 213.96 | 300 | 0 | Tom Mitchell |
+| 12AU7 | 20.21 | 1.230 | 1108.7 | 84.96 | 551.3 | 0 | Sylvania Technical Manual |
+| 6SN7 | 21.07 | 1.341 | 1446.2 | 157.81 | 179.4 | 0 | Sylvania Technical Manual |
+| 6DJ8 | 30.51 | 1.532 | 453.9 | 233.17 | 190.9 | 0.5 | Tom Mitchell |
+| 300B | 3.92 | 1.504 | 2140.3 | 64.28 | 300 | 0 | Western Electric, 1950 |
+| 2A3 | 4.05 | 1.634 | 3652.2 | 58.47 | 300 | 0 | Tung-Sol datasheet |
+
+  The equation is the library's `TRIODE` subcircuit (plate current from
+  `E1 = Vpk/Kp · ln(1 + exp(Kp(1/mu + (Vgk + Vct)/√(Kvb + Vpk²))))`, twice
+  `E1^Ex / Kg1`), including the contact potential the newer library added.
+  I left out the library's "12AX7A" (RCA) fit: its Kp is 17950, a different
+  scale from the others, and I did not want to use it without understanding
+  why.
+- **The stage around the tube** sets the operating point: resistor-loaded for
+  the small-signal tubes (supply and load in the table below, grid bias chosen
+  to put the plate at half the supply, except the 12AX7 which keeps its fixed
+  −1.5 V), and a stated operating point into an AC load for the power tubes.
+  The curve is then the plate voltage along the *AC load line through that
+  point*, which is how a transformer-coupled stage behaves.
+- **Input scale:** for every tube, one unit of curve input is a grid swing
+  equal to the bias, so `u = 1` reaches 0 V on the grid and grid conduction
+  starts there (as in Phase 2). That keeps Drive comparable across tubes.
+- **Results (from the code):**
+
+| Tube | Supply / load | Bias | Plate | Current |
+|---|---|---|---|---|
+| 12AX7 | 300 V / 100 kΩ | −1.5 V | 205 V | 1.0 mA |
+| 12AT7 | 250 V / 47 kΩ | −1.5 V | 125 V | 2.7 mA |
+| 12AU7 | 300 V / 47 kΩ | −6.8 V | 150 V | 3.2 mA |
+| 6SN7 | 300 V / 47 kΩ | −5.4 V | 150 V | 3.2 mA |
+| 6DJ8 | 200 V / 22 kΩ | −2.8 V | 100 V | 4.5 mA |
+| 300B | 300 V, 65 mA, 3.5 kΩ AC | −60.0 V | 300 V | 65 mA |
+| 2A3 | 250 V, 60 mA, 2.5 kΩ AC | −44.2 V | 250 V | 60 mA |
+
+  **A real cross-check:** for the 300B the model puts the bias at −60 V for
+  300 V and 65 mA; published operating points for that tube are around −62 V.
+  For the 2A3 it gives −44 V at 250 V and 60 mA, against the usual −45 V
+  (both from general knowledge, not a sourced datasheet in this pass). Tests
+  assert both within a few volts. The small-signal stages have no such
+  published check yet.
+
+### 15.3 Push-pull and hard transistor
+
+- **Push-pull (2A3 pair):** the second tube sees the inverted signal and the
+  two outputs are subtracted: `y = (g(u) − 0.92·g(−u)) / 1.92`, with `g` the
+  2A3 curve. That cancels the even harmonics of the single tube (about
+  15 dB or more better in the test) and leaves the odd ones; the 8% mismatch
+  keeps a small even remainder, as real pairs have. Class-A push-pull only;
+  no crossover model.
+- **Hard transistor:** `y = u / (1 + |u|⁸)^(1/8)`: linear below about 0.8,
+  flat above about 1.2, with a small rounded corner. Clean, then harsh.
+
+### 15.4 What the measurements say (drive 40%, sag and transformer 0, 1 kHz)
+
+Harmonics relative to the tone, at an input level of 0.1 / 0.3 / 0.6:
+
+| Flavour | 2nd (dB) | 3rd (dB) |
+|---|---|---|
+| 12AX7 | −36 / −26 / −25 | −66 / −46 / −24 |
+| 12AT7 | −37 / −27 / −30 | −79 / −61 / −27 |
+| 12AU7 | −36 / −27 / −29 | −79 / −62 / −26 |
+| 6SN7 | −41 / −32 / −51 | −75 / −55 / −26 |
+| 6DJ8 | −41 / −32 / −56 | −71 / −50 / −25 |
+| 300B | −46 / −36 / −51 | −70 / −50 / −24 |
+| 2A3 | −44 / −34 / −40 | −69 / −49 / −24 |
+| Push-pull | −72 / −61 / −68 | −69 / −49 / −24 |
+| Solid state | none | −49 / −30 / −20 |
+| Hard transistor | none | −135 / −59 / −21 |
+
+- **Single-ended tubes** all show even-dominant harmonics at moderate levels
+  (the 2nd is at least 15 dB above the 3rd in the test) and turn odd-heavy as
+  they are overdriven (0.6), when the tube clips against cut-off and grid
+  conduction. The differences between tubes are modest: the low-mu tubes and
+  the power triodes are cleaner at a given input, the 12AX7 and 12AT7 the
+  most coloured.
+- **Push-pull** has almost no 2nd harmonic and the same 3rd as the 2A3
+  alone; the odd harmonics take over.
+- **Hard transistor** is essentially clean below the knee, then the 3rd
+  jumps from −135 to −59 to −21 dB.
+- **Aliasing** at the hard test tone with the automatic plan is below −70 dB
+  for every flavour at 44.1 kHz and below −72 dB at 96 and 192 kHz (tested at
+  −65 dB or better).
+
+### 15.5 Caveats
+
+- **Static curves.** The tubes are modelled as static transfer curves plus
+  the sag and transformer stages. There is no interelectrode capacitance
+  (so no high-frequency roll-off or Miller effect), no cathode bypass or
+  coupling dynamics, and no hum or noise.
+- **The stages around the tubes are typical, not real amplifiers.** Supply
+  voltages, loads and transformer loads are common values, not from any
+  specific product.
+- **Datasheet fits are approximations** away from their fitting region, and
+  the fits are Koren's and others', not my own measurements.
+- **Not listened to.** All of this is measured, not heard. The typical sag
+  and transformer values are guesses.
+- **Names:** the menu uses the tubes' type numbers (and their common European
+  equivalents) as descriptions of a modelled stage, not as endorsements or
+  claims about specific brands.

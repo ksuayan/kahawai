@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { getDspSettings, setAnalog } from "../tauri";
-import { clampAnalog, DEFAULT_ANALOG_SETTINGS, type AnalogSettings } from "../types";
+import { clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO, type AnalogFlavour, type AnalogSettings } from "../types";
 
 export type Slot = "a" | "b";
 const KEY = "kahawai-player.analog-ab";
@@ -78,6 +78,13 @@ export const useAnalogStore = defineStore("analog", () => {
     else persist();
   }
 
+  /** Choose a flavour for a slot; Sag and Transformer take that flavour's typical values (adjust them afterwards). */
+  function setFlavour(slot: Slot, flavour: AnalogFlavour): void {
+    const info = FLAVOUR_INFO[flavour];
+    if (!info) return;
+    update(slot, { flavour, sag: info.sag, transformer: info.transformer });
+  }
+
   /** Listen to a slot: its settings become the engine's. */
   function select(slot: Slot): void {
     if (active.value === slot) return;
@@ -95,5 +102,5 @@ export const useAnalogStore = defineStore("analog", () => {
     update(to, { ...slots[from].value });
   }
 
-  return { a, b, active, current, loaded, init, update, select, toggle, copy };
+  return { a, b, active, current, loaded, init, update, setFlavour, select, toggle, copy };
 });

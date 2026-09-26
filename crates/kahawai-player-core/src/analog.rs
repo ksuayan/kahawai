@@ -28,8 +28,31 @@ pub enum AnalogFlavour {
     /// A 12AX7 triode stage (Koren model): mostly 2nd harmonic (even).
     #[default]
     WarmTriode,
+    /// Class-A push-pull pair of 2A3 power triodes: odd harmonics, a little
+    /// even from imperfect matching.
+    PushPull,
     /// Symmetric soft curve: odd harmonics only, like a transistor stage.
     SolidState,
+    /// A near-hard symmetric clip: clean below the knee, harsh above it.
+    HardTransistor,
+    /// 12AT7 / ECC81: medium-high mu small-signal triode.
+    #[serde(rename = "tube_12at7")]
+    Tube12at7,
+    /// 12AU7 / ECC82: low-mu, clean small-signal triode.
+    #[serde(rename = "tube_12au7")]
+    Tube12au7,
+    /// 6SN7: low-mu octal triode.
+    #[serde(rename = "tube_6sn7")]
+    Tube6sn7,
+    /// 6DJ8 / ECC88: medium-mu low-noise triode.
+    #[serde(rename = "tube_6dj8")]
+    Tube6dj8,
+    /// 300B: single-ended directly-heated power triode.
+    #[serde(rename = "tube_300b")]
+    Tube300b,
+    /// 2A3: single-ended directly-heated power triode.
+    #[serde(rename = "tube_2a3")]
+    Tube2a3,
 }
 
 /// How to keep aliasing out of the audible band. `Auto` follows the sample
@@ -128,45 +151,76 @@ impl AnalogSettings {
 }
 
 // ---------------------------------------------------------------------------
-// The tube model (Koren)
+// The tube models (Koren)
 // ---------------------------------------------------------------------------
 
-/// Koren's 12AX7 parameters (normankoren.com, "Improved vacuum tube models
-/// for SPICE simulations"): mu, Ex, Kg1, Kp, Kvb.
-const MU: f64 = 100.0;
-const EX: f64 = 1.4;
-const KG1: f64 = 1060.0;
-const KP: f64 = 600.0;
-const KVB: f64 = 300.0;
-
-/// The stage around the tube: supply and plate load, and the grid bias the
-/// cathode resistor would set.
-const B_PLUS: f64 = 300.0;
-const R_LOAD: f64 = 100_000.0;
-const V_BIAS: f64 = -1.5;
-/// Grid volts per unit of curve input.
-const GRID_SWING: f64 = 1.5;
-/// Positive-grid behaviour: the grid conducts (about 2 kΩ) against the
-/// driving source (10 kΩ), so a positive grid swing is squashed hard.
-const GRID_K: f64 = 2_000.0 / (2_000.0 + 10_000.0);
-/// Softness of the grid-conduction corner, in volts.
-const GRID_KNEE: f64 = 0.05;
-
-/// Plate current (amps) of the Koren triode model.
-pub fn koren_plate_current(vgk: f64, vpk: f64) -> f64 {
-    let z = KP * (1.0 / MU + vgk / (KVB + vpk * vpk).sqrt());
-    let softplus = if z > 30.0 { z } else { (1.0 + z.exp()).ln() };
-    let e1 = vpk / KP * softplus;
-    if e1 <= 0.0 { 0.0 } else { 2.0 * e1.powf(EX) / KG1 }
+/// Parameters of Koren's triode model (his SPICE library, fitted to
+/// datasheets): mu, Ex, Kg1, Kp, Kvb, and the contact potential Vct.
+#[derive(Clone, Copy)]
+struct Koren {
+    mu: f64,
+    ex: f64,
+    kg1: f64,
+    kp: f64,
+    kvb: f64,
+    vct: f64,
 }
 
-/// Plate voltage for a grid voltage, on the resistive load line
-/// `vp = B+ - Ip(vg, vp) * RL` (bisection: the current falls as vp rises).
-pub fn triode_plate_voltage(vgk: f64) -> f64 {
-    let (mut lo, mut hi) = (0.0f64, B_PLUS);
-    for _ in 0..60 {
+impl Koren {
+    /// Plate current (amps).
+    fn ip(&self, vgk: f64, vpk: f64) -> f64 {
+        let z = self.kp * (1.0 / self.mu + (vgk + self.vct) / (self.kvb + vpk * vpk).sqrt());
+        let softplus = if z > 30.0 { z } else { (1.0 + z.exp()).ln() };
+        let e1 = vpk / self.kp * softplus;
+        if e1 <= 0.0 { 0.0 } else { 2.0 * e1.powf(self.ex) / self.kg1 }
+    }
+}
+
+/// How the tube is operated.
+#[derive(Clone, Copy)]
+enum Operating {
+    /// A resistor-loaded stage: supply `bplus`, load `r_load`. The grid bias
+    /// is given, or (None) chosen to put the plate at half the supply.
+    LoadLine { bplus: f64, r_load: f64, vgk: Option<f64> },
+    /// A power stage at a stated operating point (plate volts and amps) into
+    /// an AC load `r_ac` (an output transformer); the bias follows.
+    Fixed { vp: f64, ip: f64, r_ac: f64 },
+}
+
+/// A tube and the stage around it.
+#[derive(Clone, Copy)]
+struct TubeSpec {
+    k: Koren,
+    op: Operating,
+    /// Grid-conduction resistance (ohms), against a 10 kΩ driving source.
+    rgi: f64,
+}
+
+/// The resolved operating point: grid bias, plate volts and amps, AC load.
+#[derive(Clone, Copy)]
+struct Quiescent {
+    vgk: f64,
+    vp: f64,
+    ip: f64,
+    r_ac: f64,
+}
+
+/// Softness of the grid-conduction corner, in volts.
+const GRID_KNEE: f64 = 0.05;
+/// The source impedance that drives the grid.
+const GRID_SOURCE_OHMS: f64 = 10_000.0;
+/// Curve input beyond +-4 is held at the end value; table size.
+const TABLE_RANGE: f64 = 4.0;
+const TABLE_POINTS: usize = 4096;
+
+const B_PLUS: f64 = 300.0; // the 12AX7 stage's supply (kept for the tests)
+
+/// Bisection on a monotonic function: `f(lo)` and `f(hi)` bracket zero.
+fn bisect(mut lo: f64, mut hi: f64, f: impl Fn(f64) -> f64) -> f64 {
+    let increasing = f(hi) > f(lo);
+    for _ in 0..70 {
         let mid = 0.5 * (lo + hi);
-        if mid - (B_PLUS - koren_plate_current(vgk, mid) * R_LOAD) > 0.0 {
+        if (f(mid) > 0.0) == increasing {
             hi = mid;
         } else {
             lo = mid;
@@ -175,19 +229,136 @@ pub fn triode_plate_voltage(vgk: f64) -> f64 {
     0.5 * (lo + hi)
 }
 
-/// Grid voltage for a curve input `u`: the bias plus the swing, with the
-/// positive half squashed by grid conduction.
-fn grid_voltage(u: f64) -> f64 {
-    let v = V_BIAS + GRID_SWING * u;
-    let sp = GRID_KNEE * (1.0 + (v / GRID_KNEE).min(40.0).exp()).ln();
-    let sp = if v / GRID_KNEE > 40.0 { v } else { sp };
-    v - (1.0 - GRID_K) * sp
+impl TubeSpec {
+    /// Plate voltage for a grid voltage on the load line through the
+    /// operating point: `vp = vp_q - (Ip(vg, vp) - ip_q) * r_ac`.
+    fn plate_voltage(&self, q: &Quiescent, vgk: f64) -> f64 {
+        let vmax = q.vp + q.ip * q.r_ac;
+        bisect(0.0, vmax, |vp| vp - (q.vp - (self.k.ip(vgk, vp) - q.ip) * q.r_ac))
+    }
+
+    fn quiescent(&self) -> Quiescent {
+        match self.op {
+            Operating::LoadLine { bplus, r_load, vgk } => {
+                let plate_at = |vg: f64| {
+                    // vp = bplus - Ip(vg, vp) * r_load
+                    bisect(0.0, bplus, |vp| vp - (bplus - self.k.ip(vg, vp) * r_load))
+                };
+                let vgk = vgk.unwrap_or_else(|| bisect(-60.0, 0.0, |vg| bplus / 2.0 - plate_at(vg)));
+                let vp = plate_at(vgk);
+                Quiescent { vgk, vp, ip: (bplus - vp) / r_load, r_ac: r_load }
+            }
+            Operating::Fixed { vp, ip, r_ac } => {
+                let vgk = bisect(-300.0, 5.0, |vg| self.k.ip(vg, vp) - ip);
+                Quiescent { vgk, vp, ip, r_ac }
+            }
+        }
+    }
+
+    /// Grid voltage for a curve input `u`: the bias plus a swing equal to the
+    /// bias (so `u = 1` reaches zero volts), with the positive half squashed
+    /// by grid conduction.
+    fn grid_voltage(&self, q: &Quiescent, u: f64) -> f64 {
+        let k = self.rgi / (self.rgi + GRID_SOURCE_OHMS);
+        let v = q.vgk + q.vgk.abs() * u;
+        let sp = if v / GRID_KNEE > 40.0 { v } else { GRID_KNEE * (1.0 + (v / GRID_KNEE).exp()).ln() };
+        v - (1.0 - k) * sp
+    }
 }
 
-/// The triode stage as a curve `f(u)`: input polarity kept, zero at zero,
-/// unit slope at zero. Tabulated once, with its antiderivative, so the
-/// audio path is a lookup (and first-order antiderivative antialiasing
-/// is exact for the interpolated curve).
+const fn koren(mu: f64, ex: f64, kg1: f64, kp: f64, kvb: f64, vct: f64) -> Koren {
+    Koren { mu, ex, kg1, kp, kvb, vct }
+}
+
+/// The tubes on offer. Parameters are Koren's datasheet fits from his tube
+/// library; the stages around them are typical, not any one amplifier's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tube {
+    Ax7,
+    At7,
+    Au7,
+    Sn7,
+    Dj8,
+    T300b,
+    A2a3,
+}
+
+impl Tube {
+    fn spec(self) -> TubeSpec {
+        match self {
+            // Koren's original 12AX7 fit; 300 V, 100 kΩ, -1.5 V bias (Phase 2).
+            Tube::Ax7 => TubeSpec {
+                k: koren(100.0, 1.4, 1060.0, 600.0, 300.0, 0.0),
+                op: Operating::LoadLine { bplus: B_PLUS, r_load: 100_000.0, vgk: Some(-1.5) },
+                rgi: 2_000.0,
+            },
+            // 12AT7 / ECC81 (Tom Mitchell fit).
+            Tube::At7 => TubeSpec {
+                k: koren(67.49, 1.234, 419.1, 213.96, 300.0, 0.0),
+                op: Operating::LoadLine { bplus: 250.0, r_load: 47_000.0, vgk: None },
+                rgi: 2_000.0,
+            },
+            // 12AU7 / ECC82 (Sylvania technical manual).
+            Tube::Au7 => TubeSpec {
+                k: koren(20.21, 1.230, 1108.7, 84.96, 551.3, 0.0),
+                op: Operating::LoadLine { bplus: 300.0, r_load: 47_000.0, vgk: None },
+                rgi: 2_000.0,
+            },
+            // 6SN7 (Sylvania technical manual).
+            Tube::Sn7 => TubeSpec {
+                k: koren(21.07, 1.341, 1446.2, 157.81, 179.4, 0.0),
+                op: Operating::LoadLine { bplus: 300.0, r_load: 47_000.0, vgk: None },
+                rgi: 2_000.0,
+            },
+            // 6DJ8 / ECC88 / 6922 (Tom Mitchell fit, with contact potential).
+            Tube::Dj8 => TubeSpec {
+                k: koren(30.51, 1.532, 453.9, 233.17, 190.9, 0.5),
+                op: Operating::LoadLine { bplus: 200.0, r_load: 22_000.0, vgk: None },
+                rgi: 2_000.0,
+            },
+            // 300B (Western Electric, 1950): about 300 V, 65 mA, 3.5 kΩ load.
+            Tube::T300b => TubeSpec {
+                k: koren(3.92, 1.504, 2140.3, 64.28, 300.0, 0.0),
+                op: Operating::Fixed { vp: 300.0, ip: 0.065, r_ac: 3_500.0 },
+                rgi: 1_000.0,
+            },
+            // 2A3 (Tung-Sol datasheet): about 250 V, 60 mA, 2.5 kΩ load.
+            Tube::A2a3 => TubeSpec {
+                k: koren(4.05, 1.634, 3652.2, 58.47, 300.0, 0.0),
+                op: Operating::Fixed { vp: 250.0, ip: 0.060, r_ac: 2_500.0 },
+                rgi: 1_000.0,
+            },
+        }
+    }
+
+    /// The grid bias the stage settles at (tests).
+    #[cfg(test)]
+    fn bias(self) -> f64 {
+        self.spec().quiescent().vgk
+    }
+}
+
+/// Plate current (amps) of the 12AX7 model.
+pub fn koren_plate_current(vgk: f64, vpk: f64) -> f64 {
+    Tube::Ax7.spec().k.ip(vgk, vpk)
+}
+
+/// Plate voltage of the 12AX7 stage for a grid voltage.
+pub fn triode_plate_voltage(vgk: f64) -> f64 {
+    let spec = Tube::Ax7.spec();
+    spec.plate_voltage(&spec.quiescent(), vgk)
+}
+
+/// Grid voltage of the 12AX7 stage for a curve input.
+#[cfg(test)]
+fn grid_voltage(u: f64) -> f64 {
+    let spec = Tube::Ax7.spec();
+    spec.grid_voltage(&spec.quiescent(), u)
+}
+
+/// A curve `f(u)`: zero at zero, unit slope at zero, tabulated once with its
+/// antiderivative, so the audio path is a lookup and first-order antiderivative
+/// antialiasing is exact for the interpolated curve.
 pub struct TubeTable {
     lo: f64,
     step: f64,
@@ -196,17 +367,13 @@ pub struct TubeTable {
     anti: Vec<f64>,
 }
 
-const TABLE_RANGE: f64 = 4.0; // curve input beyond +-4 is held at the end value
-const TABLE_POINTS: usize = 4096;
-
 impl TubeTable {
-    fn build() -> Self {
+    /// Tabulate `raw` over the table range, then shift it to zero at zero
+    /// and scale it to unit slope there.
+    fn from_curve(raw: impl Fn(f64) -> f64) -> Self {
         let step = 2.0 * TABLE_RANGE / TABLE_POINTS as f64;
         let lo = -TABLE_RANGE;
-        // Inverted (plate voltage falls as the grid rises) so polarity is kept.
-        let raw: Vec<f64> = (0..=TABLE_POINTS)
-            .map(|i| -triode_plate_voltage(grid_voltage(lo + i as f64 * step)))
-            .collect();
+        let raw: Vec<f64> = (0..=TABLE_POINTS).map(|i| raw(lo + i as f64 * step)).collect();
         let mid = TABLE_POINTS / 2;
         let slope = (raw[mid + 1] - raw[mid - 1]) / (2.0 * step);
         let f: Vec<f64> = raw.iter().map(|v| (v - raw[mid]) / slope).collect();
@@ -215,6 +382,13 @@ impl TubeTable {
             anti[i] = anti[i - 1] + 0.5 * step * (f[i - 1] + f[i]);
         }
         Self { lo, step, f, anti }
+    }
+
+    /// A tube stage as a curve (inverted, so polarity is kept).
+    fn from_tube(tube: Tube) -> Self {
+        let spec = tube.spec();
+        let q = spec.quiescent();
+        Self::from_curve(|u| -spec.plate_voltage(&q, spec.grid_voltage(&q, u)))
     }
 
     /// The curve at `u`.
@@ -243,7 +417,7 @@ impl TubeTable {
             return self.anti[self.f.len() - 1] + self.f[self.f.len() - 1] * (u - (self.lo + last * self.step));
         }
         let i = p as usize;
-        let t = (u - (self.lo + i as f64 * self.step)) / 1.0;
+        let t = u - (self.lo + i as f64 * self.step);
         let f0 = self.f[i];
         let slope = (self.f[i + 1] - f0) / self.step;
         self.anti[i] + f0 * t + 0.5 * slope * t * t
@@ -252,8 +426,43 @@ impl TubeTable {
 
 /// The shared 12AX7 table (built on first use).
 pub fn triode_table() -> &'static TubeTable {
-    static TABLE: OnceLock<TubeTable> = OnceLock::new();
-    TABLE.get_or_init(TubeTable::build)
+    tube_table(Tube::Ax7)
+}
+
+fn tube_table(tube: Tube) -> &'static TubeTable {
+    static TABLES: [OnceLock<TubeTable>; 7] = [
+        OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new(),
+        OnceLock::new(), OnceLock::new(), OnceLock::new(),
+    ];
+    let i = match tube {
+        Tube::Ax7 => 0,
+        Tube::At7 => 1,
+        Tube::Au7 => 2,
+        Tube::Sn7 => 3,
+        Tube::Dj8 => 4,
+        Tube::T300b => 5,
+        Tube::A2a3 => 6,
+    };
+    TABLES[i].get_or_init(|| TubeTable::from_tube(tube))
+}
+
+/// Class-A push-pull pair of 2A3s: the second tube sees the inverted signal
+/// and the outputs subtract, which cancels even harmonics. A slight mismatch
+/// (the second tube 8% weaker) leaves a little even content, as real pairs do.
+fn push_pull_table() -> &'static TubeTable {
+    static T: OnceLock<TubeTable> = OnceLock::new();
+    T.get_or_init(|| {
+        let single = tube_table(Tube::A2a3);
+        const MISMATCH: f64 = 0.92;
+        TubeTable::from_curve(|u| (single.eval(u) - MISMATCH * single.eval(-u)) / (1.0 + MISMATCH))
+    })
+}
+
+/// A near-hard clip: `u / (1 + |u|^8)^(1/8)`, linear below about 0.8 and
+/// flat above about 1.2, with a small rounded corner.
+fn hard_transistor_table() -> &'static TubeTable {
+    static T: OnceLock<TubeTable> = OnceLock::new();
+    T.get_or_init(|| TubeTable::from_curve(|u| u / (1.0 + u.abs().powi(8)).powf(1.0 / 8.0)))
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +490,15 @@ struct Shaper {
 impl Shaper {
     fn new(flavour: AnalogFlavour) -> Self {
         let table = match flavour {
-            AnalogFlavour::WarmTriode => Some(triode_table()),
+            AnalogFlavour::WarmTriode => Some(tube_table(Tube::Ax7)),
+            AnalogFlavour::Tube12at7 => Some(tube_table(Tube::At7)),
+            AnalogFlavour::Tube12au7 => Some(tube_table(Tube::Au7)),
+            AnalogFlavour::Tube6sn7 => Some(tube_table(Tube::Sn7)),
+            AnalogFlavour::Tube6dj8 => Some(tube_table(Tube::Dj8)),
+            AnalogFlavour::Tube300b => Some(tube_table(Tube::T300b)),
+            AnalogFlavour::Tube2a3 => Some(tube_table(Tube::A2a3)),
+            AnalogFlavour::PushPull => Some(push_pull_table()),
+            AnalogFlavour::HardTransistor => Some(hard_transistor_table()),
             AnalogFlavour::SolidState => None,
         };
         Self { table }
@@ -1385,6 +1602,177 @@ mod tests {
         assert_eq!((s.sag, s.transformer), (1.0, 0.0));
         let parsed: AnalogSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert_eq!((parsed.sag, parsed.transformer), (0.3, 0.3));
+    }
+
+    const ALL_FLAVOURS: [AnalogFlavour; 10] = [
+        AnalogFlavour::WarmTriode,
+        AnalogFlavour::PushPull,
+        AnalogFlavour::SolidState,
+        AnalogFlavour::HardTransistor,
+        AnalogFlavour::Tube12at7,
+        AnalogFlavour::Tube12au7,
+        AnalogFlavour::Tube6sn7,
+        AnalogFlavour::Tube6dj8,
+        AnalogFlavour::Tube300b,
+        AnalogFlavour::Tube2a3,
+    ];
+
+    #[test]
+    fn every_tube_has_a_sane_operating_point() {
+        for t in [Tube::Ax7, Tube::At7, Tube::Au7, Tube::Sn7, Tube::Dj8, Tube::T300b, Tube::A2a3] {
+            let sp = t.spec();
+            let q = sp.quiescent();
+            assert!(q.vgk < 0.0 && q.ip > 0.0 && q.vp > 0.0, "{t:?}: bias {:.1} V, {:.2} mA at {:.0} V", q.vgk, q.ip * 1000.0, q.vp);
+            let check = sp.k.ip(q.vgk, q.vp);
+            assert!((check - q.ip).abs() / q.ip < 0.01, "{t:?}: the bias reproduces the stated current ({:.2} vs {:.2} mA)", check * 1000.0, q.ip * 1000.0);
+            // Plate voltage swings the right way and stays on the supply side of the load line.
+            let (hi, lo) = (sp.plate_voltage(&q, q.vgk - 3.0 * q.vgk.abs()), sp.plate_voltage(&q, 0.0));
+            assert!(hi > q.vp && q.vp > lo && lo >= 0.0, "{t:?}: plate {lo:.0} < {:.0} < {hi:.0} V", q.vp);
+        }
+        // Published power-triode biases: 300B about -62 V at 300 V / 65 mA; 2A3 about -45 V at 250 V / 60 mA.
+        assert!((-66.0..-56.0).contains(&Tube::T300b.bias()), "300B bias {:.1} V", Tube::T300b.bias());
+        assert!((-50.0..-40.0).contains(&Tube::A2a3.bias()), "2A3 bias {:.1} V", Tube::A2a3.bias());
+    }
+
+    #[test]
+    fn every_curve_is_a_unit_slope_monotonic_table() {
+        for f in ALL_FLAVOURS {
+            let sh = Shaper::new(f);
+            let slope = (sh.f(0.001) - sh.f(-0.001)) / 0.002;
+            assert!((slope - 1.0).abs() < 0.01, "{f:?}: unit slope, got {slope}");
+            assert!(sh.f(0.0).abs() < 1e-9, "{f:?}: zero at zero");
+            let mut prev = f64::MIN;
+            for i in -400..=400 {
+                let v = sh.f(i as f64 * 0.01);
+                assert!(v >= prev - 1e-9, "{f:?}: non-decreasing at {}", i as f64 * 0.01);
+                prev = v;
+            }
+        }
+    }
+
+    #[test]
+    fn single_ended_tubes_are_even_dominant_and_push_pull_is_odd_dominant() {
+        let (n, bin) = (1 << 14, 200);
+        let h = |f: AnalogFlavour, amp: f32| {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(f, 0.4, 0.0, 0.0));
+            let sp = spectrum(&run(&mut st, bin, n, amp));
+            (db(sp[bin * 2] / sp[bin]), db(sp[bin * 3] / sp[bin]))
+        };
+        for f in [AnalogFlavour::WarmTriode, AnalogFlavour::Tube12at7, AnalogFlavour::Tube12au7, AnalogFlavour::Tube6sn7, AnalogFlavour::Tube6dj8, AnalogFlavour::Tube300b, AnalogFlavour::Tube2a3] {
+            let (h2, h3) = h(f, 0.2);
+            assert!(h2 > h3 + 15.0, "{f:?}: 2nd {h2:.1} dB well above 3rd {h3:.1} dB");
+            assert!(h2 < -20.0 && h2 > -60.0, "{f:?}: audible but not extreme 2nd: {h2:.1} dB");
+        }
+        let (h2, h3) = h(AnalogFlavour::PushPull, 0.3);
+        assert!(h3 > h2 + 8.0, "push-pull: 3rd {h3:.1} dB above 2nd {h2:.1} dB");
+        assert!(h2 > -100.0, "...with a little even left from the imperfect match ({h2:.1} dB)");
+        // ...and it is much cleaner in the even harmonics than a single-ended 2A3.
+        assert!(h2 < h(AnalogFlavour::Tube2a3, 0.3).0 - 15.0, "push-pull cancels the 2nd of its own tube");
+    }
+
+    #[test]
+    fn hard_transistor_is_clean_below_the_knee_and_harsh_above_it() {
+        let (n, bin) = (1 << 14, 200);
+        let h3 = |amp: f32, drive: f32| {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(AnalogFlavour::HardTransistor, drive, 0.0, 0.0));
+            let sp = spectrum(&run(&mut st, bin, n, amp));
+            (db(sp[bin * 2] / sp[bin]), db(sp[bin * 3] / sp[bin]))
+        };
+        assert!(h3(0.1, 0.4).1 < -90.0, "clean well below the knee");
+        let (h2, h3_hard) = h3(0.6, 0.4);
+        assert!(h3_hard > -30.0, "strong 3rd once it clips ({h3_hard:.1} dB)");
+        assert!(h2 < -80.0, "symmetric: no even harmonics ({h2:.1} dB)");
+        // Harsher than the soft symmetric curve at the same setting.
+        let soft = {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(AnalogFlavour::SolidState, 0.4, 0.0, 0.0));
+            let sp = spectrum(&run(&mut st, bin, n, 0.3));
+            db(sp[bin * 5] / sp[bin])
+        };
+        let hard = {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(AnalogFlavour::HardTransistor, 0.4, 0.0, 0.0));
+            let sp = spectrum(&run(&mut st, bin, n, 0.75));
+            db(sp[bin * 5] / sp[bin])
+        };
+        assert!(hard > soft, "the hard clip's 5th ({hard:.1} dB) exceeds the soft one's at a lower level ({soft:.1} dB)");
+    }
+
+    #[test]
+    fn every_flavour_keeps_aliasing_low_at_every_rate_and_is_linear_when_quiet() {
+        for f in ALL_FLAVOURS {
+            for fs in [44_100u32, 96_000, 192_000] {
+                let a = alias_db_with(fs, 9_500.0, 0.53, 0.8, f, None);
+                assert!(a < -65.0, "{f:?} at {fs} Hz aliases at {a:.1} dB");
+            }
+            let n = 1 << 14;
+            let bin = 371;
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(f, 0.0, 0.0, 0.0));
+            let sp = spectrum(&run(&mut st, bin, n, 0.01));
+            assert!(db(sp[bin] / 0.01).abs() < 1.0, "{f:?}: unity gain for a quiet signal");
+        }
+    }
+
+    #[test]
+    fn flavour_names_round_trip_and_every_flavour_can_be_selected_live() {
+        for (f, name) in [
+            (AnalogFlavour::WarmTriode, "warm_triode"),
+            (AnalogFlavour::PushPull, "push_pull"),
+            (AnalogFlavour::SolidState, "solid_state"),
+            (AnalogFlavour::HardTransistor, "hard_transistor"),
+            (AnalogFlavour::Tube12at7, "tube_12at7"),
+            (AnalogFlavour::Tube12au7, "tube_12au7"),
+            (AnalogFlavour::Tube6sn7, "tube_6sn7"),
+            (AnalogFlavour::Tube6dj8, "tube_6dj8"),
+            (AnalogFlavour::Tube300b, "tube_300b"),
+            (AnalogFlavour::Tube2a3, "tube_2a3"),
+        ] {
+            assert_eq!(serde_json::to_string(&f).unwrap(), format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<AnalogFlavour>(&format!("\"{name}\"")).unwrap(), f);
+        }
+        // Step through every flavour while audio flows: each swap fades, nothing clicks or blows up.
+        let (n, bin) = (1 << 12, 40);
+        let mut st = AnalogStage::new(44_100);
+        let mut all = Vec::new();
+        for f in ALL_FLAVOURS {
+            st.set_settings(colour(f, 0.5, 0.2, 0.2));
+            let mut x = tone(bin, n, 1, 0.4, 1);
+            st.process(&mut x, 1);
+            assert!(x.iter().all(|v| v.is_finite() && v.abs() < 2.0), "{f:?}: finite and bounded");
+            all.extend(x);
+        }
+        assert!(max_step(&all[n..], 1) < 0.1, "no click while stepping through the flavours");
+    }
+
+    /// Prints each flavour's operating point and harmonic profile (run with
+    /// --ignored --nocapture); section 15 of Analog-Emulation.md comes from this.
+    #[test]
+    #[ignore]
+    fn print_flavour_profiles() {
+        for t in [Tube::Ax7, Tube::At7, Tube::Au7, Tube::Sn7, Tube::Dj8, Tube::T300b, Tube::A2a3] {
+            let sp = t.spec();
+            let q = sp.quiescent();
+            println!("{:?}: bias {:.1} V, plate {:.0} V, {:.1} mA, load {:.0} ohm", t, q.vgk, q.vp, q.ip * 1000.0, q.r_ac);
+        }
+        let (n, bin) = (1 << 14, 200);
+        for f in ALL_FLAVOURS {
+            let mut line = format!("{f:?}:");
+            for amp in [0.1f32, 0.3, 0.6] {
+                let mut st = AnalogStage::new(44_100);
+                st.set_settings(colour(f, 0.4, 0.0, 0.0));
+                let sp = spectrum(&run(&mut st, bin, n, amp));
+                let d = |k: usize| db(sp[bin * k] / sp[bin]);
+                line += &format!("  in {amp}: 2nd {:6.1} 3rd {:6.1} 4th {:6.1} 5th {:6.1} |", d(2), d(3), d(4), d(5));
+            }
+            println!("{line}");
+        }
+        for f in ALL_FLAVOURS {
+            let a = |fs: u32| alias_db_with(fs, 9_500.0, 0.53, 0.8, f, None);
+            println!("ALIAS {f:?}: 44.1k {:.1}  96k {:.1}  192k {:.1}", a(44_100), a(96_000), a(192_000));
+        }
     }
 
     #[test]
