@@ -195,11 +195,16 @@ export async function dopStatus(): Promise<DopStatus | undefined> {
   return cmd<DopStatus>("dop_status");
 }
 
-export async function onPlayerState(cb: (s: PlayerState) => void): Promise<UnlistenFn> {
+/**
+ * Subscribe to the engine's `player-state` events. Returns `null` when the
+ * subscription is refused (e.g. missing `core:event` capability), so the
+ * caller can fall back to polling instead of silently going stale.
+ */
+export async function onPlayerState(cb: (s: PlayerState) => void): Promise<UnlistenFn | null> {
   try {
     return await listen<PlayerState>("player-state", (event) => cb(event.payload));
   } catch (err) {
-    console.warn("[tauri] could not subscribe to player-state:", err);
-    return () => {};
+    console.error("[tauri] could not subscribe to player-state:", err);
+    return null;
   }
 }

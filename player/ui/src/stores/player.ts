@@ -32,6 +32,7 @@ export const usePlayerStore = defineStore("player", () => {
   const tick = ref(0);
 
   let timer: number | undefined;
+  let pollTimer: number | undefined;
   /**
    * A scrub the engine has not confirmed yet. Events already in flight when
    * the user releases the slider still carry the OLD playhead; without this
@@ -55,12 +56,20 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   async function init(): Promise<void> {
-    await onPlayerState((incoming) => {
-      const s = applySeekGuard(incoming);
-      raw.value = s;
+    const accept = (incoming: PlayerState): void => {
+      raw.value = applySeekGuard(incoming);
       lastEventAt.value = Date.now();
       connected.value = true;
-    });
+    };
+    const unlisten = await onPlayerState(accept);
+    if (unlisten === null && !!(await fetchState())) {
+      // Events are unavailable: poll the engine snapshot (refreshed ~4 Hz
+      // while playing) so the title, artwork and playhead still go live.
+      pollTimer = window.setInterval(async () => {
+        const s = await fetchState();
+        if (s) accept(s);
+      }, 300);
+    }
     // The shell may have emitted the initial state before the listener
     // attached (a queue restored from disk would be missed). Fetch it
     // directly so launch state always hydrates.
@@ -78,6 +87,7 @@ export const usePlayerStore = defineStore("player", () => {
 
   function dispose(): void {
     window.clearInterval(timer);
+    window.clearInterval(pollTimer);
   }
 
   const status = computed(() => raw.value?.status ?? "stopped");
