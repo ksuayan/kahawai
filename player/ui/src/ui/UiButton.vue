@@ -26,15 +26,15 @@ const props = withDefaults(
 const base =
   "inline-flex items-center gap-1.5 rounded-md text-[13px] transition-colors " +
   "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
-  "disabled:opacity-45 disabled:cursor-default";
+  "disabled:opacity-45 disabled:cursor-default [&_svg]:shrink-0";
 
-const box = "justify-center border px-3 py-[5px]";
+const box = "justify-center border px-3 py-[5px] [&_svg]:size-4";
 
 const iconSizes: Record<string, string> = {
-  default: "px-1.5 py-1",
-  md: "px-2.5 py-1 text-[15px]",
-  lg: "px-3.5 py-2 text-lg",
-  xl: "px-3.5 py-2 text-[22px]",
+  default: "px-1.5 py-1 [&_svg]:size-4",
+  md: "px-2.5 py-1 text-[15px] [&_svg]:size-[18px]",
+  lg: "px-3.5 py-2 text-lg [&_svg]:size-5",
+  xl: "px-3.5 py-2 text-[22px] [&_svg]:size-6",
 };
 
 const idleGhost = "bg-transparent text-dim enabled:hover:bg-hover enabled:hover:text-fg";

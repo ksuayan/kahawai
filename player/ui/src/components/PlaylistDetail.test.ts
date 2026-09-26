@@ -55,7 +55,7 @@ describe("PlaylistDetail", () => {
 
   it("goes back to the list", async () => {
     const { w } = await mountDetail();
-    await btn(w, /‹ Playlists/).trigger("click");
+    await btn(w, /Playlists/).trigger("click");
     expect(useNavStore().view.name).toBe("playlists");
   });
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { X } from "lucide-vue-next";
 import {
   ToastClose,
   ToastDescription,
@@ -55,7 +56,7 @@ const accent: Record<ToastKind, string> = {
         title="Dismiss"
         class="rounded-md px-1.5 py-0.5 text-[11px] text-dim hover:bg-hover hover:text-fg"
       >
-        ✕
+        <X class="size-3.5" />
       </ToastClose>
     </ToastRoot>
     <ToastViewport

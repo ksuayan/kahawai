@@ -53,7 +53,8 @@ describe("TrackRow", () => {
   });
 
   it("shows the cover only when asked, and the action menu unless hidden", () => {
-    expect(mountRow({ track: makeTrack() }).find("svg, img").exists()).toBe(false);
+    expect(mountRow({ track: makeTrack() }).findComponent({ name: "Artwork" }).exists()).toBe(false);
+    expect(mountRow({ track: makeTrack(), showArtwork: true }).findComponent({ name: "Artwork" }).exists()).toBe(true);
     expect(mountRow({ track: makeTrack(), showArtwork: true, artworkHash: "h" }).find("img").exists()).toBe(true);
     expect(mountRow({ track: makeTrack() }).find('button[aria-label^="Actions"]').exists()).toBe(true);
     expect(mountRow({ track: makeTrack(), showMenu: false }).find('button[aria-label^="Actions"]').exists()).toBe(false);

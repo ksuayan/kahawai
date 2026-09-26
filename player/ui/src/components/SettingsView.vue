@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Plus, RefreshCw, X } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { checkHealth } from "../api";
 import { artworkCacheStats, clearArtworkCache, inTauri, type ArtworkCacheStats } from "../tauri";
@@ -208,7 +209,7 @@ const dopRates = computed(() =>
         :class="online === true ? 'text-ok' : online === false ? 'text-danger' : 'text-dim'"
         data-testid="connection-status"
       >
-        <UiButton variant="icon" title="Check connection" aria-label="Check connection" @click="probe">⟳</UiButton>
+        <UiButton variant="icon" title="Check connection" aria-label="Check connection" @click="probe"><RefreshCw /></UiButton>
         {{ online === null ? "Connection not checked" : online ? "Server reachable" : "Server unreachable" }}
       </p>
     </SettingsSection>
@@ -267,7 +268,7 @@ const dopRates = computed(() =>
           <span class="min-w-0 flex-1 truncate">{{ j.kind === "scan" ? "Library scan" : j.label }}</span>
           <UiBadge :variant="j.status === 'done' ? 'ok' : 'bad'">{{ j.status }}</UiBadge>
         </div>
-        <div><UiButton variant="icon" @click="jobs.refresh()">⟳ Refresh</UiButton></div>
+        <div><UiButton variant="icon" @click="jobs.refresh()"><RefreshCw /> Refresh</UiButton></div>
       </div>
     </SettingsSection>
 
@@ -297,11 +298,11 @@ const dopRates = computed(() =>
           :options="deviceOptions"
           @update:model-value="(v) => dsp.chooseOutputDevice(v)"
         />
-        <UiButton variant="icon" title="Rescan output devices" aria-label="Rescan output devices" @click="dsp.refreshDevices()">⟳</UiButton>
+        <UiButton variant="icon" title="Rescan output devices" aria-label="Rescan output devices" @click="dsp.refreshDevices()"><RefreshCw /></UiButton>
       </div>
       <UiHint v-if="dsp.outputDeviceMissing" tone="warn" data-testid="device-missing">
         “{{ dsp.outputDevice }}” is not connected, so the system default is being used. It is selected again
-        automatically when it reappears (press ⟳ to rescan).
+        automatically when it reappears (press the rescan button).
       </UiHint>
       <UiHint v-if="!dsp.devices.length">No output devices reported.</UiHint>
       <UiHint>
@@ -355,10 +356,10 @@ const dopRates = computed(() =>
             Q
             <UiInput class="w-[60px]" type="number" :model-value="String(b.q)" min="0.1" max="18" step="0.1" @change="onBandNum(i, 'q', $event)" />
           </label>
-          <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="dsp.removeBand(i)">✕</UiButton>
+          <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="dsp.removeBand(i)"><X /></UiButton>
         </div>
       </div>
-      <UiButton variant="icon" :disabled="!dsp.canAddBand" @click="dsp.addBand()">＋ Add band</UiButton>
+      <UiButton variant="icon" :disabled="!dsp.canAddBand" @click="dsp.addBand()"><Plus /> Add band</UiButton>
     </SettingsSection>
 
     <SettingsSection title="Loudness normalization">

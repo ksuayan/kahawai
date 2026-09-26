@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Music } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { artworkSrc } from "../api";
 
@@ -41,9 +42,7 @@ const boxStyle = computed(() => ({
       @error="failed = true"
     />
     <div v-else class="flex size-full items-center justify-center text-faint" aria-hidden="true">
-      <svg viewBox="0 0 24 24" :width="fluid ? 72 : size * 0.45" :height="fluid ? 72 : size * 0.45">
-        <path fill="currentColor" d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z" />
-      </svg>
+      <Music :size="fluid ? 72 : size * 0.45" :stroke-width="1.5" />
     </div>
   </div>
 </template>

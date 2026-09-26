@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ChevronRight, Disc3, Ellipsis, ListMusic, ListPlus, ListStart, Plus } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import {
   DropdownMenuContent,
@@ -121,19 +122,20 @@ const menuLabel = computed(() => {
   <span class="inline-block" @dblclick.stop>
     <DropdownMenuRoot>
       <DropdownMenuTrigger as-child>
-        <UiButton variant="icon" :title="menuLabel" :aria-label="menuLabel">⋯</UiButton>
+        <UiButton variant="icon" :title="menuLabel" :aria-label="menuLabel"><Ellipsis /></UiButton>
       </DropdownMenuTrigger>
       <DropdownMenuPortal>
         <DropdownMenuContent align="end" :side-offset="4" :class="contentClass">
           <DropdownMenuItem :class="itemClass" :disabled="list.length === 0 || busy" @select="playNext">
-            ⏭ Play next
+            <span class="flex items-center gap-2"><ListStart class="size-4 text-dim" />Play next</span>
           </DropdownMenuItem>
           <DropdownMenuItem :class="itemClass" :disabled="list.length === 0 || busy" @select="addToQueue">
-            ☰ Add to queue
+            <span class="flex items-center gap-2"><ListPlus class="size-4 text-dim" />Add to queue</span>
           </DropdownMenuItem>
           <DropdownMenuSub>
             <DropdownMenuSubTrigger :class="itemClass" :disabled="list.length === 0 || busy">
-              ♫ Add to playlist… <span class="text-faint">▸</span>
+              <span class="flex items-center gap-2"><ListMusic class="size-4 text-dim" />Add to playlist…</span>
+              <ChevronRight class="size-3.5 text-faint" />
             </DropdownMenuSubTrigger>
             <DropdownMenuPortal>
               <DropdownMenuSubContent :class="contentClass" :side-offset="6">
@@ -148,13 +150,13 @@ const menuLabel = computed(() => {
                 </DropdownMenuItem>
                 <DropdownMenuSeparator v-if="playlists.items.length" class="my-1 h-px bg-line" />
                 <DropdownMenuItem :class="itemClass" :disabled="busy" @select="naming = true">
-                  ＋ New playlist…
+                  <span class="flex items-center gap-2"><Plus class="size-4 text-dim" />New playlist…</span>
                 </DropdownMenuItem>
               </DropdownMenuSubContent>
             </DropdownMenuPortal>
           </DropdownMenuSub>
           <DropdownMenuItem v-if="canExtractIso" :class="itemClass" :disabled="busy" @select="extractIso">
-            💿 Extract to DSF
+            <span class="flex items-center gap-2"><Disc3 class="size-4 text-dim" />Extract to DSF</span>
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenuPortal>

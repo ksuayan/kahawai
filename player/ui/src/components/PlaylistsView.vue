@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Pencil, Plus, X } from "lucide-vue-next";
 import { onMounted, ref } from "vue";
 import { useNavStore } from "../stores/nav";
 import { usePlaylistsStore } from "../stores/playlists";
@@ -107,7 +108,7 @@ function closeImportDialog(): void {
 <template>
   <ViewShell title="Playlists" :subtitle="`${playlists.items.length} playlists`">
     <template #actions>
-      <UiButton v-if="!creating" variant="primary" @click="creating = true">＋ New playlist</UiButton>
+      <UiButton v-if="!creating" variant="primary" @click="creating = true"><Plus /> New playlist</UiButton>
       <UiButton :disabled="importing" @click="pickFile">
         {{ importing ? "Importing…" : "Import M3U…" }}
       </UiButton>
@@ -164,13 +165,13 @@ function closeImportDialog(): void {
             {{ p.name }}
           </button>
           <span class="text-xs text-dim">{{ p.track_ids.length }} tracks</span>
-          <UiButton variant="icon" title="Rename playlist" aria-label="Rename playlist" @click="startRename(p)">✎</UiButton>
+          <UiButton variant="icon" title="Rename playlist" aria-label="Rename playlist" @click="startRename(p)"><Pencil /></UiButton>
           <UiButton variant="icon-danger"
             title="Delete playlist"
             aria-label="Delete playlist"
             @click="pendingDelete = { id: p.id, name: p.name }"
           >
-            ✕
+            <X />
           </UiButton>
         </template>
       </li>

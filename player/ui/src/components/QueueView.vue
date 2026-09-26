@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ChevronDown, ChevronUp, GripVertical, Repeat, Repeat1, Shuffle, X } from "lucide-vue-next";
 import { ref } from "vue";
 import { usePlaylistsStore } from "../stores/playlists";
 import { usePlayerStore } from "../stores/player";
@@ -79,7 +80,7 @@ async function saveAsPlaylist(name: string): Promise<void> {
         title="Shuffle"
         @click="player.toggleShuffle()"
       >
-        🔀 Shuffle
+        <Shuffle /> Shuffle
       </UiButton>
       <UiButton
         variant="icon"
@@ -87,7 +88,9 @@ async function saveAsPlaylist(name: string): Promise<void> {
         :title="player.repeat === 'one' ? 'Repeat one' : player.repeat === 'all' ? 'Repeat all' : 'Repeat off'"
         @click="player.cycleRepeat()"
       >
-        {{ player.repeat === "one" ? "🔂 Repeat one" : player.repeat === "all" ? "🔁 Repeat all" : "🔁 Repeat off" }}
+        <Repeat1 v-if="player.repeat === 'one'" />
+        <Repeat v-else />
+        {{ player.repeat === "one" ? "Repeat one" : player.repeat === "all" ? "Repeat all" : "Repeat off" }}
       </UiButton>
       <UiButton :disabled="queue.tracks.length === 0 || saving" @click="saveDialog = true">
         {{ saving ? "Saving…" : "Save queue as playlist" }}
@@ -119,7 +122,7 @@ async function saveAsPlaylist(name: string): Promise<void> {
         @drop="onDrop(i, $event)"
         @dragend="onDragEnd"
       >
-        <span class="shrink-0 cursor-grab tracking-[-2px] text-faint" aria-hidden="true">⋮⋮</span>
+        <GripVertical class="size-4 shrink-0 cursor-grab text-faint" aria-hidden="true" />
         <span class="w-7 shrink-0 text-right tabular-nums text-faint">{{ i + 1 }}</span>
         <Artwork :hash="null" :size="32" :radius="4" />
         <div class="min-w-0 flex-1">
@@ -128,7 +131,7 @@ async function saveAsPlaylist(name: string): Promise<void> {
         </div>
         <span class="shrink-0 tabular-nums text-dim">{{ formatDuration(t.duration_ms) }}</span>
         <span class="flex shrink-0 gap-0.5">
-          <UiButton variant="icon" title="Move up" aria-label="Move up" :disabled="i === 0" @click="queue.moveUp(i)">▲</UiButton>
+          <UiButton variant="icon" title="Move up" aria-label="Move up" :disabled="i === 0" @click="queue.moveUp(i)"><ChevronUp /></UiButton>
           <UiButton
             variant="icon"
             title="Move down"
@@ -136,14 +139,14 @@ async function saveAsPlaylist(name: string): Promise<void> {
             :disabled="i === queue.tracks.length - 1"
             @click="queue.moveDown(i)"
           >
-            ▼
+            <ChevronDown />
           </UiButton>
           <UiButton variant="icon-danger"
             title="Remove from queue"
             aria-label="Remove from queue"
             @click="queue.removeAt(i)"
           >
-            ✕
+            <X />
           </UiButton>
         </span>
       </div>

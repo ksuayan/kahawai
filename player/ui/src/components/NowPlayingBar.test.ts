@@ -152,3 +152,20 @@ describe("NowPlayingBar", () => {
     expect(tauri.callsTo("set_format")).toEqual([{ fmt: "flac" }]);
   });
 });
+
+describe("NowPlayingBar icons", () => {
+  it("every icon-only control is a real SVG icon with an accessible name (no emoji)", async () => {
+    const w = await boot(makeState({ status: "playing" }));
+    const iconOnly = w.findAll("button").filter((b) => b.find("svg").exists() && b.text().trim() === "");
+    expect(iconOnly.length).toBeGreaterThanOrEqual(8); // 6 transport + queue + settings (+ menu)
+    for (const b of iconOnly) {
+      expect(b.attributes("aria-label") ?? b.attributes("title")).toBeTruthy();
+    }
+    expect(w.text()).not.toMatch(/[←-⇿⏩-⏺■-➿\u{1F300}-\u{1FAFF}]/u);
+  });
+
+  it("shows the alert icon next to an engine error", async () => {
+    const w = await boot(makeState({ status: "stopped", error: "decode failed" }));
+    expect(w.get('[role="alert"] svg').classes().join(" ")).toContain("lucide-triangle-alert");
+  });
+});

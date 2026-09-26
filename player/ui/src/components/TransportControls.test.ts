@@ -26,9 +26,25 @@ describe("TransportControls", () => {
     expect(paused.findAll('[data-testid="play-pause"]').at(-1)!.attributes("aria-label")).toBe("Play");
   });
 
+  it("uses real icons, not emoji or glyph characters, and stays accessible through labels", async () => {
+    const w = await boot(makeState({ status: "playing" }));
+    const buttons = w.findAll("button");
+    expect(buttons.length).toBe(6);
+    for (const b of buttons) {
+      expect(b.find("svg").exists()).toBe(true);
+      expect(b.find("svg").attributes("aria-hidden")).toBe("true");
+      expect(b.text()).toBe(""); // no glyph text: the name comes from aria-label
+      expect(b.attributes("aria-label")).toBeTruthy();
+    }
+    const kinds = buttons.map((b) => b.find("svg").classes().find((c) => /^lucide-[a-z0-9-]+$/.test(c) && !c.endsWith("-icon")));
+    expect(new Set(kinds).size).toBe(6); // six different icons
+  });
+
   it("shows a loading marker while the stream opens", async () => {
     const w = await boot(makeState({ status: "loading" }));
-    expect(w.findAll('[data-testid="play-pause"]').at(-1)!.text()).toBe("…");
+    const btn = w.findAll('[data-testid="play-pause"]').at(-1)!;
+    expect(btn.find("svg.animate-spin").exists()).toBe(true);
+    expect(btn.text()).toBe("");
   });
 
   it("wires next, previous, stop, shuffle and repeat to the bridge", async () => {
@@ -54,7 +70,10 @@ describe("TransportControls", () => {
 
   it("labels repeat-one distinctly", async () => {
     const w = await boot(makeState({ repeat: "one" }));
-    expect(btn(w, "Repeat one").text()).toBe("🔂");
+    const icon = btn(w, "Repeat one").find("svg");
+    expect(icon.classes().join(" ")).toMatch(/lucide-repeat-?1/);
+    const all = await boot(makeState({ repeat: "all" }));
+    expect(btn(all, "Repeat all").find("svg").classes().join(" ")).not.toMatch(/lucide-repeat-?1/);
   });
 
   it("can hide Stop (full-page view) and disable everything (nothing playing)", async () => {

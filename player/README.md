@@ -29,7 +29,9 @@ Vue 3 + Pinia + strict TypeScript, styled with **Tailwind CSS v4** (design
 tokens in `src/style.css` `@theme`) and built on **Reka UI** headless
 primitives. `src/ui/` holds the shared primitives (`UiButton`, `UiSelect`,
 `UiSlider`, `UiSwitch`, `UiDialog`, `PromptDialog`, `ConfirmDialog`, …);
-components compose them and contain no hand-written CSS. Native
+components compose them and contain no hand-written CSS. Icons are
+[Lucide](https://lucide.dev) SVGs (`lucide-vue-next`, tree-shaken); emoji and
+text glyphs are not used as icons (a test enforces it). Native
 `prompt()`/`confirm()` are not used (they do not work reliably in the Tauri
 webview) — the dialog components replace them.
 

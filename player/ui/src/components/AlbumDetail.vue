@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ChevronLeft, Play } from "lucide-vue-next";
 import { onMounted, ref, watch } from "vue";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
@@ -63,7 +64,7 @@ function totalDuration(): string {
 
 <template>
   <ViewShell>
-    <UiButton variant="icon" class="mb-3" @click="nav.go('albums')">‹ Albums</UiButton>
+    <UiButton variant="icon" class="mb-3" @click="nav.go('albums')"><ChevronLeft /> Albums</UiButton>
     <StateMessage v-if="loading" kind="loading">Loading album…</StateMessage>
     <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>
     <div v-else-if="album">
@@ -77,7 +78,7 @@ function totalDuration(): string {
           <p class="m-0 mb-1 text-dim">{{ tracks.length }} tracks · {{ totalDuration() }}</p>
           <div class="mt-3 flex items-center gap-2">
             <UiButton variant="primary" :disabled="playableTracks().length === 0" @click="playAll">
-              ▶ Play
+              <Play class="fill-current" /> Play
             </UiButton>
             <TrackMenu :tracks="tracks" :album-id="album.id" />
           </div>

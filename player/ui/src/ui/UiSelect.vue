@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ChevronDown } from "lucide-vue-next";
 import { computed } from "vue";
 import {
   SelectContent,
@@ -64,7 +65,7 @@ const selectedLabel = computed(
       <span class="truncate">
         <SelectValue :placeholder="placeholder ?? 'Select…'">{{ selectedLabel ?? placeholder ?? "Select…" }}</SelectValue>
       </span>
-      <SelectIcon class="shrink-0 text-faint">▾</SelectIcon>
+      <SelectIcon class="shrink-0 text-faint"><ChevronDown class="size-3.5" /></SelectIcon>
     </SelectTrigger>
     <SelectPortal>
       <SelectContent

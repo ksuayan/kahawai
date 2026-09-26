@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ChevronDown, ChevronLeft, ChevronUp, ListPlus, Pencil, Play, X } from "lucide-vue-next";
 import { onMounted, ref, watch } from "vue";
 import { useNavStore } from "../stores/nav";
 import { usePlaylistsStore } from "../stores/playlists";
@@ -104,7 +105,7 @@ function startRename(): void {
 
 <template>
   <ViewShell>
-    <UiButton variant="icon" class="mb-3" @click="nav.go('playlists')">‹ Playlists</UiButton>
+    <UiButton variant="icon" class="mb-3" @click="nav.go('playlists')"><ChevronLeft /> Playlists</UiButton>
     <StateMessage v-if="playlists.loading" kind="loading">Loading playlist…</StateMessage>
     <StateMessage v-else-if="playlists.error" kind="error">{{ playlists.error }}</StateMessage>
     <div v-else-if="playlists.detail">
@@ -125,13 +126,13 @@ function startRename(): void {
           </div>
           <div v-else class="flex items-center gap-1">
             <h2 class="m-0 text-xl font-semibold">{{ playlists.detail.playlist.name }}</h2>
-            <UiButton variant="icon" title="Rename playlist" aria-label="Rename playlist" @click="startRename">✎</UiButton>
+            <UiButton variant="icon" title="Rename playlist" aria-label="Rename playlist" @click="startRename"><Pencil /></UiButton>
           </div>
           <p class="m-0 mt-1 text-dim">{{ playlists.detail.tracks.length }} tracks</p>
         </div>
         <div class="flex shrink-0 items-center gap-2">
-          <UiButton variant="primary" @click="playAll">▶ Play</UiButton>
-          <UiButton @click="addAllToQueue">☰ Add to queue</UiButton>
+          <UiButton variant="primary" @click="playAll"><Play class="fill-current" /> Play</UiButton>
+          <UiButton @click="addAllToQueue"><ListPlus /> Add to queue</UiButton>
           <UiButton variant="danger" @click="showDelete = true">Delete</UiButton>
         </div>
       </div>
@@ -144,7 +145,7 @@ function startRename(): void {
           :current="queue.current?.id === t.id"
           @play="playFrom"
         >
-          <UiButton variant="icon" title="Move up" aria-label="Move up" :disabled="i === 0 || mutating" @click="moveTrack(i, i - 1)">↑</UiButton>
+          <UiButton variant="icon" title="Move up" aria-label="Move up" :disabled="i === 0 || mutating" @click="moveTrack(i, i - 1)"><ChevronUp /></UiButton>
           <UiButton
             variant="icon"
             title="Move down"
@@ -152,7 +153,7 @@ function startRename(): void {
             :disabled="i === playlists.detail.tracks.length - 1 || mutating"
             @click="moveTrack(i, i + 1)"
           >
-            ↓
+            <ChevronDown />
           </UiButton>
           <UiButton variant="icon-danger"
             title="Remove from playlist"
@@ -160,7 +161,7 @@ function startRename(): void {
             :disabled="mutating"
             @click="removeTrack(t.id)"
           >
-            ✕
+            <X />
           </UiButton>
         </TrackRow>
       </div>

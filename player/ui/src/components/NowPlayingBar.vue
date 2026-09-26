@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ListMusic, Settings, TriangleAlert } from "lucide-vue-next";
 import { computed } from "vue";
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { useLibraryStore } from "../stores/library";
@@ -52,11 +53,12 @@ function goNowPlaying(): void {
   <footer class="relative z-20 border-t border-line bg-raised" data-testid="now-playing-bar">
     <div
       v-if="player.error"
-      class="truncate bg-danger/15 px-4 py-1.5 text-xs text-[#ff9d97]"
+      class="flex items-center gap-1.5 bg-danger/15 px-4 py-1.5 text-xs text-[#ff9d97]"
       role="alert"
       :title="player.error"
     >
-      ⚠ {{ player.error }}
+      <TriangleAlert class="size-3.5 shrink-0" />
+      <span class="truncate">{{ player.error }}</span>
     </div>
     <div class="grid min-h-[68px] grid-cols-[1fr_1.4fr_1fr] items-center gap-4 px-4 py-2">
       <!-- left: identity (click → full now-playing view) -->
@@ -102,11 +104,11 @@ function goNowPlaying(): void {
           trigger-class="w-[140px]"
         />
         <VolumeSlider class="w-[100px]" />
-        <UiButton variant="icon" title="Queue" aria-label="Queue" @click="nav.go('queue')">☰</UiButton>
+        <UiButton variant="icon" title="Queue" aria-label="Queue" @click="nav.go('queue')"><ListMusic /></UiButton>
         <TrackMenu v-if="track" :track="track" />
         <PopoverRoot>
           <PopoverTrigger as-child>
-            <UiButton variant="icon" title="Playback settings" aria-label="Playback settings">⚙</UiButton>
+            <UiButton variant="icon" title="Playback settings" aria-label="Playback settings"><Settings /></UiButton>
           </PopoverTrigger>
           <PopoverPortal>
             <PopoverContent

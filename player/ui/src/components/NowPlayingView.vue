@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ChevronLeft, SlidersHorizontal } from "lucide-vue-next";
 import { computed } from "vue";
 import { useDspStore } from "../stores/dsp";
 import { useLibraryStore } from "../stores/library";
@@ -54,7 +55,7 @@ function goEq(): void {
 
 <template>
   <ViewShell width="medium">
-    <UiButton variant="icon" class="mb-4" @click="nav.go('albums')">‹ Library</UiButton>
+    <UiButton variant="icon" class="mb-4" @click="nav.go('albums')"><ChevronLeft /> Library</UiButton>
     <StateMessage v-if="!track" kind="empty">
       <p class="m-0">Nothing playing.</p>
       <p class="m-0 mt-1 text-dim">Pick an album or playlist to start.</p>
@@ -97,7 +98,7 @@ function goEq(): void {
             Track format
             <TrackFormatSelect :track="track" :disabled="!isPlayable(track)" />
           </div>
-          <UiButton variant="icon" title="Open EQ in Settings" @click="goEq">🎚 EQ</UiButton>
+          <UiButton variant="icon" title="Open EQ in Settings" @click="goEq"><SlidersHorizontal /> EQ</UiButton>
           <TrackMenu :track="track" />
         </div>
 
