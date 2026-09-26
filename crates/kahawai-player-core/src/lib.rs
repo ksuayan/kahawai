@@ -22,9 +22,9 @@ pub use bitperfect::{f32_to_i24_le, BitPerfect};
 pub use decode::{DecodedSpec, StreamDecoder};
 pub use dop::{dop_pcm_rate, parse_wav_header, DopSpec, DopStream, DOP_BITS_PER_SAMPLE};
 pub use dsp::{
-    integrated_lufs, scan_track_lufs, validate_bands, EqBand, EqBandType, GainRamp, LoudnessNorm,
+    integrated_lufs, scan_track_lufs, usable_freq, validate_bands, EqBand, EqBandType, GainRamp, LoudnessNorm,
     ParametricEq, DEFAULT_LOUDNESS_TARGET, MAX_EQ_BANDS, MAX_LOUDNESS_GAIN_DB,
-    MIN_LOUDNESS_GAIN_DB,
+    MIN_LOUDNESS_GAIN_DB, NYQUIST_FRACTION,
 };
 pub use engine::{
     resolve_format, valid_formats, DsdStory, DspSettings, EngineCommand, EngineController, Player,

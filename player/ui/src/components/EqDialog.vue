@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { Plus, Trash2 } from "lucide-vue-next";
+import { Plus, Trash2, TriangleAlert } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
-import { totalResponseDb } from "../eqResponse";
+import { bandHasGain, constrainBand, DEFAULT_RATE_HZ, EQ_LIMITS, maxFreqFor, qRange, totalResponseDb } from "../eqResponse";
 import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
-import { EQ_BAND_TYPES, type EqBandType } from "../types";
+import { EQ_BAND_TYPES, MAX_EQ_BANDS, type EqBandType } from "../types";
 import PromptDialog from "../ui/PromptDialog.vue";
 import UiButton from "../ui/UiButton.vue";
 import UiDialog from "../ui/UiDialog.vue";
@@ -52,6 +52,10 @@ function onOpenChange(v: boolean): void {
 }
 
 const unsupported = computed(() => player.isExclusive);
+// The EQ is designed at the rate the audio reaches the output; draw and limit for that.
+const rate = computed(() => player.outputRateHz ?? DEFAULT_RATE_HZ);
+const maxFreq = computed(() => maxFreqFor(rate.value));
+const rateLabel = computed(() => `${Math.round(rate.value / 100) / 10} kHz`);
 const UNSUPPORTED_TEXT = "EQ is not supported for this stream type.";
 
 // --- graph geometry ---------------------------------------------------------
@@ -69,19 +73,24 @@ const FREQ_GRID = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const DB_GRID = [-12, -6, 0, 6, 12];
 const fLabel = (f: number) => (f >= 1000 ? `${f / 1000}k` : String(f));
 
-const curve = computed(() => {
-  const bands = dsp.activeBands;
-  const pts: string[] = [];
-  for (let i = 0; i <= 160; i++) {
+/** Sampled response (dB) across the axis, unclamped. */
+const samples = computed(() =>
+  Array.from({ length: 161 }, (_, i) => {
     const f = F_MIN * (F_MAX / F_MIN) ** (i / 160);
-    const db = clamp(totalResponseDb(bands, f), -DB, DB);
-    pts.push(`${i === 0 ? "M" : "L"}${xOf(f).toFixed(1)},${yOf(db).toFixed(1)}`);
-  }
-  return pts.join(" ");
-});
+    return { f, db: totalResponseDb(dsp.activeBands, f, rate.value) };
+  }),
+);
+const curve = computed(() =>
+  samples.value
+    .map((p, i) => `${i === 0 ? "M" : "L"}${xOf(p.f).toFixed(1)},${yOf(clamp(p.db, -DB, DB)).toFixed(1)}`)
+    .join(" "),
+);
+/** Highest boost of the combined curve; above 0 dB loud material can clip. */
+const peakDb = computed(() => Math.max(0, ...samples.value.map((p) => p.db)));
+const clipRisk = computed(() => dsp.eqEnabled && peakDb.value > 0.5);
 const fill = computed(() => `${curve.value} L${xOf(F_MAX)},${yOf(0)} L${xOf(F_MIN)},${yOf(0)} Z`);
 
-const hasGain = (t: EqBandType) => t === "peaking" || t === "low_shelf" || t === "high_shelf";
+const hasGain = bandHasGain;
 
 const sel = computed(() => (selected.value === null ? null : (dsp.rows[selected.value] ?? null)));
 
@@ -99,10 +108,8 @@ function pointFromEvent(e: PointerEvent | MouseEvent): { f: number; db: number }
 function move(i: number, f: number, db: number): void {
   const r = dsp.rows[i];
   if (!r) return;
-  const patch = hasGain(r.band_type)
-    ? { freq: Math.round(f), gain_db: Math.round(clamp(db, -24, 24) * 2) / 2 }
-    : { freq: Math.round(f) };
-  dsp.updateRow(i, patch);
+  const c = constrainBand({ ...r, freq: f, gain_db: Math.round(db * 2) / 2 }, rate.value);
+  dsp.updateRow(i, hasGain(r.band_type) ? { freq: Math.round(c.freq), gain_db: c.gain_db } : { freq: Math.round(c.freq) });
 }
 
 function onDown(i: number, e: PointerEvent): void {
@@ -157,8 +164,20 @@ const typeLabel: Record<EqBandType, string> = {
 };
 const typeOptions: UiSelectOption[] = EQ_BAND_TYPES.map((t) => ({ value: t, label: typeLabel[t] }));
 function onNum(field: "freq" | "gain_db" | "q", e: Event): void {
-  if (selected.value === null) return;
-  dsp.updateRow(selected.value, { [field]: Number((e.target as HTMLInputElement).value) });
+  const i = selected.value;
+  const r = i === null ? null : dsp.rows[i];
+  if (i === null || !r) return;
+  const el = e.target as HTMLInputElement;
+  const c = constrainBand({ ...r, [field]: Number(el.value) }, rate.value);
+  el.value = String(c[field]); // show what was actually applied
+  dsp.updateRow(i, { [field]: c[field] });
+}
+function onType(v: string | null): void {
+  const i = selected.value;
+  const r = i === null ? null : dsp.rows[i];
+  if (i === null || !r || !v) return;
+  const c = constrainBand({ ...r, band_type: v as EqBandType }, rate.value);
+  dsp.updateRow(i, { band_type: c.band_type, gain_db: c.gain_db, q: c.q });
 }
 
 // --- presets ----------------------------------------------------------------
@@ -231,7 +250,7 @@ function choose(v: string | null): void {
         <path :d="curve" fill="none" class="stroke-accent" stroke-width="2" data-testid="eq-curve" />
         <g v-for="(r, i) in dsp.rows" :key="i">
           <circle
-            :cx="xOf(r.freq)"
+            :cx="xOf(Math.min(r.freq, maxFreq))"
             :cy="yOf(hasGain(r.band_type) ? clamp(r.gain_db, -DB, DB) : 0)"
             :r="selected === i ? 9 : 7"
             :class="[r.enabled ? 'fill-accent' : 'fill-faint', selected === i ? 'stroke-fg' : 'stroke-canvas']"
@@ -252,19 +271,30 @@ function choose(v: string | null): void {
         </g>
       </svg>
 
+      <p class="m-0 mt-1.5 text-[11px] text-faint" data-testid="eq-rate">
+        Curve for {{ rateLabel }} output{{ player.outputRateHz ? "" : " (nothing playing)" }}. Bands are limited to {{ maxFreq }} Hz and ±{{ EQ_LIMITS.gainMax }} dB.
+      </p>
+      <p v-if="clipRisk" class="m-0 mt-2 flex items-start gap-1.5 text-xs text-warn-fg" role="status" data-testid="eq-headroom">
+        <TriangleAlert class="mt-px size-3.5 shrink-0" />
+        Peak boost of +{{ peakDb.toFixed(1) }} dB can clip loud tracks. Lower the boost, or cut the loud bands instead.
+      </p>
+      <p v-if="sel && sel.freq > maxFreq" class="m-0 mt-2 text-xs text-warn-fg" role="status" data-testid="eq-band-capped">
+        Band {{ selected! + 1 }} is above the usable range at {{ rateLabel }} and is applied at {{ maxFreq }} Hz.
+      </p>
+
       <div class="mt-3 flex min-h-[44px] flex-wrap items-center gap-3 text-xs text-dim" data-testid="eq-band-panel">
         <template v-if="sel && selected !== null">
           <span class="font-semibold text-fg">Band {{ selected + 1 }}</span>
-          <UiSelect aria-label="Band type" trigger-class="w-[130px]" :model-value="sel.band_type" :options="typeOptions" @update:model-value="(v) => dsp.updateRow(selected!, { band_type: v as EqBandType })" />
-          <label class="flex items-center gap-1">Hz <UiInput class="w-[80px]" type="number" :model-value="String(sel.freq)" min="10" max="24000" @change="onNum('freq', $event)" /></label>
-          <label v-if="hasGain(sel.band_type)" class="flex items-center gap-1">dB <UiInput class="w-[70px]" type="number" :model-value="String(sel.gain_db)" min="-24" max="24" step="0.5" @change="onNum('gain_db', $event)" /></label>
-          <label class="flex items-center gap-1">{{ sel.band_type.endsWith("shelf") ? "Slope" : "Q" }} <UiInput class="w-[70px]" type="number" :model-value="String(sel.q)" min="0.1" max="18" step="0.1" @change="onNum('q', $event)" /></label>
+          <UiSelect aria-label="Band type" trigger-class="w-[130px]" :model-value="sel.band_type" :options="typeOptions" @update:model-value="onType" />
+          <label class="flex items-center gap-1">Hz <UiInput class="w-[80px]" type="number" :model-value="String(sel.freq)" min="20" :max="maxFreq" @change="onNum('freq', $event)" /></label>
+          <label v-if="hasGain(sel.band_type)" class="flex items-center gap-1">dB <UiInput class="w-[70px]" type="number" :model-value="String(sel.gain_db)" min="-18" max="18" step="0.5" @change="onNum('gain_db', $event)" /></label>
+          <label class="flex items-center gap-1">{{ sel.band_type.endsWith("shelf") ? "Slope" : "Q" }} <UiInput class="w-[70px]" type="number" :model-value="String(sel.q)" :min="qRange(sel.band_type).min" :max="qRange(sel.band_type).max" step="0.1" @change="onNum('q', $event)" /></label>
           <UiSwitch :model-value="sel.enabled" label="On" @update:model-value="dsp.toggleRow(selected!)" />
           <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="removeSelected"><Trash2 /></UiButton>
         </template>
         <template v-else>
           <span>Select a point to edit it.</span>
-          <UiButton :disabled="!dsp.canAddBand" data-testid="add-band" @click="dsp.addBand(); selected = dsp.rows.length - 1"><Plus /> Add band</UiButton>
+          <UiButton :disabled="!dsp.canAddBand" :title="dsp.canAddBand ? undefined : `At most ${MAX_EQ_BANDS} bands`" data-testid="add-band" @click="dsp.addBand(); selected = dsp.rows.length - 1"><Plus /> Add band</UiButton>
         </template>
         <span v-if="dsp.rowError" class="text-danger" role="alert">{{ dsp.rowError }}</span>
       </div>

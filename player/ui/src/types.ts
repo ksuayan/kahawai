@@ -88,6 +88,8 @@ export interface PlayerState {
   duration_ms: number | null;
   /** How far the data received from the server reaches (ms); null when unknown. */
   buffered_ms?: number | null;
+  /** Rate of the audio reaching the output (what the EQ is designed at); null when idle. */
+  output_rate_hz?: number | null;
   format: string | null;
   chain: string | null;
   /** "pcm-shared" (DSP chain active) or "dop-exclusive" (bit-perfect). */

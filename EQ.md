@@ -62,18 +62,36 @@ DSP happens on the real-time audio thread.
 | Aspect | Current behaviour |
 |---|---|
 | Bands | 0–8 (`MAX_EQ_BANDS`); types `peaking`, `low_shelf`, `high_shelf`, `low_pass`, `high_pass` |
-| Ranges | freq 10–24 000 Hz, gain −24…+24 dB, Q 0.1–18 (shelves: slope S, clamped 0.1–3.0) |
+| Ranges (engine) | freq 10–24 000 Hz, gain −24…+24 dB, Q 0.1–18 (shelves: slope S, clamped 0.1–3.0) |
+| Frequency cap | a band is designed at no more than 0.45 × the sample rate (`usable_freq`), because the RBJ formulas degenerate near Nyquist; at 44.1 kHz the cap is 19 845 Hz |
 | Maths | RBJ cookbook coefficients, normalized (a0 = 1); Direct Form II transposed, one state pair per band per channel |
-| Precision | f32 throughout |
+| Precision | audio is f32; filter coefficients and state are f64 (at 176/192 kHz a low-frequency band needs coefficients within about 1e-3 of 1.0, which f32 handles poorly) |
 | Order | bands are applied in list order (a cascade; order does not change the total response, only intermediate levels) |
 | Bypass | disabled, or zero bands: `process` returns without touching the buffer (bit-transparent) |
 | Validation | `validate_bands` rejects out-of-range values; the Tauri command validates first so the UI gets an error before anything reaches the engine |
 | Rate | designed at the rate the sink receives (after any resampling) and redesigned when it changes (state is cleared) |
 
 The frequency-response graph in the UI ([eqResponse.ts](player/ui/src/eqResponse.ts))
-re-implements the same coefficient formulas in TypeScript and evaluates them
-at 48 kHz, so the drawn curve matches what the engine does at that rate
-(see 4.1 for other rates).
+re-implements the same coefficient formulas, including the frequency cap,
+and evaluates them at the rate the engine reports (`output_rate_hz` in the
+player state). With nothing playing it draws for 48 kHz and says so.
+
+### Guardrails in the UI
+
+The editor only lets a band be set to something meaningful; the engine's
+own validation stays as the backstop.
+
+| Setting | UI limit | Notes |
+|---|---|---|
+| Frequency | 20 Hz to min(20 kHz, 0.45 × output rate) | dragging, arrow keys and typing are all clamped; typed values snap back to what was applied |
+| Gain | −18…+18 dB | matches the graph's range; pass filters have no gain |
+| Q | 0.1–18 | |
+| Shelf slope | 0.1–3 | switching a band to a shelf pulls Q into this range |
+| Bands | at most 8 | "Add band" is disabled with a tooltip |
+| Headroom | warning above +0.5 dB peak boost | text explains the clipping risk; it does not change the sound |
+
+If the output rate drops so that a saved band is now above the cap, the
+band is applied at the cap and the dialog says so.
 
 ### Settings flow
 
@@ -103,21 +121,19 @@ sequenceDiagram
 
 These are properties of the current implementation, not bugs in the docs.
 
-1. **The graph assumes 48 kHz.** The engine designs the filters at the
-   rate the audio actually has when it reaches the EQ, which is the
-   device rate when the stream is resampled. The UI graph
-   ([eqResponse.ts](player/ui/src/eqResponse.ts)) always evaluates at
-   48 kHz, so at 44.1 kHz the drawn curve differs slightly from the real
-   one near the top of the spectrum. (Fixed: an earlier version designed
-   the filters at the file's rate but ran them after resampling, which
-   shifted every band whenever the device forced a different rate. See
+1. **The curve is exact only at the engine's design rate.** The graph
+   uses the rate the engine reports; when nothing is playing it uses
+   48 kHz. (Fixed: an earlier version designed the filters at the file's
+   rate but ran them after resampling, which shifted every band whenever
+   the device forced a different rate. See
    `eq_is_tuned_to_the_device_rate_when_the_stream_is_resampled` in
    engine_tests.rs.)
 2. **No smoothing on live edits.** `set_bands` redesigns all filters and
    clears their state. Dragging a node can produce small clicks. A fix is
    per-band coefficient interpolation over a few milliseconds, or keeping
    state when only gain or frequency changes.
-3. **No headroom management.** There is no automatic pre-gain or limiter.
+3. **No headroom management.** There is no automatic pre-gain or limiter;
+   the dialog only warns.
    Boosting bands on loud material can exceed 0 dBFS in f32 and clip at
    the device. Loudness normalization applies gain (capped at +12 dB), which
    adds to the risk.
@@ -313,10 +329,17 @@ on/off state of the bands, live in the webview's localStorage, which means
 per machine, and they are lost if the app's data is cleared. The applied
 bands and the EQ on/off state are also saved in `engine-settings.json`.
 
-**Why does the graph not match what I hear at 44.1 kHz?**
-The graph is drawn for 48 kHz. Below that rate the top of the curve is
-slightly off; the engine itself designs the filters at the actual rate.
-This is limitation 4.1.
+**Does the EQ work at every sample rate?**
+Yes. The filters are designed for the rate the audio has when it reaches
+the EQ (the device rate, after any resampling), in 64-bit maths so that
+low-frequency bands stay accurate at 176.4 and 192 kHz. The dialog shows the
+rate it is drawing for and limits the top band frequency to 0.45 × that
+rate (19 845 Hz at 44.1 kHz).
+
+**The editor won't let me set a value. Why?**
+See "Guardrails in the UI" in section 3. The limits keep every band
+meaningful and visible on the graph, so you cannot enter, for example, a
+band above Nyquist or a gain the graph cannot show.
 
 **Can I use my own EQ plug-in (Audio Unit)?**
 Not yet. See section 6 for what it would take.

@@ -18,29 +18,33 @@ use crate::transport::{StreamOptions, Transport};
 // Biquad core (RBJ "Audio EQ Cookbook")
 // ---------------------------------------------------------------------------
 
-/// Normalized biquad coefficients (a0 = 1).
+/// Normalized biquad coefficients (a0 = 1). f64: at 176/192 kHz a low-
+/// frequency band needs coefficients within ~1e-6 of 1.0, which f32 cannot
+/// represent well enough (noisy or slightly wrong response).
 #[derive(Debug, Clone, Copy)]
 struct Biquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
 }
 
 /// Direct Form II transposed state, one per channel.
 #[derive(Debug, Clone, Copy, Default)]
 struct BiquadState {
-    z1: f32,
-    z2: f32,
+    z1: f64,
+    z2: f64,
 }
 
+/// Audio stays f32; only the filter arithmetic is f64.
 #[inline]
 fn biquad_step(c: &Biquad, s: &mut BiquadState, x: f32) -> f32 {
+    let x = x as f64;
     let y = c.b0 * x + s.z1;
     s.z1 = c.b1 * x - c.a1 * y + s.z2;
     s.z2 = c.b2 * x - c.a2 * y;
-    y
+    y as f32
 }
 
 // ---------------------------------------------------------------------------
@@ -107,12 +111,23 @@ pub fn validate_bands(bands: &[EqBand]) -> Result<(), MusicError> {
     Ok(())
 }
 
+/// Highest band frequency that stays meaningful at `sample_rate`: a fraction
+/// of Nyquist, since the RBJ formulas degenerate as w0 approaches pi.
+pub const NYQUIST_FRACTION: f32 = 0.45;
+
+/// The frequency a band is actually designed at (its own, capped for the rate).
+pub fn usable_freq(freq: f32, sample_rate: u32) -> f32 {
+    freq.min(sample_rate as f32 * NYQUIST_FRACTION)
+}
+
 /// Design one band at `sample_rate` using the RBJ cookbook.
 fn design_band(band: &EqBand, sample_rate: u32) -> Biquad {
-    let a = 10f32.powf(band.gain_db / 40.0);
-    let w0 = 2.0 * std::f32::consts::PI * band.freq / sample_rate as f32;
+    let a = 10f64.powf(band.gain_db as f64 / 40.0);
+    let freq = usable_freq(band.freq, sample_rate) as f64;
+    let q = band.q as f64;
+    let w0 = 2.0 * std::f64::consts::PI * freq / sample_rate as f64;
     let (cw, sw) = (w0.cos(), w0.sin());
-    let alpha = sw / (2.0 * band.q);
+    let alpha = sw / (2.0 * q);
 
     let (b0, b1, b2, a0, a1, a2) = match band.band_type {
         EqBandType::Peaking => (
@@ -124,7 +139,7 @@ fn design_band(band: &EqBand, sample_rate: u32) -> Biquad {
             1.0 - alpha / a,
         ),
         EqBandType::LowShelf => {
-            let s = band.q.clamp(0.1, 3.0);
+            let s = q.clamp(0.1, 3.0);
             let alpha_s = sw / 2.0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).sqrt();
             let sq = 2.0 * a.sqrt() * alpha_s;
             (
@@ -137,7 +152,7 @@ fn design_band(band: &EqBand, sample_rate: u32) -> Biquad {
             )
         }
         EqBandType::HighShelf => {
-            let s = band.q.clamp(0.1, 3.0);
+            let s = q.clamp(0.1, 3.0);
             let alpha_s = sw / 2.0 * ((a + 1.0 / a) * (1.0 / s - 1.0) + 2.0).sqrt();
             let sq = 2.0 * a.sqrt() * alpha_s;
             (
@@ -290,9 +305,9 @@ fn k_weighting(sample_rate: u32) -> (Biquad, Biquad) {
         sample_rate,
     );
     // RBJ high-pass with the RLB Q directly.
-    let w0 = 2.0 * std::f32::consts::PI * 60.4137 / sample_rate as f32;
+    let w0 = 2.0 * std::f64::consts::PI * 60.4137 / sample_rate as f64;
     let (cw, sw) = (w0.cos(), w0.sin());
-    let alpha = sw / (2.0 * 0.50033);
+    let alpha = sw / (2.0 * 0.50033_f64);
     let a0 = 1.0 + alpha;
     let rlb = Biquad {
         b0: ((1.0 + cw) / 2.0) / a0,
@@ -657,6 +672,43 @@ mod tests {
         let mut out = input.clone();
         eq.process(&mut out, 2);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn low_frequency_bands_stay_accurate_at_192k() {
+        // A 100 Hz low shelf at 192 kHz needs coefficients ~1e-3 from 1.0;
+        // f32 coefficients lose accuracy here. +12 dB well below the corner must be x3.98.
+        let mut eq = ParametricEq::new(192_000);
+        eq.set_bands(vec![EqBand {
+            band_type: EqBandType::LowShelf,
+            freq: 100.0,
+            gain_db: 12.0,
+            q: 0.7,
+        }])
+        .unwrap();
+        let mut out = stereo(&sine(15.0, 192_000 * 4, 192_000, 0.1));
+        eq.process(&mut out, 2);
+        let ratio = rms_steady(&out, 192_000 * 2 * 2) / (0.1 * std::f32::consts::FRAC_1_SQRT_2);
+        assert!((ratio - 3.98).abs() < 0.12, "expected ~x3.98 at 15 Hz, got {ratio}");
+    }
+
+    #[test]
+    fn band_above_the_usable_range_is_designed_at_the_cap_and_stays_stable() {
+        let rate = 44_100;
+        let cap = usable_freq(24_000.0, rate);
+        assert!(cap < 22_050.0 * 0.95, "capped below Nyquist, got {cap}");
+        let band = |f| EqBand { band_type: EqBandType::HighShelf, freq: f, gain_db: 6.0, q: 0.7 };
+        let input = stereo(&sine(5000.0, 8192, rate, 0.5));
+        let (mut a, mut b) = (input.clone(), input);
+        let mut eq_hi = ParametricEq::new(rate);
+        eq_hi.set_bands(vec![band(24_000.0)]).unwrap();
+        eq_hi.process(&mut a, 2);
+        let mut eq_cap = ParametricEq::new(rate);
+        eq_cap.set_bands(vec![band(cap)]).unwrap();
+        eq_cap.process(&mut b, 2);
+        assert!(a.iter().all(|s| s.is_finite() && s.abs() < 4.0));
+        assert_eq!(a, b, "an out-of-range frequency behaves exactly like the cap");
+        assert_eq!(usable_freq(1000.0, rate), 1000.0, "in-range bands are untouched");
     }
 
     #[test]

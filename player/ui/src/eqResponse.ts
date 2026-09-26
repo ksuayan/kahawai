@@ -1,12 +1,51 @@
 import type { EqBand } from "./types";
 
-/** Sample rate the curve is drawn for (the engine designs at the stream's own rate). */
-const FS = 48000;
+/** Rate the curve is drawn for when no stream says otherwise. */
+export const DEFAULT_RATE_HZ = 48000;
 
-/** Magnitude (dB) of one band at `f` Hz; mirrors `design_band` in kahawai-player-core (RBJ cookbook). */
-export function bandResponseDb(band: EqBand, f: number): number {
+/** UI guardrails. Tighter than the engine's own limits (10–24000 Hz, ±24 dB) so a
+ *  band can only be set to something that is meaningful and visible on the graph. */
+export const EQ_LIMITS = {
+  freqMin: 20,
+  freqMax: 20000,
+  gainMax: 18,
+  qMin: 0.1,
+  qMax: 18,
+  slopeMin: 0.1,
+  slopeMax: 3,
+} as const;
+
+/** Mirrors `usable_freq` in dsp.rs: the engine caps a band at 0.45 x the sample rate. */
+export const NYQUIST_FRACTION = 0.45;
+export const usableFreq = (freq: number, fs: number): number => Math.min(freq, fs * NYQUIST_FRACTION);
+
+/** Highest frequency a band may be set to at this output rate. */
+export const maxFreqFor = (fs: number): number => Math.floor(Math.min(EQ_LIMITS.freqMax, fs * NYQUIST_FRACTION));
+
+export const bandHasGain = (t: EqBand["band_type"]): boolean => t === "peaking" || t === "low_shelf" || t === "high_shelf";
+const isShelf = (t: EqBand["band_type"]): boolean => t === "low_shelf" || t === "high_shelf";
+const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+
+/** Range of the Q / slope field for a band type. */
+export function qRange(t: EqBand["band_type"]): { min: number; max: number } {
+  return isShelf(t) ? { min: EQ_LIMITS.slopeMin, max: EQ_LIMITS.slopeMax } : { min: EQ_LIMITS.qMin, max: EQ_LIMITS.qMax };
+}
+
+/** Pull a band back into the allowed ranges for this rate (returns a new band). */
+export function constrainBand(b: EqBand, fs: number): EqBand {
+  const q = qRange(b.band_type);
+  return {
+    ...b,
+    freq: clamp(Number.isFinite(b.freq) ? b.freq : 1000, EQ_LIMITS.freqMin, maxFreqFor(fs)),
+    gain_db: bandHasGain(b.band_type) ? clamp(Number.isFinite(b.gain_db) ? b.gain_db : 0, -EQ_LIMITS.gainMax, EQ_LIMITS.gainMax) : 0,
+    q: clamp(Number.isFinite(b.q) ? b.q : 1, q.min, q.max),
+  };
+}
+
+/** Magnitude (dB) of one band at `f` Hz for an output at `fs` Hz; mirrors `design_band` in kahawai-player-core (RBJ cookbook). */
+export function bandResponseDb(band: EqBand, f: number, fs = DEFAULT_RATE_HZ): number {
   const a = 10 ** (band.gain_db / 40);
-  const w0 = (2 * Math.PI * band.freq) / FS;
+  const w0 = (2 * Math.PI * usableFreq(band.freq, fs)) / fs;
   const cw = Math.cos(w0);
   const sw = Math.sin(w0);
   const alpha = sw / (2 * band.q);
@@ -52,7 +91,7 @@ export function bandResponseDb(band: EqBand, f: number): number {
       break;
     }
   }
-  const w = (2 * Math.PI * f) / FS;
+  const w = (2 * Math.PI * f) / fs;
   const c1 = Math.cos(w), s1 = Math.sin(w), c2 = Math.cos(2 * w), s2 = Math.sin(2 * w);
   const nr = b0 + b1 * c1 + b2 * c2, ni = -(b1 * s1 + b2 * s2);
   const dr = a0 + a1 * c1 + a2 * c2, di = -(a1 * s1 + a2 * s2);
@@ -60,6 +99,6 @@ export function bandResponseDb(band: EqBand, f: number): number {
 }
 
 /** Combined response (dB) of all bands at `f` Hz. */
-export function totalResponseDb(bands: EqBand[], f: number): number {
-  return bands.reduce((sum, b) => sum + bandResponseDb(b, f), 0);
+export function totalResponseDb(bands: EqBand[], f: number, fs = DEFAULT_RATE_HZ): number {
+  return bands.reduce((sum, b) => sum + bandResponseDb(b, f, fs), 0);
 }

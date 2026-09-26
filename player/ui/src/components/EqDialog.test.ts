@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { bandResponseDb, totalResponseDb } from "../eqResponse";
+import { bandResponseDb, constrainBand, EQ_LIMITS, maxFreqFor, totalResponseDb } from "../eqResponse";
 import { makeState } from "../test/fixtures";
 import { $$, mountApp, settle } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
@@ -7,8 +7,8 @@ import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
 import EqDialog from "./EqDialog.vue";
 
-async function boot(path: "pcm-shared" | "dop-exclusive" | "pcm-exclusive" = "pcm-shared") {
-  tauri.on("get_state", makeState({ status: "playing", output_path: path }));
+async function boot(path: "pcm-shared" | "dop-exclusive" | "pcm-exclusive" = "pcm-shared", rate: number | null = null) {
+  tauri.on("get_state", makeState({ status: "playing", output_path: path, output_rate_hz: rate }));
   const { wrapper } = mountApp(EqDialog, { open: true });
   await usePlayerStore().init();
   const dsp = useDspStore();
@@ -123,5 +123,71 @@ describe("EqDialog OK / Cancel", () => {
     for (const sel of ['[aria-label="EQ preset"]', '[data-testid="save-preset"]', '[data-testid="eq-ok"]', '[data-testid="eq-cancel"]']) {
       expect(document.body.querySelector(sel)).not.toBeNull();
     }
+  });
+});
+
+describe("EQ guardrails", () => {
+  it("limits bands to the usable range for the output rate", () => {
+    expect(maxFreqFor(44100)).toBe(19845);
+    expect(maxFreqFor(192000)).toBe(EQ_LIMITS.freqMax);
+    const c = constrainBand({ band_type: "peaking", freq: 24000, gain_db: 40, q: 99 }, 44100);
+    expect(c).toEqual({ band_type: "peaking", freq: 19845, gain_db: 18, q: 18 });
+    expect(constrainBand({ band_type: "low_shelf", freq: 5, gain_db: -40, q: 12 }, 48000)).toEqual({ band_type: "low_shelf", freq: 20, gain_db: -18, q: 3 });
+    expect(constrainBand({ band_type: "high_pass", freq: 100, gain_db: 9, q: 1 }, 48000).gain_db).toBe(0);
+    expect(constrainBand({ band_type: "peaking", freq: NaN, gain_db: NaN, q: NaN }, 48000)).toEqual({ band_type: "peaking", freq: 1000, gain_db: 0, q: 1 });
+  });
+
+  it("draws the curve for the output rate: a band above the cap is drawn at the cap", () => {
+    const hi = { band_type: "high_shelf" as const, freq: 24000, gain_db: 6, q: 0.7 };
+    const cap = { ...hi, freq: 19845 };
+    expect(bandResponseDb(hi, 10000, 44100)).toBeCloseTo(bandResponseDb(cap, 10000, 44100), 6);
+  });
+
+  it("shows which rate the curve is for", async () => {
+    await boot("pcm-shared", 44100);
+    expect(document.body.querySelector('[data-testid="eq-rate"]')!.textContent).toContain("44.1 kHz");
+    expect(document.body.querySelector('[data-testid="eq-rate"]')!.textContent).toContain("19845 Hz");
+  });
+
+  it("says so when nothing is playing and the curve falls back to 48 kHz", async () => {
+    await boot("pcm-shared", null);
+    expect(document.body.querySelector('[data-testid="eq-rate"]')!.textContent).toContain("48 kHz");
+    expect(document.body.querySelector('[data-testid="eq-rate"]')!.textContent).toContain("nothing playing");
+  });
+
+  it("keeps dragged and typed values inside the limits", async () => {
+    const { dsp } = await boot("pcm-shared", 44100);
+    dsp.addBand();
+    await settle();
+    const node = () => nodes()[0];
+    for (let i = 0; i < 400; i++) node().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", shiftKey: true, bubbles: true, cancelable: true }));
+    for (let i = 0; i < 100; i++) node().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", shiftKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    expect(dsp.rows[0].freq).toBeLessThanOrEqual(19845);
+    expect(dsp.rows[0].gain_db).toBeLessThanOrEqual(18);
+    node().dispatchEvent(new Event("focus"));
+    await settle();
+    const input = document.body.querySelector('[data-testid="eq-band-panel"] input[max="19845"]') as HTMLInputElement;
+    input.value = "24000";
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(dsp.rows[0].freq).toBe(19845);
+    expect(input.value).toBe("19845");
+  });
+
+  it("warns when the combined boost can clip, and not for gentle or cut-only settings", async () => {
+    const { dsp } = await boot();
+    await dsp.applyPreset("builtin:flat");
+    await settle();
+    expect(document.body.querySelector('[data-testid="eq-headroom"]')).toBeNull();
+    dsp.addBand();
+    await settle();
+    dsp.updateRow(0, { gain_db: -6 });
+    await settle();
+    expect(document.body.querySelector('[data-testid="eq-headroom"]')).toBeNull(); // cut-only: no boost
+    dsp.updateRow(0, { gain_db: 9 });
+    await settle();
+    expect(document.body.querySelector('[data-testid="eq-headroom"]')!.textContent).toContain("can clip");
+    expect(totalResponseDb(dsp.activeBands, 1000)).toBeGreaterThan(0.5);
   });
 });

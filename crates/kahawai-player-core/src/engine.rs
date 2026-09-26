@@ -143,6 +143,10 @@ pub struct PlayerSnapshot {
     /// (transcoded/chunked) or several tracks share one response.
     #[serde(default)]
     pub buffered_ms: Option<u64>,
+    /// Sample rate of the audio reaching the output (after any resampling);
+    /// the rate the EQ is designed at. `None` when idle.
+    #[serde(default)]
+    pub output_rate_hz: Option<u32>,
     /// The rendition actually streaming (explicit `?format=` value).
     pub format: Option<StreamFormat>,
     /// `X-Transcode-Chain` of the active response.
@@ -168,6 +172,7 @@ impl Default for PlayerSnapshot {
             position_ms: 0,
             duration_ms: None,
             buffered_ms: None,
+            output_rate_hz: None,
             format: None,
             chain: None,
             output_path: OutputPath::Pcm,
@@ -340,6 +345,14 @@ impl ActiveStream {
             base_ms + ((duration.saturating_sub(base_ms)) as f64 * frac) as u64
         };
         Some(ms.clamp(position_ms.min(duration), duration))
+    }
+
+    /// Sample rate of the audio the sink is receiving.
+    fn output_rate_hz(&self) -> u32 {
+        match self {
+            ActiveStream::Pcm(a) => a.sink_rate,
+            ActiveStream::Dop(a) => a.spec.dop_rate_hz,
+        }
     }
 
     fn display_track(&self) -> &Track {
@@ -1281,7 +1294,7 @@ impl Player {
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
-        let (track, position_ms, duration_ms, buffered_ms, format, chain) = match &self.active {
+        let (track, position_ms, duration_ms, buffered_ms, output_rate_hz, format, chain) = match &self.active {
             Some(a) => {
                 let t = a.display_track().clone();
                 let pos = self.position_ms();
@@ -1290,11 +1303,12 @@ impl Player {
                     pos,
                     t.duration_ms,
                     a.buffered_ms(pos),
+                    Some(a.output_rate_hz()),
                     Some(a.format_used()),
                     a.chain().clone(),
                 )
             }
-            None => (self.queue.current().cloned(), 0, None, None, None, None),
+            None => (self.queue.current().cloned(), 0, None, None, None, None, None),
         };
         PlayerSnapshot {
             status: self.status,
@@ -1305,6 +1319,7 @@ impl Player {
             position_ms,
             duration_ms,
             buffered_ms,
+            output_rate_hz,
             format,
             chain,
             output_path: self.output_path,
