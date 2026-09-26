@@ -1,252 +1,47 @@
-/* Dark native-feeling theme. Hand-rolled CSS, no UI framework. */
+@import "tailwindcss";
 
-:root {
-  --bg: #141416;
-  --bg-raised: #1c1c20;
-  --bg-hover: #26262c;
-  --bg-active: #303036;
-  --text: #e9e9ec;
-  --text-dim: #a1a1a8;
-  --text-faint: #6d6d75;
-  --accent: #0a84ff;
-  --accent-dim: rgba(10, 132, 255, 0.16);
-  --border: #2b2b31;
-  --danger: #ff453a;
-  --radius: 8px;
-  --font: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+/*
+ * Design tokens. The original hand-rolled CSS variables, exposed as Tailwind
+ * theme values so utilities read `bg-raised text-dim border-line` etc.
+ */
+@theme {
+  --color-canvas: #141416;
+  --color-raised: #1c1c20;
+  --color-hover: #26262c;
+  --color-active: #303036;
+  --color-fg: #e9e9ec;
+  --color-dim: #a1a1a8;
+  --color-faint: #6d6d75;
+  --color-accent: #0a84ff;
+  --color-accent-hover: #2b95ff;
+  --color-line: #2b2b31;
+  --color-danger: #ff453a;
+  --color-ok: #30d158;
+  --color-warn: #ffd60a;
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-* {
-  box-sizing: border-box;
-}
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+    margin: 0;
+  }
 
-html,
-body,
-#app {
-  height: 100%;
-  margin: 0;
-}
+  /* Native-app feel: no text selection except where editing. */
+  body {
+    @apply bg-canvas text-fg font-sans text-[13px] antialiased overflow-hidden select-none;
+  }
 
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font);
-  font-size: 13px;
-  -webkit-font-smoothing: antialiased;
-  overflow: hidden;
-  user-select: none;
-  -webkit-user-select: none;
-}
+  input,
+  textarea {
+    @apply select-text;
+  }
 
-input,
-textarea,
-select {
-  user-select: text;
-  -webkit-user-select: text;
-}
-
-button {
-  font-family: var(--font);
-  font-size: 13px;
-  color: var(--text);
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 12px;
-  cursor: pointer;
-}
-
-button:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-button.primary:hover:not(:disabled) {
-  background: #2b95ff;
-}
-
-button.danger {
-  color: var(--danger);
-}
-
-input[type="text"],
-input[type="search"],
-input:not([type]),
-select {
-  background: var(--bg-raised);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 13px;
-  font-family: var(--font);
-  outline: none;
-}
-
-input:focus,
-select:focus {
-  border-color: var(--accent);
-}
-
-/* Range inputs: seek bar + volume */
-input[type="range"] {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
-  cursor: pointer;
-  height: 20px;
-}
-
-input[type="range"]::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--bg-active);
-}
-
-input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  margin-top: -4px;
-}
-
-input[type="range"]:hover::-webkit-slider-thumb {
-  background: var(--accent);
-}
-
-.view {
-  padding: 20px 24px 40px;
-  max-width: 1200px;
-}
-
-.view h2 {
-  margin: 0 0 4px;
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.view .sub {
-  color: var(--text-dim);
-  margin: 0 0 16px;
-}
-
-.empty {
-  color: var(--text-faint);
-  padding: 40px 0;
-  text-align: center;
-}
-
-.error-banner {
-  background: rgba(255, 69, 58, 0.12);
-  border: 1px solid rgba(255, 69, 58, 0.4);
-  color: #ff9d97;
-  border-radius: var(--radius);
-  padding: 10px 14px;
-  margin-bottom: 16px;
-}
-
-.spinner {
-  padding: 40px 0;
-  text-align: center;
-  color: var(--text-faint);
-}
-
-/* Track rows (shared by album detail, playlist detail, search, queue) */
-.track-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 7px 10px;
-  border-radius: 6px;
-  cursor: default;
-}
-
-.track-row:hover {
-  background: var(--bg-hover);
-}
-
-.track-row.current {
-  background: var(--accent-dim);
-}
-
-.track-row.unplayable {
-  opacity: 0.45;
-}
-
-.track-row .num {
-  width: 28px;
-  text-align: right;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-}
-
-.track-row .main {
-  flex: 1;
-  min-width: 0;
-}
-
-.track-row .title {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.track-row .artist-line {
-  color: var(--text-dim);
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.track-row .dur {
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-}
-
-.badge {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.4px;
-  color: var(--text-dim);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 6px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.badge.accent {
-  color: var(--accent);
-  border-color: rgba(10, 132, 255, 0.5);
-}
-
-.icon-btn {
-  background: transparent;
-  border: none;
-  padding: 4px 6px;
-  color: var(--text-dim);
-  border-radius: 6px;
-  line-height: 1;
-}
-
-.icon-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
+  button:not(:disabled) {
+    cursor: pointer;
+  }
 }
