@@ -112,7 +112,7 @@ const itemClass =
   "flex cursor-default select-none items-center justify-between gap-3 whitespace-nowrap rounded-md px-2.5 py-2 text-[13px] text-fg outline-none " +
   "data-[disabled]:opacity-40 data-[highlighted]:bg-hover data-[state=open]:bg-hover";
 const contentClass =
-  "z-[60] max-h-80 min-w-[200px] overflow-y-auto rounded-[10px] border border-line bg-raised p-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)]";
+  "z-[60] max-h-80 min-w-[200px] overflow-y-auto rounded-md border border-line bg-surface p-1 shadow-float";
 
 const menuLabel = computed(() => {
   const t = props.track;
@@ -133,7 +133,7 @@ const menuLabel = computed(() => {
           </UiButton>
         </DropdownMenuTrigger>
         <DropdownMenuPortal>
-          <DropdownMenuContent align="start" :side-offset="4" :class="contentClass">
+          <DropdownMenuContent align="start" :side-offset="4" :class="contentClass" data-kw-fade>
             <DropdownMenuItem v-for="p in playlists.items" :key="p.id" :class="itemClass" :disabled="busy" @select="addToPlaylist(p.id)">
               {{ p.name }} <span class="text-[11px] text-faint">({{ p.track_ids.length }})</span>
             </DropdownMenuItem>
@@ -150,7 +150,7 @@ const menuLabel = computed(() => {
         <UiButton variant="icon" :title="menuLabel" :aria-label="menuLabel"><Ellipsis /></UiButton>
       </DropdownMenuTrigger>
       <DropdownMenuPortal>
-        <DropdownMenuContent align="end" :side-offset="4" :class="contentClass">
+        <DropdownMenuContent align="end" :side-offset="4" :class="contentClass" data-kw-fade>
           <DropdownMenuItem :class="itemClass" :disabled="list.length === 0 || busy" @select="playNext">
             <span class="flex items-center gap-2"><ListStart class="size-4 text-dim" />Play next</span>
           </DropdownMenuItem>
@@ -163,7 +163,7 @@ const menuLabel = computed(() => {
               <ChevronRight class="size-3.5 text-faint" />
             </DropdownMenuSubTrigger>
             <DropdownMenuPortal>
-              <DropdownMenuSubContent :class="contentClass" :side-offset="6">
+              <DropdownMenuSubContent :class="contentClass" data-kw-fade :side-offset="6">
                 <DropdownMenuItem
                   v-for="p in playlists.items"
                   :key="p.id"

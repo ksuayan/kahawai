@@ -207,7 +207,7 @@ function choose(v: string | null): void {
       <svg
         ref="svg"
         :viewBox="`0 0 ${W} ${H}`"
-        class="w-full touch-none select-none rounded-lg border border-line bg-bg"
+        class="w-full touch-none select-none rounded-lg border border-line bg-canvas"
         :class="dsp.eqEnabled ? '' : 'opacity-50'"
         role="group"
         aria-label="EQ frequency response"
@@ -234,7 +234,7 @@ function choose(v: string | null): void {
             :cx="xOf(r.freq)"
             :cy="yOf(hasGain(r.band_type) ? clamp(r.gain_db, -DB, DB) : 0)"
             :r="selected === i ? 9 : 7"
-            :class="[r.enabled ? 'fill-accent' : 'fill-faint', selected === i ? 'stroke-fg' : 'stroke-bg']"
+            :class="[r.enabled ? 'fill-accent' : 'fill-faint', selected === i ? 'stroke-fg' : 'stroke-canvas']"
             stroke-width="2"
             class="cursor-grab outline-none focus-visible:stroke-fg active:cursor-grabbing"
             tabindex="0"

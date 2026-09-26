@@ -31,7 +31,7 @@ const accent: Record<ToastKind, string> = {
       :duration="Infinity"
       :type="t.kind === 'error' ? 'foreground' : 'background'"
       :data-kind="t.kind"
-      class="flex items-start gap-2 rounded-[10px] border border-l-[3px] border-line bg-raised px-3 py-2.5 text-[13px] shadow-[0_8px_24px_rgba(0,0,0,0.45)]"
+      class="flex items-start gap-2 rounded-lg border border-l-[3px] border-line bg-surface px-3 py-2.5 text-[13px] shadow-float"
       :class="accent[t.kind]"
       @update:open="(open: boolean) => !open && toasts.dismiss(t.id)"
     >

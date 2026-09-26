@@ -58,10 +58,10 @@ const artworkHash = computed(() => {
     </StateMessage>
     <div v-else class="flex flex-col items-start gap-8 min-[720px]:flex-row">
       <div class="shrink-0">
-        <Artwork :hash="artworkHash" :size="320" :radius="12" :alt="trackTitle(track)" />
+        <Artwork :hash="artworkHash" :size="320" :radius="6" :alt="trackTitle(track)" />
       </div>
       <div class="min-w-0 flex-1">
-        <h2 class="m-0 mb-1 text-2xl font-semibold" data-testid="np-title">{{ trackTitle(track) }}</h2>
+        <h2 class="heading-1 m-0 mb-1" data-testid="np-title">{{ trackTitle(track) }}</h2>
         <p class="m-0 mb-0.5 text-base text-dim">{{ track.artist ?? "Unknown artist" }}</p>
         <p class="m-0 mb-4 text-sm text-faint">{{ track.album ?? "" }}</p>
 

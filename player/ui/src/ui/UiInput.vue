@@ -13,7 +13,7 @@ const emit = defineEmits<{ (e: "update:modelValue", v: string): void }>();
 const sizes = {
   default: "px-2.5 py-1.5 text-[13px]",
   lg: "px-3 py-2 text-sm",
-  title: "px-2.5 py-1.5 text-lg font-bold",
+  title: "px-2.5 py-1.5 text-lg font-semibold",
 } as const;
 
 const el = ref<HTMLInputElement | null>(null);
@@ -24,7 +24,7 @@ defineExpose({ focus: () => el.value?.focus(), el });
   <input
     ref="el"
     :value="modelValue"
-    class="rounded-md border border-line bg-raised text-fg outline-none placeholder:text-faint focus:border-accent"
+    class="rounded-md border border-line bg-surface text-fg outline-none placeholder:text-faint focus:border-accent"
     :class="sizes[size]"
     @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
   />

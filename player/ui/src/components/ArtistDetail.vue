@@ -47,7 +47,7 @@ watch(() => props.id, (id) => load(id));
     <StateMessage v-if="loading" kind="loading">Loading artist…</StateMessage>
     <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>
     <div v-else-if="artist">
-      <h2 class="m-0 mb-1 text-xl font-semibold">{{ artist.name }}</h2>
+      <h2 class="heading-1 m-0 mb-1">{{ artist.name }}</h2>
       <p class="m-0 mb-4 text-dim">{{ albums.length }} album{{ albums.length === 1 ? "" : "s" }}</p>
       <StateMessage v-if="albums.length === 0" kind="empty">No albums found for this artist.</StateMessage>
       <div v-else class="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-x-4 gap-y-5">

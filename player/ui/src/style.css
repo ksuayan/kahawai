@@ -5,22 +5,90 @@
  * theme values so utilities read `bg-raised text-dim border-line` etc.
  */
 @theme {
-  --color-canvas: #141416;
-  --color-raised: #1c1c20;
-  --color-hover: #26262c;
-  --color-active: #303036;
-  --color-fg: #e9e9ec;
-  --color-dim: #a1a1a8;
-  --color-faint: #6d6d75;
+  /* House Style Guide tokens (dark). True-neutral grays: no blue/purple tint. */
+  --color-canvas: #0e0e10; /* --bg: app background */
+  --color-raised: #161618; /* --bg-raised: sidebar, bottom bar */
+  --color-surface: #1c1c1f; /* --surface: inputs, menus, dialogs, toasts */
+  --color-hover: #222225;
+  --color-active: #2c2c30;
+  --color-fg: #f2f2f3; /* --text-1 */
+  --color-dim: #a8a8ae; /* --text-2 */
+  --color-faint: #6f6f77; /* --text-3 */
   --color-accent: #0a84ff;
   --color-accent-hover: #2b95ff;
-  --color-line: #2b2b31;
+  --color-line: #2a2a2e; /* --border */
   --color-danger: #ff453a;
   --color-ok: #30d158;
   --color-warn: #ffd60a;
+  /* Semantic colours as text (readable on the surface they sit on). */
+  --color-danger-fg: #ff9d97;
+  --color-warn-fg: #ffb340;
   --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
     sans-serif;
+  --font-serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* Three radii: 2px tags/badges, 4px buttons/inputs/menus, 6px cards/dialogs. */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-xl: 6px;
+  /* The one shadow: floating layers only (dialogs, menus, toasts). */
+  --shadow-float: 0 8px 24px rgb(0 0 0 / 0.35);
+}
+
+/* Light theme: the same roles, inverted. Switched by <html data-theme="light">. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-canvas: #fafafa;
+  --color-raised: #f3f3f5;
+  --color-surface: #ffffff;
+  --color-hover: #ececef;
+  --color-active: #e3e3e6;
+  --color-fg: #18181b;
+  --color-dim: #52525b;
+  --color-faint: #8e8e96;
+  --color-accent: #0066cc; /* 4.5:1 on the light background */
+  --color-accent-hover: #0052a3;
+  --color-line: #e3e3e6;
+  --color-danger: #d92d20;
+  --color-ok: #1a7f37;
+  --color-warn: #a15c00;
+  --color-danger-fg: #b42318;
+  --color-warn-fg: #8a5300;
+  --shadow-float: 0 8px 24px rgb(0 0 0 / 0.12);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* Type scale (guide): micro label 11/600 caps, prose serif 16/1.6, headings
+ * 24 / 18 / 15 at 600 with -0.01em tracking. */
+@utility micro-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+@utility prose-text {
+  font-family: var(--font-serif);
+  font-size: 16px;
+  line-height: 1.6;
+  max-width: 65ch;
+}
+@utility heading-1 {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+@utility heading-2 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+@utility heading-3 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 @layer base {
@@ -43,5 +111,44 @@
 
   button:not(:disabled) {
     cursor: pointer;
+  }
+
+  /* Visible focus everywhere: 2px accent outline, 2px offset. Components
+   * that draw their own ring override this. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Motion: 120–180 ms, opacity only, keyed off Reka's data-state. */
+@keyframes kw-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes kw-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+[data-kw-fade][data-state="open"] {
+  animation: kw-fade-in 150ms ease-out;
+}
+[data-kw-fade][data-state="closed"] {
+  animation: kw-fade-out 120ms ease-in;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  .animate-spin {
+    animation-duration: 1s !important;
+    animation-iteration-count: infinite !important;
   }
 }

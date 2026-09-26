@@ -5,10 +5,10 @@ withDefaults(defineProps<{ tone?: "dim" | "warn" | "faint"; spaced?: boolean }>(
 
 <template>
   <p
-    class="mb-2"
+    class="prose-text mb-3"
     :class="[
       spaced ? 'mt-2' : 'mt-1',
-      { 'text-dim': tone === 'dim', 'text-[#ff9d97]': tone === 'warn', 'text-faint': tone === 'faint' },
+      { 'text-dim': tone === 'dim', 'text-danger-fg': tone === 'warn', 'text-faint': tone === 'faint' },
     ]"
   >
     <slot />

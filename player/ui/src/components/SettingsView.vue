@@ -263,7 +263,7 @@ const dopRates = computed(() =>
       <div v-if="jobs.activeJobs.length > 0" class="mt-3 flex flex-col gap-2">
         <div v-for="j in jobs.activeJobs" :key="j.id" class="flex items-center gap-2.5 text-[13px]" data-testid="active-job">
           <span class="min-w-0 flex-1 truncate">{{ j.kind === "scan" ? "Library scan" : j.label }}</span>
-          <div class="h-1.5 max-w-[200px] flex-[2] overflow-hidden rounded-[3px] bg-active">
+          <div class="h-1.5 max-w-[200px] flex-[2] overflow-hidden rounded-sm bg-active">
             <div class="h-full bg-accent transition-[width] duration-[400ms] ease-linear" :style="{ width: `${Math.round(j.progress * 100)}%` }" />
           </div>
           <span class="min-w-9 text-right text-xs tabular-nums text-dim">{{ Math.round(j.progress * 100) }}%</span>
@@ -361,7 +361,7 @@ const dopRates = computed(() =>
         <div
           v-for="(b, i) in dsp.rows"
           :key="i"
-          class="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-raised px-2.5 py-2"
+          class="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-2"
           :class="!b.enabled && 'opacity-50'"
           data-testid="eq-band"
         >
@@ -415,7 +415,7 @@ const dopRates = computed(() =>
       <UiHint>Available everywhere except while typing in a text field.</UiHint>
       <ul class="m-0 grid list-none grid-cols-1 gap-x-4 gap-y-1.5 p-0 min-[560px]:grid-cols-2">
         <li v-for="[key, desc] in KEYBOARD_MAP" :key="key" class="flex items-center gap-2.5 text-dim">
-          <kbd class="min-w-14 rounded border border-line bg-raised px-1.5 py-0.5 text-center font-mono text-[11px] text-fg">{{ key }}</kbd>
+          <kbd class="min-w-14 rounded-sm border border-line bg-surface px-1.5 py-0.5 text-center font-mono text-[11px] text-fg">{{ key }}</kbd>
           <span>{{ desc }}</span>
         </li>
       </ul>

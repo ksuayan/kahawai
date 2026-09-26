@@ -71,7 +71,8 @@ const selectedLabel = computed(
       <SelectContent
         position="popper"
         :side-offset="4"
-        class="z-50 max-h-[var(--reka-select-content-available-height)] min-w-[var(--reka-select-trigger-width)] overflow-hidden rounded-lg border border-line bg-raised shadow-[0_8px_24px_rgba(0,0,0,0.45)]"
+        data-kw-fade
+        class="z-50 max-h-[var(--reka-select-content-available-height)] min-w-[var(--reka-select-trigger-width)] overflow-hidden rounded-md border border-line bg-surface shadow-float"
       >
         <SelectViewport class="p-1">
           <SelectItem

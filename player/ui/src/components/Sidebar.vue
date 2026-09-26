@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { Disc3, ListMusic, ListOrdered, MicVocal, Search, Settings } from "lucide-vue-next";
+import { Disc3, ListMusic, ListOrdered, MicVocal, Moon, Search, Settings, Sun } from "lucide-vue-next";
 import { useNavStore, type NavState } from "../stores/nav";
 import { useQueueStore } from "../stores/queue";
+import { useThemeStore } from "../stores/theme";
 import UiButton from "../ui/UiButton.vue";
 
 const nav = useNavStore();
 const queue = useQueueStore();
+const theme = useThemeStore();
 
 const items: { name: NavState["name"]; label: string; key: string; icon: Component }[] = [
   { name: "albums", label: "Albums", key: "1", icon: Disc3 },
@@ -27,7 +29,7 @@ const active = computed(() => {
 
 <template>
   <aside class="flex w-52 shrink-0 flex-col border-r border-line bg-raised px-2 py-3">
-    <div class="px-3 pb-3 pt-1 text-[15px] font-bold tracking-[0.2px]">Music</div>
+    <div class="px-3 pb-3 pt-1 heading-3">Music</div>
     <nav class="flex flex-col gap-0.5" aria-label="Library">
       <UiButton
         v-for="item in items"
@@ -42,7 +44,7 @@ const active = computed(() => {
         </span>
         <span
           v-if="item.name === 'queue' && queue.tracks.length > 0"
-          class="rounded-full bg-active px-2 py-px text-[11px] font-normal text-dim"
+          class="rounded-full bg-active px-2 py-px text-[11px] text-dim"
           data-testid="queue-count"
         >
           {{ queue.tracks.length }}
@@ -50,13 +52,27 @@ const active = computed(() => {
       </UiButton>
     </nav>
     <div class="flex-1" />
-    <UiButton
-      variant="nav"
-      :active="active === 'settings'"
-      :aria-current="active === 'settings' ? 'page' : undefined"
-      @click="nav.go('settings')"
-    >
-      <span class="flex items-center gap-2.5"><Settings class="size-4" />Settings</span>
-    </UiButton>
+    <div class="flex items-center gap-1">
+      <UiButton
+        variant="nav"
+        class="min-w-0 flex-1"
+        :active="active === 'settings'"
+        :aria-current="active === 'settings' ? 'page' : undefined"
+        @click="nav.go('settings')"
+      >
+        <span class="flex items-center gap-2.5"><Settings class="size-4" />Settings</span>
+      </UiButton>
+      <UiButton
+        variant="icon"
+        size="md"
+        :title="theme.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
+        :aria-label="theme.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
+        data-testid="theme-toggle"
+        @click="theme.toggle()"
+      >
+        <Sun v-if="theme.theme === 'dark'" />
+        <Moon v-else />
+      </UiButton>
+    </div>
   </aside>
 </template>

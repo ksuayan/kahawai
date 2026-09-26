@@ -7,8 +7,8 @@ const props = defineProps<{ kind: "loading" | "empty" | "error" }>();
 const classes = computed(() =>
   cn(
     props.kind === "error"
-      ? "mb-4 rounded-lg border border-danger/40 bg-danger/12 px-3.5 py-2.5 text-[#ff9d97]"
-      : "py-10 text-center text-faint",
+      ? "mb-4 rounded-md border border-danger/40 bg-danger/12 px-3.5 py-2.5 text-danger-fg"
+      : "prose-text mx-auto py-10 text-center text-dim",
   ),
 );
 </script>

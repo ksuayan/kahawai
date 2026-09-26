@@ -69,9 +69,9 @@ function totalDuration(): string {
     <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>
     <div v-else-if="album">
       <header class="mb-5 flex gap-5">
-        <Artwork :hash="album.artwork_hash" :size="180" :radius="10" :alt="album.title" />
+        <Artwork :hash="album.artwork_hash" :size="180" :radius="6" :alt="album.title" />
         <div>
-          <h2 class="mb-1.5 mt-1 text-xl font-semibold">{{ album.title }}</h2>
+          <h2 class="heading-1 mb-1.5 mt-1">{{ album.title }}</h2>
           <p class="m-0 mb-1 text-dim">
             {{ [album.artist, album.year ? String(album.year) : null].filter(Boolean).join(" · ") }}
           </p>

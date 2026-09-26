@@ -125,7 +125,7 @@ function startRename(): void {
             <UiButton @click="renaming = false">Cancel</UiButton>
           </div>
           <div v-else class="flex items-center gap-1">
-            <h2 class="m-0 text-xl font-semibold">{{ playlists.detail.playlist.name }}</h2>
+            <h2 class="heading-1 m-0">{{ playlists.detail.playlist.name }}</h2>
             <UiButton variant="icon" title="Rename playlist" aria-label="Rename playlist" @click="startRename"><Pencil /></UiButton>
           </div>
           <p class="m-0 mt-1 text-dim">{{ playlists.detail.tracks.length }} tracks</p>

@@ -72,7 +72,7 @@ function onKeydown(e: KeyboardEvent): void {
     <template v-else>
       <div
         v-if="lib.serverOnline === false"
-        class="border-b border-line bg-[rgba(255,159,10,0.14)] px-4 py-1.5 text-xs text-[#ffb340]"
+        class="border-b border-line bg-warn/15 px-4 py-1.5 text-xs text-warn-fg"
         role="alert"
       >
         Server unreachable at {{ settings.serverUrl }} — check Settings.

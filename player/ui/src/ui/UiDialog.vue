@@ -17,13 +17,14 @@ const emit = defineEmits<{ (e: "update:open", v: boolean): void }>();
 <template>
   <DialogRoot :open="open" @update:open="(v) => emit('update:open', v)">
     <DialogPortal>
-      <DialogOverlay class="fixed inset-0 z-50 bg-black/55" />
+      <DialogOverlay class="fixed inset-0 z-50 bg-black/55" data-kw-fade />
       <DialogContent
-        class="fixed left-1/2 top-1/2 z-50 max-h-[calc(100vh-32px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-line bg-raised p-5 shadow-[0_16px_48px_rgba(0,0,0,0.55)] outline-none"
+        class="fixed left-1/2 top-1/2 z-50 max-h-[calc(100vh-32px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-line bg-surface p-5 shadow-float outline-none"
+        data-kw-fade
         :class="wide ? 'w-[min(820px,calc(100vw-32px))]' : 'w-[min(440px,calc(100vw-32px))]'"
       >
-        <DialogTitle class="m-0 text-[15px] font-semibold">{{ title }}</DialogTitle>
-        <DialogDescription v-if="description" class="mt-1 text-[12px] text-dim">
+        <DialogTitle class="heading-3 m-0">{{ title }}</DialogTitle>
+        <DialogDescription v-if="description" class="mt-1 text-[13px] text-dim">
           {{ description }}
         </DialogDescription>
         <div class="mt-4"><slot /></div>

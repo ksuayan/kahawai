@@ -5,7 +5,7 @@ import { useNavStore } from "../stores/nav";
 import { useQueueStore } from "../stores/queue";
 import Sidebar from "./Sidebar.vue";
 
-const labels = (w: ReturnType<typeof mountApp>["wrapper"]) => w.findAll("button").map((b) => b.text().replace(/\s+\d+$/, ""));
+const labels = (w: ReturnType<typeof mountApp>["wrapper"]) => w.findAll("button").filter((b) => b.attributes("data-testid") !== "theme-toggle").map((b) => b.text().replace(/\s+\d+$/, ""));
 
 describe("Sidebar", () => {
   it("lists the library sections and Settings", () => {
@@ -49,7 +49,7 @@ describe("Sidebar", () => {
 
   it("gives every entry an icon, and Settings a gear", () => {
     const { wrapper } = mountApp(Sidebar);
-    const icons = wrapper.findAll("button").map((b) => ({
+    const icons = wrapper.findAll("button").filter((b) => b.text() !== "").map((b) => ({
       label: b.text().replace(/\s+\d+$/, ""),
       icon: b.find("svg").classes().find((c) => /^lucide-[a-z0-9-]+$/.test(c) && !c.endsWith("-icon")),
     }));

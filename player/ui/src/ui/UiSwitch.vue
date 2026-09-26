@@ -12,11 +12,11 @@ const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
       :model-value="modelValue"
       :disabled="disabled"
       :aria-label="ariaLabel"
-      class="relative h-5 w-9 shrink-0 rounded-full bg-active outline-none transition-colors focus-visible:outline-2 focus-visible:outline-accent data-[state=checked]:bg-accent"
+      class="relative h-5 w-9 shrink-0 rounded-full bg-active outline-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent data-[state=checked]:bg-accent"
       @update:model-value="(v: boolean) => emit('update:modelValue', v)"
     >
       <SwitchThumb
-        class="block size-4 translate-x-0.5 rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[18px]"
+        class="block size-4 translate-x-0.5 rounded-full bg-white shadow-sm transition-transform data-[state=checked]:translate-x-[18px]"
       />
     </SwitchRoot>
     <slot>{{ label }}</slot>

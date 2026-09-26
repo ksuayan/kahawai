@@ -40,7 +40,7 @@ function goNowPlaying(): void {
   <footer class="relative z-20 border-t border-line bg-raised" data-testid="now-playing-bar">
     <div
       v-if="player.error"
-      class="flex items-center gap-1.5 bg-danger/15 px-4 py-1.5 text-xs text-[#ff9d97]"
+      class="flex items-center gap-1.5 bg-danger/15 px-4 py-1.5 text-xs text-danger-fg"
       role="alert"
       :title="player.error"
     >

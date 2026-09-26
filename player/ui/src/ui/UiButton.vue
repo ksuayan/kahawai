@@ -25,7 +25,7 @@ const props = withDefaults(
 
 const base =
   "inline-flex items-center gap-1.5 rounded-md text-[13px] transition-colors " +
-  "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
+  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent " +
   "disabled:opacity-45 disabled:cursor-default [&_svg]:shrink-0";
 
 const box = "justify-center border px-3 py-[5px] [&_svg]:size-4";

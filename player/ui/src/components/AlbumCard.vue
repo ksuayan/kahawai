@@ -15,7 +15,7 @@ defineEmits<{ (e: "open", id: number): void }>();
   >
     <Artwork
       :hash="album.artwork_hash"
-      :radius="8"
+      :radius="6"
       :alt="album.title"
       fluid
       class="transition group-hover:brightness-110"
