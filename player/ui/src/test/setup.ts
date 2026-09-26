@@ -64,7 +64,14 @@ class MemoryStorage implements Storage {
 }
 vi.stubGlobal("localStorage", new MemoryStorage());
 
+// No test may reach the network: every request fails like an unreachable
+// server unless the test installs its own routes with `mockFetch`.
+const offline = async (): Promise<Response> => {
+  throw new TypeError("network disabled in tests");
+};
+
 beforeEach(() => {
+  vi.stubGlobal("fetch", offline);
   localStorage.clear();
   tauri.reset();
   // Outside Tauri unless a test opts in.

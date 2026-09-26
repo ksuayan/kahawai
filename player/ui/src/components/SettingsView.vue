@@ -14,6 +14,15 @@ import {
   type EqBandType,
   type StreamFormat,
 } from "../types";
+import StateMessage from "../ui/StateMessage.vue";
+import UiBadge from "../ui/UiBadge.vue";
+import UiButton from "../ui/UiButton.vue";
+import UiHint from "../ui/UiHint.vue";
+import UiInput from "../ui/UiInput.vue";
+import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
+import UiSwitch from "../ui/UiSwitch.vue";
+import ViewShell from "../ui/ViewShell.vue";
+import SettingsSection from "./SettingsSection.vue";
 
 const settings = useSettingsStore();
 const lib = useLibraryStore();
@@ -59,23 +68,28 @@ async function save(): Promise<void> {
 
 const defaultDeviceName = computed(() => dsp.devices.find((d) => d.is_default)?.name ?? "");
 
-function onOutputDevice(e: Event): void {
-  const v = (e.target as HTMLSelectElement).value; // exact: never trim
-  void dsp.chooseOutputDevice(v === "" ? null : v);
-}
-
-async function onFormatChange(e: Event): Promise<void> {
-  const v = (e.target as HTMLSelectElement).value;
-  await settings.saveGlobalFormat(v === "" ? null : (v as StreamFormat));
-}
+// Device names are passed through exactly (never trimmed): some end in a space.
+const deviceOptions = computed<UiSelectOption[]>(() => [
+  { value: null, label: `System default${defaultDeviceName.value ? ` (${defaultDeviceName.value})` : ""}` },
+  ...(dsp.outputDeviceMissing && dsp.outputDevice !== null
+    ? [{ value: dsp.outputDevice, label: `${dsp.outputDevice} — not connected` }]
+    : []),
+  ...dsp.devices.map((d) => ({ value: d.name, label: d.name })),
+]);
 
 function formatLabel(f: StreamFormat): string {
   return f === "passthrough" ? "Passthrough (original)" : f.toUpperCase();
 }
 
-function onDsdStory(e: Event): void {
-  void settings.saveDsdStory((e.target as HTMLSelectElement).value as DsdStory);
-}
+const formatOptions: UiSelectOption[] = [
+  { value: null, label: "Auto (server default)" },
+  ...STREAM_FORMATS.map((f) => ({ value: f, label: formatLabel(f) })),
+];
+
+const dsdOptions: UiSelectOption[] = [
+  { value: "convert", label: "Convert to PCM (FLAC transcode)" },
+  { value: "native", label: "Native DoP (needs a DSD-capable DAC)" },
+];
 
 // --- Album-art cache ---------------------------------------------------------
 
@@ -138,9 +152,7 @@ function bandTypeLabel(t: EqBandType): string {
     .join(" ");
 }
 
-function onBandType(i: number, e: Event): void {
-  dsp.updateRow(i, { band_type: (e.target as HTMLSelectElement).value as EqBandType });
-}
+const bandTypeOptions: UiSelectOption[] = EQ_BAND_TYPES.map((t) => ({ value: t, label: bandTypeLabel(t) }));
 
 function onBandNum(i: number, field: "freq" | "gain_db" | "q", e: Event): void {
   const v = Number((e.target as HTMLInputElement).value);
@@ -175,431 +187,208 @@ const dopRates = computed(() =>
 </script>
 
 <template>
-  <div class="view settings">
-    <h2>Settings</h2>
-
-    <section>
-      <h3>Server</h3>
-      <p class="hint">The music server this client browses. Saved through the Rust core.</p>
-      <div class="row">
-        <input
+  <ViewShell title="Settings" width="narrow">
+    <SettingsSection title="Server">
+      <UiHint>The music server this client browses. Saved through the Rust core.</UiHint>
+      <div class="flex gap-2">
+        <UiInput
           v-model="urlInput"
+          class="flex-1"
           type="text"
           spellcheck="false"
           placeholder="http://localhost:8080"
+          aria-label="Server URL"
           @keydown.enter="save"
         />
-        <button class="primary" :disabled="saving" @click="save">
-          {{ saving ? "Saving…" : "Save" }}
-        </button>
+        <UiButton variant="primary" :disabled="saving" @click="save">{{ saving ? "Saving…" : "Save" }}</UiButton>
       </div>
-      <div v-if="urlError" class="error-banner">{{ urlError }}</div>
-      <p class="status" :class="{ ok: online === true, bad: online === false }">
-        <button class="icon-btn" title="Check connection" @click="probe">⟳</button>
-        {{
-          online === null ? "Connection not checked" : online ? "Server reachable" : "Server unreachable"
-        }}
+      <StateMessage v-if="urlError" kind="error" class="mt-3">{{ urlError }}</StateMessage>
+      <p
+        class="my-2 flex items-center gap-1.5 text-xs"
+        :class="online === true ? 'text-ok' : online === false ? 'text-danger' : 'text-dim'"
+        data-testid="connection-status"
+      >
+        <UiButton variant="icon" title="Check connection" aria-label="Check connection" @click="probe">⟳</UiButton>
+        {{ online === null ? "Connection not checked" : online ? "Server reachable" : "Server unreachable" }}
       </p>
-    </section>
+    </SettingsSection>
 
-    <section>
-      <h3>Default stream format</h3>
-      <p class="hint">
-        Global preference sent via <code>set_format</code>. Per-track overrides in the
+    <SettingsSection title="Default stream format">
+      <UiHint>
+        Global preference sent via <code class="font-mono text-xs">set_format</code>. Per-track overrides in the
         now-playing bar take precedence for that track.
-      </p>
-      <select :value="settings.globalFormat ?? ''" @change="onFormatChange">
-        <option value="">Auto (server default)</option>
-        <option v-for="f in STREAM_FORMATS" :key="f" :value="f">{{ formatLabel(f) }}</option>
-      </select>
-    </section>
+      </UiHint>
+      <UiSelect
+        aria-label="Default stream format"
+        :model-value="settings.globalFormat"
+        :options="formatOptions"
+        @update:model-value="(v) => settings.saveGlobalFormat(v as StreamFormat | null)"
+      />
+    </SettingsSection>
 
-    <section>
-      <h3>DSD handling</h3>
-      <p class="hint">
-        What to do with DSD tracks (DSF/DFF) when no explicit format override
-        applies. Saved through the Rust core and restored on launch.
-      </p>
-      <select :value="settings.dsdStory" @change="onDsdStory">
-        <option value="convert">Convert to PCM (FLAC transcode)</option>
-        <option value="native">Native DoP (needs a DSD-capable DAC)</option>
-      </select>
-      <p class="hint">
-        Native requests DoP from the server; on macOS it plays through the
-        exclusive hog-mode path (bit-perfect, bypasses EQ/loudness/volume).
-        Without a DoP-capable device the core falls back to the FLAC transcode
-        and logs why.
-      </p>
-    </section>
+    <SettingsSection title="DSD handling">
+      <UiHint>
+        What to do with DSD tracks (DSF/DFF) when no explicit format override applies. Saved through the Rust core
+        and restored on launch.
+      </UiHint>
+      <UiSelect
+        aria-label="DSD handling"
+        :model-value="settings.dsdStory"
+        :options="dsdOptions"
+        @update:model-value="(v) => settings.saveDsdStory(v as DsdStory)"
+      />
+      <UiHint spaced>
+        Native requests DoP from the server; on macOS it plays through the exclusive hog-mode path (bit-perfect,
+        bypasses EQ/loudness/volume). Without a DoP-capable device the core falls back to the FLAC transcode and logs
+        why.
+      </UiHint>
+    </SettingsSection>
 
-    <section>
-      <h3>Library</h3>
-      <p class="hint">
-        Rescan the server's music roots. Progress and completion are reported
-        as toasts; a second scan while one is running is a no-op
-        (“Scan already running”).
-      </p>
-      <button class="primary" :disabled="scanning || jobs.hasActive" @click="onScan">
+    <SettingsSection title="Library">
+      <UiHint>
+        Rescan the server's music roots. Progress and completion are reported as toasts; a second scan while one is
+        running is a no-op (“Scan already running”).
+      </UiHint>
+      <UiButton variant="primary" :disabled="scanning || jobs.hasActive" @click="onScan">
         {{ jobs.hasActive ? "Working…" : "Scan library" }}
-      </button>
-      <div v-if="jobs.activeJobs.length > 0" class="jobs">
-        <div v-for="j in jobs.activeJobs" :key="j.id" class="job">
-          <span class="job-label">{{ j.kind === "scan" ? "Library scan" : j.label }}</span>
-          <div class="job-bar"><div class="job-fill" :style="{ width: `${Math.round(j.progress * 100)}%` }" /></div>
-          <span class="job-pct">{{ Math.round(j.progress * 100) }}%</span>
+      </UiButton>
+      <div v-if="jobs.activeJobs.length > 0" class="mt-3 flex flex-col gap-2">
+        <div v-for="j in jobs.activeJobs" :key="j.id" class="flex items-center gap-2.5 text-[13px]" data-testid="active-job">
+          <span class="min-w-0 flex-1 truncate">{{ j.kind === "scan" ? "Library scan" : j.label }}</span>
+          <div class="h-1.5 max-w-[200px] flex-[2] overflow-hidden rounded-[3px] bg-active">
+            <div class="h-full bg-accent transition-[width] duration-[400ms] ease-linear" :style="{ width: `${Math.round(j.progress * 100)}%` }" />
+          </div>
+          <span class="min-w-9 text-right text-xs tabular-nums text-dim">{{ Math.round(j.progress * 100) }}%</span>
         </div>
       </div>
-      <div v-else-if="jobs.jobs.length > 0" class="jobs">
-        <p class="hint">Recent jobs:</p>
-        <div v-for="j in jobs.jobs.slice(0, 5)" :key="j.id" class="job done">
-          <span class="job-label">{{ j.kind === "scan" ? "Library scan" : j.label }}</span>
-          <span class="badge" :class="j.status === 'done' ? 'ok' : 'bad'">{{ j.status }}</span>
+      <div v-else-if="jobs.jobs.length > 0" class="mt-3 flex flex-col gap-2">
+        <UiHint>Recent jobs:</UiHint>
+        <div v-for="j in jobs.jobs.slice(0, 5)" :key="j.id" class="flex items-center gap-2.5 text-[13px] text-dim" data-testid="recent-job">
+          <span class="min-w-0 flex-1 truncate">{{ j.kind === "scan" ? "Library scan" : j.label }}</span>
+          <UiBadge :variant="j.status === 'done' ? 'ok' : 'bad'">{{ j.status }}</UiBadge>
         </div>
-        <button class="icon-btn" @click="jobs.refresh()">⟳ Refresh</button>
+        <div><UiButton variant="icon" @click="jobs.refresh()">⟳ Refresh</UiButton></div>
       </div>
-    </section>
+    </SettingsSection>
 
-    <section v-if="inTauri()">
-      <h3>Album art cache</h3>
-      <p class="hint">
-        Covers are saved on disk the first time they are shown, so they load
-        instantly afterwards and still appear if the server is offline.
-        Older ones are dropped automatically once the cache passes 512&nbsp;MB.
-      </p>
-      <p v-if="artStats" class="hint">
+    <SettingsSection v-if="inTauri()" title="Album art cache">
+      <UiHint>
+        Covers are saved on disk the first time they are shown, so they load instantly afterwards and still appear if
+        the server is offline. Older ones are dropped automatically once the cache passes 512&nbsp;MB.
+      </UiHint>
+      <UiHint v-if="artStats">
         {{ artStats.files }} {{ artStats.files === 1 ? "image" : "images" }} · {{ fmtBytes(artStats.bytes) }}
-      </p>
-      <button class="icon-btn" :disabled="artClearing || !artStats?.files" @click="onClearArt">
+      </UiHint>
+      <UiButton variant="icon" :disabled="artClearing || !artStats?.files" @click="onClearArt">
         {{ artClearing ? "Clearing…" : "Clear cache" }}
-      </button>
-    </section>
+      </UiButton>
+    </SettingsSection>
 
-    <section>
-      <h3>Audio output</h3>
-      <p class="hint">
-        Choose the speaker or DAC to play through. Changing it while music is
-        playing moves the track over and continues from the same position.
-        DSD played through exclusive DoP uses the same device.
-      </p>
-      <div class="row">
-        <select class="dev-select" :value="dsp.outputDevice ?? ''" @change="onOutputDevice">
-          <option value="">System default{{ defaultDeviceName ? ` (${defaultDeviceName})` : "" }}</option>
-          <option v-if="dsp.outputDeviceMissing" :value="dsp.outputDevice ?? ''">
-            {{ dsp.outputDevice }} — not connected
-          </option>
-          <option v-for="d in dsp.devices" :key="d.name" :value="d.name">{{ d.name }}</option>
-        </select>
-        <button class="icon-btn" title="Rescan output devices" @click="dsp.refreshDevices()">⟳</button>
+    <SettingsSection title="Audio output">
+      <UiHint>
+        Choose the speaker or DAC to play through. Changing it while music is playing moves the track over and
+        continues from the same position. DSD played through exclusive DoP uses the same device.
+      </UiHint>
+      <div class="flex gap-2">
+        <UiSelect
+          aria-label="Output device"
+          trigger-class="flex-1"
+          :model-value="dsp.outputDevice"
+          :options="deviceOptions"
+          @update:model-value="(v) => dsp.chooseOutputDevice(v)"
+        />
+        <UiButton variant="icon" title="Rescan output devices" aria-label="Rescan output devices" @click="dsp.refreshDevices()">⟳</UiButton>
       </div>
-      <p v-if="dsp.outputDeviceMissing" class="hint warn">
-        “{{ dsp.outputDevice }}” is not connected, so the system default is being used.
-        It is selected again automatically when it reappears (press ⟳ to rescan).
-      </p>
-      <p v-if="!dsp.devices.length" class="hint">No output devices reported.</p>
-      <p class="hint">
-        PCM plays in shared mode. On macOS, DSD tracks can use exclusive
-        hog-mode DoP output instead — bit-perfect, bypassing the EQ, loudness,
-        and volume below.
-      </p>
-      <p class="hint">
+      <UiHint v-if="dsp.outputDeviceMissing" tone="warn" data-testid="device-missing">
+        “{{ dsp.outputDevice }}” is not connected, so the system default is being used. It is selected again
+        automatically when it reappears (press ⟳ to rescan).
+      </UiHint>
+      <UiHint v-if="!dsp.devices.length">No output devices reported.</UiHint>
+      <UiHint>
+        PCM plays in shared mode. On macOS, DSD tracks can use exclusive hog-mode DoP output instead — bit-perfect,
+        bypassing the EQ, loudness, and volume below.
+      </UiHint>
+      <UiHint>
         <template v-if="dsp.dop?.exclusive_available">
           Exclusive DoP is available on this Mac.
           <template v-if="dopRates">Device accepts DoP at {{ dopRates }}.</template>
           <template v-else>
-            The current output device reports no DoP-capable rate — DSD falls back
-            to the FLAC transcode and the reason is logged.
+            The current output device reports no DoP-capable rate — DSD falls back to the FLAC transcode and the
+            reason is logged.
           </template>
         </template>
         <template v-else>Exclusive DoP output is macOS-only.</template>
-      </p>
-    </section>
+      </UiHint>
+    </SettingsSection>
 
-    <section>
-      <h3>Parametric EQ</h3>
-      <p class="hint">
-        Up to 8 bands, applied to PCM only (DoP bypasses EQ). Changes apply live
-        and are saved through the Rust core.
-      </p>
-      <label class="check">
-        <input
-          type="checkbox"
-          :checked="dsp.eqEnabled"
-          @change="dsp.saveEqEnabled(($event.target as HTMLInputElement).checked)"
-        />
-        EQ enabled
-      </label>
-      <div v-if="dsp.rowError" class="error-banner">{{ dsp.rowError }}</div>
-      <div class="bands">
-        <div v-for="(b, i) in dsp.rows" :key="i" class="band" :class="{ off: !b.enabled }">
-          <input
-            type="checkbox"
-            :checked="b.enabled"
-            title="Enable this band"
-            @change="dsp.toggleRow(i)"
+    <SettingsSection title="Parametric EQ">
+      <UiHint>
+        Up to 8 bands, applied to PCM only (DoP bypasses EQ). Changes apply live and are saved through the Rust core.
+      </UiHint>
+      <UiSwitch :model-value="dsp.eqEnabled" label="EQ enabled" @update:model-value="(v) => dsp.saveEqEnabled(v)" />
+      <StateMessage v-if="dsp.rowError" kind="error" class="mt-2">{{ dsp.rowError }}</StateMessage>
+      <div class="my-2.5 flex flex-col gap-1.5">
+        <div
+          v-for="(b, i) in dsp.rows"
+          :key="i"
+          class="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-raised px-2.5 py-2"
+          :class="!b.enabled && 'opacity-50'"
+          data-testid="eq-band"
+        >
+          <UiSwitch :model-value="b.enabled" aria-label="Enable this band" @update:model-value="dsp.toggleRow(i)" />
+          <UiSelect
+            aria-label="Band type"
+            trigger-class="min-w-[130px]"
+            :model-value="b.band_type"
+            :options="bandTypeOptions"
+            @update:model-value="(v) => dsp.updateRow(i, { band_type: v as EqBandType })"
           />
-          <select :value="b.band_type" title="Band type" @change="onBandType(i, $event)">
-            <option v-for="t in EQ_BAND_TYPES" :key="t" :value="t">{{ bandTypeLabel(t) }}</option>
-          </select>
-          <label title="Frequency (Hz)"
-            >Hz <input type="number" :value="b.freq" min="10" max="24000" step="1" @change="onBandNum(i, 'freq', $event)"
-          /></label>
-          <label title="Gain (dB)"
-            >dB
-            <input type="number" :value="b.gain_db" min="-24" max="24" step="0.5" @change="onBandNum(i, 'gain_db', $event)"
-          /></label>
-          <label title="Q (shelf slope for shelves)"
-            >Q <input type="number" :value="b.q" min="0.1" max="18" step="0.1" @change="onBandNum(i, 'q', $event)"
-          /></label>
-          <button class="icon-btn" title="Remove band" @click="dsp.removeBand(i)">✕</button>
+          <label class="flex items-center gap-1 text-dim" title="Frequency (Hz)">
+            Hz
+            <UiInput class="w-[76px]" type="number" :model-value="String(b.freq)" min="10" max="24000" step="1" @change="onBandNum(i, 'freq', $event)" />
+          </label>
+          <label class="flex items-center gap-1 text-dim" title="Gain (dB)">
+            dB
+            <UiInput class="w-[64px]" type="number" :model-value="String(b.gain_db)" min="-24" max="24" step="0.5" @change="onBandNum(i, 'gain_db', $event)" />
+          </label>
+          <label class="flex items-center gap-1 text-dim" title="Q (shelf slope for shelves)">
+            Q
+            <UiInput class="w-[60px]" type="number" :model-value="String(b.q)" min="0.1" max="18" step="0.1" @change="onBandNum(i, 'q', $event)" />
+          </label>
+          <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="dsp.removeBand(i)">✕</UiButton>
         </div>
       </div>
-      <button class="icon-btn" :disabled="!dsp.canAddBand" @click="dsp.addBand()">
-        ＋ Add band
-      </button>
-    </section>
+      <UiButton variant="icon" :disabled="!dsp.canAddBand" @click="dsp.addBand()">＋ Add band</UiButton>
+    </SettingsSection>
 
-    <section>
-      <h3>Loudness normalization</h3>
-      <p class="hint">
-        EBU R128-style loudness matching for PCM only (DoP bypasses it). The first
-        play of each track does a fast pre-scan — one extra stream, roughly double
-        the bandwidth — then the measured gain is cached.
-      </p>
-      <label class="check">
-        <input
-          type="checkbox"
-          :checked="dsp.loudnessEnabled"
-          @change="dsp.saveLoudnessEnabled(($event.target as HTMLInputElement).checked)"
-        />
-        Loudness normalization enabled
-      </label>
-      <div class="row">
-        <label class="lufs">
+    <SettingsSection title="Loudness normalization">
+      <UiHint>
+        EBU R128-style loudness matching for PCM only (DoP bypasses it). The first play of each track does a fast
+        pre-scan — one extra stream, roughly double the bandwidth — then the measured gain is cached.
+      </UiHint>
+      <UiSwitch
+        :model-value="dsp.loudnessEnabled"
+        label="Loudness normalization enabled"
+        @update:model-value="(v) => dsp.saveLoudnessEnabled(v)"
+      />
+      <div class="mt-2.5 flex">
+        <label class="flex items-center gap-2 text-dim">
           Target
-          <input
-            v-model="loudnessInput"
-            type="number"
-            min="-40"
-            max="-1"
-            step="0.5"
-            @change="onLoudnessTarget"
-          />
+          <UiInput v-model="loudnessInput" class="w-[76px]" type="number" min="-40" max="-1" step="0.5" @change="onLoudnessTarget" />
           LUFS
         </label>
       </div>
-      <div v-if="loudnessError" class="error-banner">{{ loudnessError }}</div>
-    </section>
+      <StateMessage v-if="loudnessError" kind="error" class="mt-2">{{ loudnessError }}</StateMessage>
+    </SettingsSection>
 
-    <section>
-      <h3>Keyboard shortcuts</h3>
-      <p class="hint">Available everywhere except while typing in a text field.</p>
-      <ul class="keys">
-        <li v-for="[key, desc] in KEYBOARD_MAP" :key="key">
-          <kbd>{{ key }}</kbd><span>{{ desc }}</span>
+    <SettingsSection title="Keyboard shortcuts">
+      <UiHint>Available everywhere except while typing in a text field.</UiHint>
+      <ul class="m-0 grid list-none grid-cols-1 gap-x-4 gap-y-1.5 p-0 min-[560px]:grid-cols-2">
+        <li v-for="[key, desc] in KEYBOARD_MAP" :key="key" class="flex items-center gap-2.5 text-dim">
+          <kbd class="min-w-14 rounded border border-line bg-raised px-1.5 py-0.5 text-center font-mono text-[11px] text-fg">{{ key }}</kbd>
+          <span>{{ desc }}</span>
         </li>
       </ul>
-    </section>
-  </div>
+    </SettingsSection>
+  </ViewShell>
 </template>
-
-<style scoped>
-.settings {
-  max-width: 640px;
-}
-
-section {
-  margin-bottom: 28px;
-}
-
-h3 {
-  margin: 0 0 4px;
-  font-size: 14px;
-}
-
-.hint {
-  color: var(--text-dim);
-  font-size: 12px;
-  margin: 0 0 10px;
-}
-
-.hint code {
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
-}
-
-.row {
-  display: flex;
-  gap: 8px;
-}
-
-.row input {
-  flex: 1;
-}
-
-.status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-dim);
-  font-size: 12px;
-  margin: 8px 0 0;
-}
-
-.status.ok {
-  color: #30d158;
-}
-
-.status.bad {
-  color: var(--danger);
-}
-
-.dev-select {
-  flex: 1;
-  min-width: 0;
-}
-
-.hint.warn {
-  color: #ff9d97;
-}
-
-.check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  margin-bottom: 10px;
-}
-
-.bands {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.band {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px;
-}
-
-.band.off {
-  opacity: 0.45;
-}
-
-.band select {
-  min-width: 110px;
-}
-
-.band label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-dim);
-}
-
-.band input[type="number"] {
-  width: 76px;
-}
-
-.lufs {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-}
-
-.lufs input {
-  width: 70px;
-}
-
-.keys {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.keys li {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 13px;
-}
-
-.keys kbd {
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
-  background: var(--bg-active);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 8px;
-  min-width: 64px;
-  text-align: center;
-}
-
-.jobs {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.job {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-}
-
-.job.done {
-  color: var(--text-dim);
-}
-
-.job-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.job-bar {
-  flex: 2;
-  height: 6px;
-  background: var(--bg-active);
-  border-radius: 3px;
-  overflow: hidden;
-  max-width: 200px;
-}
-
-.job-fill {
-  height: 100%;
-  background: #0a84ff;
-  transition: width 0.4s linear;
-}
-
-.job-pct {
-  font-variant-numeric: tabular-nums;
-  color: var(--text-dim);
-  font-size: 12px;
-  min-width: 36px;
-  text-align: right;
-}
-
-.badge.ok {
-  background: rgba(48, 209, 88, 0.16);
-  color: #30d158;
-}
-
-.badge.bad {
-  background: rgba(255, 69, 58, 0.14);
-  color: #ff9d97;
-}
-</style>

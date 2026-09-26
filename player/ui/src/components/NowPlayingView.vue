@@ -1,22 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { artworkSrc } from "../api";
+import { computed } from "vue";
 import { useDspStore } from "../stores/dsp";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
-import {
-  STREAM_FORMATS,
-  formatBadge,
-  formatDuration,
-  isPlayable,
-  trackTitle,
-  unplayableReason,
-  validFormatsFor,
-  type StreamFormat,
-} from "../types";
+import { formatBadge, isPlayable, trackTitle, unplayableReason } from "../types";
+import StateMessage from "../ui/StateMessage.vue";
+import UiBadge from "../ui/UiBadge.vue";
+import UiButton from "../ui/UiButton.vue";
+import ViewShell from "../ui/ViewShell.vue";
 import Artwork from "./Artwork.vue";
+import SeekBar from "./SeekBar.vue";
+import TrackFormatSelect from "./TrackFormatSelect.vue";
 import TrackMenu from "./TrackMenu.vue";
+import TransportControls from "./TransportControls.vue";
+import VolumeSlider from "./VolumeSlider.vue";
 
 const player = usePlayerStore();
 const lib = useLibraryStore();
@@ -24,29 +22,6 @@ const nav = useNavStore();
 const dsp = useDspStore();
 
 const track = computed(() => player.currentTrack);
-
-// --- seek ---
-const scrubbing = ref(false);
-const scrubValue = ref(0);
-const duration = computed(() => player.durationMs ?? 0);
-const displayPos = computed(() => (scrubbing.value ? scrubValue.value : player.positionMs));
-
-function onScrub(e: Event): void {
-  scrubbing.value = true;
-  scrubValue.value = Number((e.target as HTMLInputElement).value);
-}
-function commitScrub(e: Event): void {
-  const v = Number((e.target as HTMLInputElement).value);
-  scrubValue.value = v;
-  scrubbing.value = false;
-  void player.seekTo(v);
-}
-
-// --- volume ---
-const volumePct = computed({
-  get: () => Math.round(player.volume * 100),
-  set: (v: number) => void player.changeVolume(v / 100),
-});
 
 // --- composed audio-path badge ---
 /** e.g. "DSF DSD64 → DoP → Exclusive (bit-perfect)" or
@@ -71,282 +46,63 @@ const artworkHash = computed(() => {
   return lib.albums.find((a) => a.id === t.album_id)?.artwork_hash ?? null;
 });
 
-const artworkUrl = computed(() => artworkSrc(artworkHash.value));
-
-function onTrackFormat(e: Event): void {
-  if (!track.value) return;
-  const v = (e.target as HTMLSelectElement).value;
-  void player.changeTrackFormat(track.value.id, v === "" ? null : (v as StreamFormat));
-}
-
 function goEq(): void {
   nav.go("settings");
 }
 
-function repeatLabel(): string {
-  return player.repeat === "off" ? "Repeat off" : player.repeat === "all" ? "Repeat all" : "Repeat one";
-}
 </script>
 
 <template>
-  <div class="view now-playing-view">
-    <button class="back icon-btn" @click="nav.go('albums')">‹ Library</button>
-    <div v-if="!track" class="empty">
-      <p>Nothing playing.</p>
-      <p class="sub">Pick an album or playlist to start.</p>
-    </div>
-    <div v-else class="np">
-      <div class="art">
+  <ViewShell width="medium">
+    <UiButton variant="icon" class="mb-4" @click="nav.go('albums')">‹ Library</UiButton>
+    <StateMessage v-if="!track" kind="empty">
+      <p class="m-0">Nothing playing.</p>
+      <p class="m-0 mt-1 text-dim">Pick an album or playlist to start.</p>
+    </StateMessage>
+    <div v-else class="flex flex-col items-start gap-8 min-[720px]:flex-row">
+      <div class="shrink-0">
         <Artwork :hash="artworkHash" :size="320" :radius="12" :alt="trackTitle(track)" />
       </div>
-      <div class="info">
-        <h2>{{ trackTitle(track) }}</h2>
-        <p class="artist">{{ track.artist ?? "Unknown artist" }}</p>
-        <p class="album">{{ track.album ?? "" }}</p>
+      <div class="min-w-0 flex-1">
+        <h2 class="m-0 mb-1 text-2xl font-semibold" data-testid="np-title">{{ trackTitle(track) }}</h2>
+        <p class="m-0 mb-0.5 text-base text-dim">{{ track.artist ?? "Unknown artist" }}</p>
+        <p class="m-0 mb-4 text-sm text-faint">{{ track.album ?? "" }}</p>
 
-        <div class="badges">
-          <span class="badge">{{ formatBadge(track) }}</span>
-          <span class="badge accent" :title="`Audio chain: ${player.chain ?? '—'}`">
-            {{ audioPath }}
-          </span>
-          <span
+        <div class="mb-5 flex flex-wrap gap-2">
+          <UiBadge>{{ formatBadge(track) }}</UiBadge>
+          <UiBadge variant="accent" :title="`Audio chain: ${player.chain ?? '—'}`">{{ audioPath }}</UiBadge>
+          <UiBadge
             v-if="player.isDopExclusive"
-            class="badge dop"
+            variant="ok"
             title="Exclusive DoP output: bit-perfect, bypasses EQ, loudness, and volume"
           >
             Exclusive DoP
-          </span>
-          <span v-if="!isPlayable(track)" class="badge danger">
-            {{ unplayableReason(track) }}
-          </span>
+          </UiBadge>
+          <UiBadge v-if="!isPlayable(track)" variant="danger">{{ unplayableReason(track) }}</UiBadge>
         </div>
 
-        <!-- seek -->
-        <div class="seek-row">
-          <span class="time">{{ formatDuration(displayPos) }}</span>
-          <input
-            type="range"
-            class="seek"
-            :min="0"
-            :max="Math.max(duration, 1)"
-            :value="Math.min(displayPos, Math.max(duration, 1))"
-            :disabled="duration <= 0"
-            @input="onScrub"
-            @change="commitScrub"
-          />
-          <span class="time">{{ formatDuration(duration || null) }}</span>
-        </div>
-        <p class="buffer-note">
-          Buffer: not exposed by the engine — the stream is progressive HTTP
-          (the position above is the playhead).
+        <SeekBar size="md" />
+        <p class="mb-5 mt-1 text-[11px] text-faint">
+          Buffer: not exposed by the engine — the stream is progressive HTTP (the position above is the playhead).
         </p>
 
-        <!-- transport -->
-        <div class="transport">
-          <button
-            class="icon-btn tbtn"
-            :class="{ on: player.shuffle }"
-            title="Shuffle"
-            @click="player.toggleShuffle()"
-          >
-            🔀
-          </button>
-          <button class="icon-btn tbtn" title="Previous (P)" @click="player.prevTrack()">⏮</button>
-          <button
-            class="icon-btn tbtn main"
-            :title="player.isPlaying ? 'Pause (Space)' : 'Play (Space)'"
-            @click="player.toggle()"
-          >
-            {{ player.isLoading ? "…" : player.isPlaying ? "⏸" : "▶" }}
-          </button>
-          <button class="icon-btn tbtn" title="Next (N)" @click="player.nextTrack()">⏭</button>
-          <button
-            class="icon-btn tbtn"
-            :class="{ on: player.repeat !== 'off' }"
-            :title="repeatLabel()"
-            @click="player.cycleRepeat()"
-          >
-            {{ player.repeat === "one" ? "🔂" : "🔁" }}
-          </button>
-        </div>
+        <div class="mb-5"><TransportControls large :show-stop="false" /></div>
 
-        <!-- extras -->
-        <div class="extras">
-          <label class="vol">
+        <div class="mb-4 flex flex-wrap items-center gap-4">
+          <label class="flex items-center gap-2 text-xs text-dim">
             Volume
-            <input
-              type="range"
-              min="0"
-              max="100"
-              v-model.number="volumePct"
-              :class="{ ignored: player.isDopExclusive }"
-              :title="player.isDopExclusive ? 'Volume is ignored on exclusive DoP output' : 'Volume'"
-            />
+            <VolumeSlider class="w-[120px]" />
           </label>
-          <label class="fmt">
+          <div class="flex items-center gap-2 text-xs text-dim">
             Track format
-            <select
-              :value="player.activeFormat ?? ''"
-              :disabled="!isPlayable(track)"
-              @change="onTrackFormat"
-            >
-              <option value="">Auto</option>
-              <option v-for="f in validFormatsFor(track)" :key="f" :value="f">
-                {{ f.toUpperCase() }}
-              </option>
-            </select>
-          </label>
-          <button class="icon-btn" title="Open EQ in Settings" @click="goEq">🎚 EQ</button>
+            <TrackFormatSelect :track="track" :disabled="!isPlayable(track)" />
+          </div>
+          <UiButton variant="icon" title="Open EQ in Settings" @click="goEq">🎚 EQ</UiButton>
           <TrackMenu :track="track" />
         </div>
 
-        <p v-if="player.error" class="error-banner">{{ player.error }}</p>
-        <p v-if="artworkUrl" class="sub art-note">
-          Artwork loads through the browser HTTP cache (no dedicated disk cache in v1).
-        </p>
+        <StateMessage v-if="player.error" kind="error">{{ player.error }}</StateMessage>
       </div>
     </div>
-  </div>
+  </ViewShell>
 </template>
-
-<style scoped>
-.now-playing-view {
-  max-width: 900px;
-}
-
-.back {
-  margin-bottom: 16px;
-}
-
-.np {
-  display: flex;
-  gap: 32px;
-  align-items: flex-start;
-}
-
-.art {
-  flex-shrink: 0;
-}
-
-.info {
-  flex: 1;
-  min-width: 0;
-}
-
-.info h2 {
-  margin: 0 0 4px;
-  font-size: 24px;
-}
-
-.artist {
-  font-size: 16px;
-  color: var(--text-dim);
-  margin: 0 0 2px;
-}
-
-.album {
-  font-size: 14px;
-  color: var(--text-faint);
-  margin: 0 0 16px;
-}
-
-.badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 20px;
-}
-
-.badge.dop {
-  background: rgba(48, 209, 88, 0.16);
-  color: #30d158;
-  border: 1px solid rgba(48, 209, 88, 0.4);
-}
-
-.badge.danger {
-  background: rgba(255, 69, 58, 0.14);
-  color: #ff9d97;
-  border: 1px solid rgba(255, 69, 58, 0.4);
-}
-
-.seek-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 4px;
-}
-
-.time {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  min-width: 48px;
-  text-align: center;
-}
-
-.seek {
-  flex: 1;
-}
-
-.buffer-note {
-  font-size: 11px;
-  color: var(--text-faint);
-  margin: 0 0 20px;
-}
-
-.transport {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 20px;
-}
-
-.tbtn {
-  font-size: 18px;
-  padding: 8px 14px;
-}
-
-.tbtn.main {
-  font-size: 22px;
-}
-
-.tbtn.on {
-  color: #0a84ff;
-  background: rgba(10, 132, 255, 0.14);
-}
-
-.extras {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
-
-.vol,
-.fmt {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.vol input {
-  width: 120px;
-}
-
-.vol input.ignored {
-  opacity: 0.4;
-}
-
-.art-note {
-  margin-top: 16px;
-}
-
-@media (max-width: 720px) {
-  .np {
-    flex-direction: column;
-  }
-}
-</style>

@@ -3,17 +3,16 @@ import { onMounted, ref } from "vue";
 import { useLibraryStore } from "../stores/library";
 import { useQueueStore } from "../stores/queue";
 import { isPlayable, type Track } from "../types";
+import StateMessage from "../ui/StateMessage.vue";
+import UiInput from "../ui/UiInput.vue";
+import ViewShell from "../ui/ViewShell.vue";
 import TrackRow from "./TrackRow.vue";
 
 const lib = useLibraryStore();
 const queue = useQueueStore();
-const input = ref<HTMLInputElement | null>(null);
+const input = ref<InstanceType<typeof UiInput> | null>(null);
 
 onMounted(() => input.value?.focus());
-
-function onInput(e: Event): void {
-  lib.search((e.target as HTMLInputElement).value);
-}
 
 function playFrom(track: Track): void {
   const playable = lib.searchResults.filter(isPlayable);
@@ -23,22 +22,21 @@ function playFrom(track: Track): void {
 </script>
 
 <template>
-  <div class="view">
-    <h2>Search</h2>
-    <p class="sub">Full-text search across titles, artists, albums</p>
-    <input
+  <ViewShell title="Search" subtitle="Full-text search across titles, artists, albums">
+    <UiInput
       ref="input"
       type="search"
-      class="search-box"
+      size="lg" class="mb-4 w-full max-w-[480px]"
       placeholder="Search tracks…"
-      :value="lib.searchQuery"
-      @input="onInput"
+      aria-label="Search tracks"
+      :model-value="lib.searchQuery"
+      @update:model-value="(v) => lib.search(v)"
     />
-    <div v-if="lib.searching" class="spinner">Searching…</div>
-    <div v-else-if="lib.searchQuery.trim() && lib.searchResults.length === 0" class="empty">
+    <StateMessage v-if="lib.searching" kind="loading">Searching…</StateMessage>
+    <StateMessage v-else-if="lib.searchQuery.trim() && lib.searchResults.length === 0" kind="empty">
       No tracks match "{{ lib.searchQuery.trim() }}".
-    </div>
-    <div v-else class="tracks">
+    </StateMessage>
+    <div v-else class="flex flex-col gap-0.5">
       <TrackRow
         v-for="t in lib.searchResults"
         :key="t.id"
@@ -49,21 +47,5 @@ function playFrom(track: Track): void {
         @play="playFrom"
       />
     </div>
-  </div>
+  </ViewShell>
 </template>
-
-<style scoped>
-.search-box {
-  width: 100%;
-  max-width: 480px;
-  margin-bottom: 16px;
-  font-size: 14px;
-  padding: 8px 12px;
-}
-
-.tracks {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-</style>

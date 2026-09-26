@@ -3,6 +3,12 @@ import { onMounted, ref } from "vue";
 import { useNavStore } from "../stores/nav";
 import { usePlaylistsStore } from "../stores/playlists";
 import { useToastsStore } from "../stores/toasts";
+import ConfirmDialog from "../ui/ConfirmDialog.vue";
+import StateMessage from "../ui/StateMessage.vue";
+import UiButton from "../ui/UiButton.vue";
+import UiDialog from "../ui/UiDialog.vue";
+import UiInput from "../ui/UiInput.vue";
+import ViewShell from "../ui/ViewShell.vue";
 
 const nav = useNavStore();
 const playlists = usePlaylistsStore();
@@ -15,6 +21,7 @@ const renameText = ref("");
 const actionError = ref<string | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const importing = ref(false);
+const pendingDelete = ref<{ id: number; name: string } | null>(null);
 
 onMounted(() => {
   if (!playlists.loaded) void playlists.load();
@@ -56,10 +63,12 @@ async function commitRename(id: number): Promise<void> {
   }
 }
 
-async function confirmDelete(id: number, name: string): Promise<void> {
-  if (!window.confirm(`Delete playlist "${name}"?`)) return;
+async function confirmDelete(): Promise<void> {
+  const target = pendingDelete.value;
+  pendingDelete.value = null;
+  if (!target) return;
   try {
-    await playlists.remove(id);
+    await playlists.remove(target.id);
   } catch (e) {
     fail(e);
   }
@@ -96,218 +105,120 @@ function closeImportDialog(): void {
 </script>
 
 <template>
-  <div class="view">
-    <div class="header">
-      <div>
-        <h2>Playlists</h2>
-        <p class="sub">{{ playlists.items.length }} playlists</p>
-      </div>
-      <div class="actions">
-        <button v-if="!creating" class="primary" @click="creating = true">＋ New playlist</button>
-        <button :disabled="importing" @click="pickFile">
-          {{ importing ? "Importing…" : "Import M3U…" }}
-        </button>
-        <input
-          ref="fileInput"
-          type="file"
-          accept=".m3u,.m3u8"
-          class="hidden"
-          @change="onFilePicked"
-        />
-      </div>
-    </div>
+  <ViewShell title="Playlists" :subtitle="`${playlists.items.length} playlists`">
+    <template #actions>
+      <UiButton v-if="!creating" variant="primary" @click="creating = true">＋ New playlist</UiButton>
+      <UiButton :disabled="importing" @click="pickFile">
+        {{ importing ? "Importing…" : "Import M3U…" }}
+      </UiButton>
+      <input ref="fileInput" type="file" accept=".m3u,.m3u8" class="hidden" @change="onFilePicked" />
+    </template>
 
-    <div v-if="creating" class="inline-form">
-      <input
+    <div v-if="creating" class="mb-3 flex max-w-[640px] gap-2">
+      <UiInput
         v-model="newName"
+        class="flex-1"
         type="text"
         placeholder="Playlist name"
+        aria-label="Playlist name"
         maxlength="120"
         @keydown.enter="doCreate"
         @keydown.escape="creating = false"
       />
-      <button class="primary" :disabled="!newName.trim()" @click="doCreate">Create</button>
-      <button @click="creating = false">Cancel</button>
+      <UiButton variant="primary" :disabled="!newName.trim()" @click="doCreate">Create</UiButton>
+      <UiButton @click="creating = false">Cancel</UiButton>
     </div>
 
-    <div v-if="actionError" class="error-banner">{{ actionError }}</div>
-    <div v-if="playlists.loading" class="spinner">Loading playlists…</div>
-    <div v-else-if="playlists.error" class="error-banner">{{ playlists.error }}</div>
-    <div v-else-if="playlists.items.length === 0 && !creating" class="empty">
+    <StateMessage v-if="actionError" kind="error">{{ actionError }}</StateMessage>
+    <StateMessage v-if="playlists.loading" kind="loading">Loading playlists…</StateMessage>
+    <StateMessage v-else-if="playlists.error" kind="error">{{ playlists.error }}</StateMessage>
+    <StateMessage v-else-if="playlists.items.length === 0 && !creating" kind="empty">
       No playlists yet. Create one, import an M3U file, or save the queue as a playlist.
-    </div>
-    <ul v-else class="list">
-      <li v-for="p in playlists.items" :key="p.id" class="row">
+    </StateMessage>
+    <ul v-else class="m-0 flex max-w-[640px] list-none flex-col gap-0.5 p-0">
+      <li
+        v-for="p in playlists.items"
+        :key="p.id"
+        class="flex items-center gap-2 rounded-md px-2.5 py-2 hover:bg-hover"
+        data-testid="playlist-row"
+      >
         <template v-if="renamingId === p.id">
-          <input
+          <UiInput
             v-model="renameText"
+            class="flex-1"
             type="text"
-            class="rename-input"
+            aria-label="New playlist name"
             maxlength="120"
             @keydown.enter="commitRename(p.id)"
             @keydown.escape="renamingId = null"
           />
-          <button class="primary" @click="commitRename(p.id)">Save</button>
-          <button @click="renamingId = null">Cancel</button>
+          <UiButton variant="primary" @click="commitRename(p.id)">Save</UiButton>
+          <UiButton @click="renamingId = null">Cancel</UiButton>
         </template>
         <template v-else>
-          <button class="name" @click="nav.go('playlist', p.id)">{{ p.name }}</button>
-          <span class="meta">{{ p.track_ids.length }} tracks</span>
-          <button class="icon-btn" title="Rename playlist" @click="startRename(p)">✎</button>
-          <button class="icon-btn danger" title="Delete playlist" @click="confirmDelete(p.id, p.name)">
-            ✕
+          <button
+            type="button"
+            class="flex-1 cursor-pointer border-0 bg-transparent p-0 text-left text-sm text-fg"
+            @click="nav.go('playlist', p.id)"
+          >
+            {{ p.name }}
           </button>
+          <span class="text-xs text-dim">{{ p.track_ids.length }} tracks</span>
+          <UiButton variant="icon" title="Rename playlist" aria-label="Rename playlist" @click="startRename(p)">✎</UiButton>
+          <UiButton variant="icon-danger"
+            title="Delete playlist"
+            aria-label="Delete playlist"
+            @click="pendingDelete = { id: p.id, name: p.name }"
+          >
+            ✕
+          </UiButton>
         </template>
       </li>
     </ul>
 
-    <!-- M3U import result dialog -->
-    <div v-if="playlists.lastImport" class="dialog-backdrop" @click.self="closeImportDialog">
-      <div class="dialog" role="dialog" aria-label="Playlist import result">
-        <h3>Imported “{{ playlists.lastImport.name }}”</h3>
-        <p>
+    <ConfirmDialog
+      :open="pendingDelete !== null"
+      title="Delete playlist?"
+      :description="pendingDelete ? `“${pendingDelete.name}” will be permanently deleted.` : ''"
+      confirm-label="Delete"
+      danger
+      @update:open="(v) => !v && (pendingDelete = null)"
+      @confirm="confirmDelete"
+    />
+
+    <!-- M3U import result -->
+    <UiDialog
+      :open="playlists.lastImport !== null"
+      :title="playlists.lastImport ? `Imported “${playlists.lastImport.name}”` : ''"
+      @update:open="(v) => !v && closeImportDialog()"
+    >
+      <template v-if="playlists.lastImport">
+        <p class="m-0">
           Matched <strong>{{ playlists.lastImport.result.matched }}</strong>
           track{{ playlists.lastImport.result.matched === 1 ? "" : "s" }}.
         </p>
         <template v-if="playlists.lastImport.result.unmatched.length > 0">
-          <p class="sub">
+          <p class="mb-0 mt-2 text-dim">
             {{ playlists.lastImport.result.unmatched.length }} entr{{
               playlists.lastImport.result.unmatched.length === 1 ? "y" : "ies"
             }}
             did not match the library:
           </p>
-          <ul class="unmatched">
+          <ul class="my-2 max-h-44 list-disc overflow-y-auto break-all pl-5 text-xs text-dim" data-testid="unmatched">
             <li v-for="(u, i) in playlists.lastImport.result.unmatched" :key="i">{{ u }}</li>
           </ul>
         </template>
-        <p v-else class="sub">Every entry matched the library.</p>
-        <div class="dialog-actions">
-          <button
-            class="primary"
-            @click="nav.go('playlist', playlists.lastImport!.result.playlist_id); closeImportDialog()"
-          >
-            Open playlist
-          </button>
-          <button @click="closeImportDialog">Close</button>
-        </div>
-      </div>
-    </div>
-  </div>
+        <p v-else class="mb-0 mt-2 text-dim">Every entry matched the library.</p>
+      </template>
+      <template #footer>
+        <UiButton
+          variant="primary"
+          @click="nav.go('playlist', playlists.lastImport!.result.playlist_id); closeImportDialog()"
+        >
+          Open playlist
+        </UiButton>
+        <UiButton @click="closeImportDialog">Close</UiButton>
+      </template>
+    </UiDialog>
+  </ViewShell>
 </template>
-
-<style scoped>
-.header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.header h2 {
-  margin: 0 0 4px;
-}
-
-.actions {
-  display: flex;
-  gap: 8px;
-}
-
-.hidden {
-  display: none;
-}
-
-.inline-form {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
-  max-width: 640px;
-}
-
-.inline-form input {
-  flex: 1;
-}
-
-.list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-width: 640px;
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 6px;
-}
-
-.row:hover {
-  background: var(--bg-hover);
-}
-
-.name {
-  flex: 1;
-  background: transparent;
-  border: none;
-  text-align: left;
-  font-size: 14px;
-  padding: 0;
-  cursor: pointer;
-  color: var(--text);
-}
-
-.meta {
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
-.rename-input {
-  flex: 1;
-}
-
-.dialog-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 80;
-}
-
-.dialog {
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 20px;
-  max-width: 480px;
-  width: calc(100% - 64px);
-  max-height: 70vh;
-  overflow-y: auto;
-}
-
-.dialog h3 {
-  margin: 0 0 8px;
-}
-
-.unmatched {
-  margin: 8px 0;
-  padding-left: 20px;
-  font-size: 12px;
-  color: var(--text-dim);
-  max-height: 180px;
-  overflow-y: auto;
-  word-break: break-all;
-}
-
-.dialog-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 16px;
-  justify-content: flex-end;
-}
-</style>

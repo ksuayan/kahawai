@@ -5,6 +5,11 @@ import { usePlaylistsStore } from "../stores/playlists";
 import { useQueueStore } from "../stores/queue";
 import { useToastsStore } from "../stores/toasts";
 import { isPlayable, type Track } from "../types";
+import ConfirmDialog from "../ui/ConfirmDialog.vue";
+import StateMessage from "../ui/StateMessage.vue";
+import UiButton from "../ui/UiButton.vue";
+import UiInput from "../ui/UiInput.vue";
+import ViewShell from "../ui/ViewShell.vue";
 import TrackRow from "./TrackRow.vue";
 
 const props = defineProps<{ id: number }>();
@@ -98,131 +103,75 @@ function startRename(): void {
 </script>
 
 <template>
-  <div class="view">
-    <button class="back icon-btn" @click="nav.go('playlists')">‹ Playlists</button>
-    <div v-if="playlists.loading" class="spinner">Loading playlist…</div>
-    <div v-else-if="playlists.error" class="error-banner">{{ playlists.error }}</div>
+  <ViewShell>
+    <UiButton variant="icon" class="mb-3" @click="nav.go('playlists')">‹ Playlists</UiButton>
+    <StateMessage v-if="playlists.loading" kind="loading">Loading playlist…</StateMessage>
+    <StateMessage v-else-if="playlists.error" kind="error">{{ playlists.error }}</StateMessage>
     <div v-else-if="playlists.detail">
-      <div class="header">
-        <div class="title-block">
-          <template v-if="renaming">
-            <input
+      <div class="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <div v-if="renaming" class="flex items-center gap-2">
+            <UiInput
               v-model="renameText"
+              size="title"
               type="text"
-              class="rename-input"
+              aria-label="Playlist name"
               maxlength="120"
               @keydown.enter="doRename"
               @keydown.escape="renaming = false"
             />
-            <button class="primary" @click="doRename">Save</button>
-            <button @click="renaming = false">Cancel</button>
-          </template>
-          <template v-else>
-            <h2>{{ playlists.detail.playlist.name }}</h2>
-            <button class="icon-btn" title="Rename playlist" @click="startRename">✎</button>
-          </template>
-          <p class="sub">{{ playlists.detail.tracks.length }} tracks</p>
+            <UiButton variant="primary" @click="doRename">Save</UiButton>
+            <UiButton @click="renaming = false">Cancel</UiButton>
+          </div>
+          <div v-else class="flex items-center gap-1">
+            <h2 class="m-0 text-xl font-semibold">{{ playlists.detail.playlist.name }}</h2>
+            <UiButton variant="icon" title="Rename playlist" aria-label="Rename playlist" @click="startRename">✎</UiButton>
+          </div>
+          <p class="m-0 mt-1 text-dim">{{ playlists.detail.tracks.length }} tracks</p>
         </div>
-        <div class="actions">
-          <button class="primary" @click="playAll">▶ Play</button>
-          <button @click="addAllToQueue">☰ Add to queue</button>
-          <button v-if="!showDelete" class="danger" @click="showDelete = true">Delete</button>
-          <span v-else class="confirm">
-            Delete this playlist?
-            <button class="danger" @click="doDelete">Yes</button>
-            <button @click="showDelete = false">No</button>
-          </span>
+        <div class="flex shrink-0 items-center gap-2">
+          <UiButton variant="primary" @click="playAll">▶ Play</UiButton>
+          <UiButton @click="addAllToQueue">☰ Add to queue</UiButton>
+          <UiButton variant="danger" @click="showDelete = true">Delete</UiButton>
         </div>
       </div>
-      <div v-if="playlists.detail.tracks.length === 0" class="empty">This playlist is empty.</div>
-      <div v-else class="tracks">
-        <div
+      <StateMessage v-if="playlists.detail.tracks.length === 0" kind="empty">This playlist is empty.</StateMessage>
+      <div v-else class="flex flex-col gap-0.5">
+        <TrackRow
           v-for="(t, i) in playlists.detail.tracks"
           :key="t.id"
-          class="pl-row"
+          :track="t"
+          :current="queue.current?.id === t.id"
+          @play="playFrom"
         >
-          <TrackRow
-            :track="t"
-            :current="queue.current?.id === t.id"
-            @play="playFrom"
+          <UiButton variant="icon" title="Move up" aria-label="Move up" :disabled="i === 0 || mutating" @click="moveTrack(i, i - 1)">↑</UiButton>
+          <UiButton
+            variant="icon"
+            title="Move down"
+            aria-label="Move down"
+            :disabled="i === playlists.detail.tracks.length - 1 || mutating"
+            @click="moveTrack(i, i + 1)"
           >
-            <button
-              class="icon-btn"
-              title="Move up"
-              :disabled="i === 0 || mutating"
-              @click="moveTrack(i, i - 1)"
-            >
-              ↑
-            </button>
-            <button
-              class="icon-btn"
-              title="Move down"
-              :disabled="i === playlists.detail.tracks.length - 1 || mutating"
-              @click="moveTrack(i, i + 1)"
-            >
-              ↓
-            </button>
-            <button
-              class="icon-btn danger"
-              title="Remove from playlist"
-              :disabled="mutating"
-              @click="removeTrack(t.id)"
-            >
-              ✕
-            </button>
-          </TrackRow>
-        </div>
+            ↓
+          </UiButton>
+          <UiButton variant="icon-danger"
+            title="Remove from playlist"
+            aria-label="Remove from playlist"
+            :disabled="mutating"
+            @click="removeTrack(t.id)"
+          >
+            ✕
+          </UiButton>
+        </TrackRow>
       </div>
     </div>
-  </div>
+    <ConfirmDialog
+      v-model:open="showDelete"
+      title="Delete this playlist?"
+      description="The playlist is removed; the tracks stay in your library."
+      confirm-label="Delete"
+      danger
+      @confirm="doDelete"
+    />
+  </ViewShell>
 </template>
-
-<style scoped>
-.back {
-  margin-bottom: 12px;
-}
-
-.header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: 16px;
-  gap: 12px;
-}
-
-.title-block h2 {
-  margin: 0 4px 4px 0;
-  display: inline;
-}
-
-.rename-input {
-  font-size: 18px;
-  font-weight: 700;
-  margin-bottom: 4px;
-}
-
-.actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.confirm {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
-.tracks {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.pl-row :deep(.track-row) {
-  padding-right: 4px;
-}
-</style>

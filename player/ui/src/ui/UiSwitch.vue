@@ -2,7 +2,7 @@
 import { SwitchRoot, SwitchThumb } from "reka-ui";
 
 /** On/off toggle (Reka Switch). Use `label` for the visible text. */
-defineProps<{ modelValue: boolean; label?: string; disabled?: boolean }>();
+defineProps<{ modelValue: boolean; label?: string; disabled?: boolean; ariaLabel?: string }>();
 const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
 </script>
 
@@ -11,6 +11,7 @@ const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
     <SwitchRoot
       :model-value="modelValue"
       :disabled="disabled"
+      :aria-label="ariaLabel"
       class="relative h-5 w-9 shrink-0 rounded-full bg-active outline-none transition-colors focus-visible:outline-2 focus-visible:outline-accent data-[state=checked]:bg-accent"
       @update:model-value="(v: boolean) => emit('update:modelValue', v)"
     >

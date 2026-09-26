@@ -4,6 +4,9 @@ import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { useQueueStore } from "../stores/queue";
 import { formatDuration, isPlayable, type Album, type Track } from "../types";
+import StateMessage from "../ui/StateMessage.vue";
+import UiButton from "../ui/UiButton.vue";
+import ViewShell from "../ui/ViewShell.vue";
 import Artwork from "./Artwork.vue";
 import TrackMenu from "./TrackMenu.vue";
 import TrackRow from "./TrackRow.vue";
@@ -59,28 +62,28 @@ function totalDuration(): string {
 </script>
 
 <template>
-  <div class="view">
-    <button class="back icon-btn" @click="nav.go('albums')">‹ Albums</button>
-    <div v-if="loading" class="spinner">Loading album…</div>
-    <div v-else-if="error" class="error-banner">{{ error }}</div>
+  <ViewShell>
+    <UiButton variant="icon" class="mb-3" @click="nav.go('albums')">‹ Albums</UiButton>
+    <StateMessage v-if="loading" kind="loading">Loading album…</StateMessage>
+    <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>
     <div v-else-if="album">
-      <header>
+      <header class="mb-5 flex gap-5">
         <Artwork :hash="album.artwork_hash" :size="180" :radius="10" :alt="album.title" />
-        <div class="meta">
-          <h2>{{ album.title }}</h2>
-          <p class="sub">
+        <div>
+          <h2 class="mb-1.5 mt-1 text-xl font-semibold">{{ album.title }}</h2>
+          <p class="m-0 mb-1 text-dim">
             {{ [album.artist, album.year ? String(album.year) : null].filter(Boolean).join(" · ") }}
           </p>
-          <p class="sub">{{ tracks.length }} tracks · {{ totalDuration() }}</p>
-          <div class="actions">
-            <button class="primary" :disabled="playableTracks().length === 0" @click="playAll">
+          <p class="m-0 mb-1 text-dim">{{ tracks.length }} tracks · {{ totalDuration() }}</p>
+          <div class="mt-3 flex items-center gap-2">
+            <UiButton variant="primary" :disabled="playableTracks().length === 0" @click="playAll">
               ▶ Play
-            </button>
+            </UiButton>
             <TrackMenu :tracks="tracks" :album-id="album.id" />
           </div>
         </div>
       </header>
-      <div class="tracks">
+      <div class="flex flex-col gap-0.5">
         <TrackRow
           v-for="t in tracks"
           :key="t.id"
@@ -90,36 +93,5 @@ function totalDuration(): string {
         />
       </div>
     </div>
-  </div>
+  </ViewShell>
 </template>
-
-<style scoped>
-.back {
-  margin-bottom: 12px;
-  font-size: 13px;
-}
-
-header {
-  display: flex;
-  gap: 20px;
-  margin-bottom: 20px;
-}
-
-.meta h2 {
-  margin: 4px 0 6px;
-}
-
-.meta .sub {
-  margin: 0 0 4px;
-}
-
-.actions {
-  margin-top: 12px;
-}
-
-.tracks {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-</style>

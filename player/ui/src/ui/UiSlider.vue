@@ -38,7 +38,7 @@ const value = computed(() => [Math.min(Math.max(props.modelValue, props.min), sa
     :max="safeMax"
     :step="step"
     :disabled="disabled"
-    class="group relative flex h-5 w-full touch-none select-none items-center data-[disabled]:opacity-45"
+    class="group relative flex h-5 touch-none select-none items-center data-[disabled]:opacity-45"
     @update:model-value="(v) => v && emit('update:modelValue', v[0])"
     @value-commit="(v) => v && emit('commit', v[0])"
   >

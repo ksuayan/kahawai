@@ -24,6 +24,10 @@ defineProps<{
   ariaLabel?: string;
   disabled?: boolean;
   placeholder?: string;
+  /** Tooltip on the trigger (also how a disabled select explains itself). */
+  title?: string;
+  /** Extra classes for the trigger (width etc.); the root renders no element. */
+  triggerClass?: string;
 }>();
 const emit = defineEmits<{ (e: "update:modelValue", v: string | null): void }>();
 
@@ -43,7 +47,11 @@ const fromKey = (k: string): string | null => (k === NONE ? null : k);
   >
     <SelectTrigger
       :aria-label="ariaLabel"
-      class="inline-flex min-w-0 items-center justify-between gap-2 rounded-md border border-line bg-raised px-2.5 py-1.5 text-left text-[13px] text-fg outline-none transition-colors hover:bg-hover focus-visible:border-accent data-[state=open]:border-accent disabled:opacity-45"
+      :title="title"
+      :class="[
+        'inline-flex min-w-0 items-center justify-between gap-2 rounded-md border border-line bg-raised px-2.5 py-1.5 text-left text-[13px] text-fg outline-none transition-colors hover:bg-hover focus-visible:border-accent data-[state=open]:border-accent disabled:opacity-45',
+        triggerClass,
+      ]"
     >
       <span class="truncate"><SelectValue :placeholder="placeholder ?? 'Select…'" /></span>
       <SelectIcon class="shrink-0 text-faint">▾</SelectIcon>

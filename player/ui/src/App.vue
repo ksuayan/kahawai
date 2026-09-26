@@ -21,6 +21,7 @@ import { usePlayerStore } from "./stores/player";
 import { usePlaylistsStore } from "./stores/playlists";
 import { useQueueStore } from "./stores/queue";
 import { useSettingsStore } from "./stores/settings";
+import { handleShortcut } from "./shortcuts";
 
 const nav = useNavStore();
 const settings = useSettingsStore();
@@ -49,84 +50,32 @@ onMounted(async () => {
   await Promise.all([lib.loadAll(), playlists.load()]);
 });
 
-function isTypingTarget(el: EventTarget | null): boolean {
-  const t = el as HTMLElement | null;
-  if (!t || !("tagName" in t)) return false;
-  const tag = t.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
-}
-
 function onKeydown(e: KeyboardEvent): void {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (isTypingTarget(e.target)) {
-    if (e.key === "Escape") (e.target as HTMLElement).blur();
-    return;
-  }
-  switch (e.key) {
-    case " ":
-      e.preventDefault();
-      void player.toggle();
-      break;
-    case "ArrowRight":
-      e.preventDefault();
-      void player.seekTo(player.positionMs + 10_000);
-      break;
-    case "ArrowLeft":
-      e.preventDefault();
-      void player.seekTo(player.positionMs - 10_000);
-      break;
-    case "ArrowUp":
-      e.preventDefault();
-      void player.changeVolume(Math.min(1, player.volume + 0.05));
-      break;
-    case "ArrowDown":
-      e.preventDefault();
-      void player.changeVolume(Math.max(0, player.volume - 0.05));
-      break;
-    case "n":
-    case "N":
-      void player.nextTrack();
-      break;
-    case "p":
-    case "P":
-      void player.prevTrack();
-      break;
-    case "f":
-    case "F":
-      nav.go("search");
-      break;
-    case "1":
-      nav.go("albums");
-      break;
-    case "2":
-      nav.go("artists");
-      break;
-    case "3":
-      nav.go("playlists");
-      break;
-    case "4":
-      nav.go("search");
-      break;
-    case "5":
-      nav.go("queue");
-      break;
-    case "6":
-      nav.go("settings");
-      break;
-  }
+  handleShortcut(e, {
+    toggle: () => void player.toggle(),
+    seekBy: (d) => void player.seekTo(player.positionMs + d),
+    volumeBy: (d) => void player.changeVolume(Math.min(1, Math.max(0, player.volume + d))),
+    next: () => void player.nextTrack(),
+    prev: () => void player.prevTrack(),
+    go: (v) => nav.go(v),
+  });
 }
 </script>
 
 <template>
-  <div class="app">
-    <div v-if="!settings.loaded" class="boot">Starting…</div>
+  <div class="flex h-full flex-col">
+    <div v-if="!settings.loaded" class="flex h-full items-center justify-center text-faint">Starting…</div>
     <template v-else>
-      <div class="offline" v-if="lib.serverOnline === false">
+      <div
+        v-if="lib.serverOnline === false"
+        class="border-b border-line bg-[rgba(255,159,10,0.14)] px-4 py-1.5 text-xs text-[#ffb340]"
+        role="alert"
+      >
         Server unreachable at {{ settings.serverUrl }} — check Settings.
       </div>
-      <div class="body">
+      <div class="flex min-h-0 flex-1">
         <Sidebar />
-        <main class="main">
+        <main class="min-w-0 flex-1 overflow-y-auto">
           <AlbumsView v-if="nav.view.name === 'albums'" />
           <AlbumDetail v-else-if="nav.view.name === 'album'" :id="nav.view.id ?? 0" />
           <ArtistsView v-else-if="nav.view.name === 'artists'" />
@@ -144,39 +93,3 @@ function onKeydown(e: KeyboardEvent): void {
     </template>
   </div>
 </template>
-
-<style scoped>
-.app {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
-
-.boot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: var(--text-faint);
-}
-
-.offline {
-  background: rgba(255, 159, 10, 0.14);
-  color: #ffb340;
-  font-size: 12px;
-  padding: 6px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.body {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-}
-
-.main {
-  flex: 1;
-  overflow-y: auto;
-  min-width: 0;
-}
-</style>

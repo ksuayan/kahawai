@@ -4,6 +4,10 @@ import { usePlaylistsStore } from "../stores/playlists";
 import { usePlayerStore } from "../stores/player";
 import { useQueueStore } from "../stores/queue";
 import { formatDuration, trackTitle, type Track } from "../types";
+import PromptDialog from "../ui/PromptDialog.vue";
+import StateMessage from "../ui/StateMessage.vue";
+import UiButton from "../ui/UiButton.vue";
+import ViewShell from "../ui/ViewShell.vue";
 import Artwork from "./Artwork.vue";
 
 const queue = useQueueStore();
@@ -13,6 +17,7 @@ const playlists = usePlaylistsStore();
 const dragged = ref<number | null>(null);
 const dropTarget = ref<number | null>(null);
 const saving = ref(false);
+const saveDialog = ref(false);
 const saveError = ref<string | null>(null);
 
 function onDragStart(i: number, e: DragEvent): void {
@@ -52,13 +57,11 @@ function rowTitle(t: Track): string {
   return `${trackTitle(t)}${t.artist ? ` — ${t.artist}` : ""}`;
 }
 
-async function saveAsPlaylist(): Promise<void> {
-  const name = window.prompt("Playlist name:");
-  if (!name || !name.trim()) return;
+async function saveAsPlaylist(name: string): Promise<void> {
   saving.value = true;
   saveError.value = null;
   try {
-    await playlists.saveQueueAs(name.trim());
+    await playlists.saveQueueAs(name);
   } catch (e) {
     saveError.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -68,49 +71,46 @@ async function saveAsPlaylist(): Promise<void> {
 </script>
 
 <template>
-  <div class="view">
-    <div class="header">
-      <div>
-        <h2>Queue</h2>
-        <p class="sub">{{ queue.tracks.length }} tracks</p>
-      </div>
-      <div class="actions">
-        <button
-          class="icon-btn mode"
-          :class="{ on: player.shuffle }"
-          title="Shuffle"
-          @click="player.toggleShuffle()"
-        >
-          🔀 Shuffle
-        </button>
-        <button
-          class="icon-btn mode"
-          :class="{ on: player.repeat !== 'off' }"
-          :title="player.repeat === 'one' ? 'Repeat one' : player.repeat === 'all' ? 'Repeat all' : 'Repeat off'"
-          @click="player.cycleRepeat()"
-        >
-          {{ player.repeat === "one" ? "🔂 Repeat one" : player.repeat === "all" ? "🔁 Repeat all" : "🔁 Repeat off" }}
-        </button>
-        <button :disabled="queue.tracks.length === 0 || saving" @click="saveAsPlaylist">
-          {{ saving ? "Saving…" : "Save queue as playlist" }}
-        </button>
-        <button :disabled="queue.tracks.length === 0" @click="queue.clear()">Clear</button>
-      </div>
-    </div>
-    <div v-if="saveError" class="error-banner">{{ saveError }}</div>
-    <div v-if="queue.tracks.length === 0" class="empty">
+  <ViewShell title="Queue" :subtitle="`${queue.tracks.length} tracks`">
+    <template #actions>
+      <UiButton
+        variant="icon"
+        :pressed="player.shuffle"
+        title="Shuffle"
+        @click="player.toggleShuffle()"
+      >
+        🔀 Shuffle
+      </UiButton>
+      <UiButton
+        variant="icon"
+        :pressed="player.repeat !== 'off'"
+        :title="player.repeat === 'one' ? 'Repeat one' : player.repeat === 'all' ? 'Repeat all' : 'Repeat off'"
+        @click="player.cycleRepeat()"
+      >
+        {{ player.repeat === "one" ? "🔂 Repeat one" : player.repeat === "all" ? "🔁 Repeat all" : "🔁 Repeat off" }}
+      </UiButton>
+      <UiButton :disabled="queue.tracks.length === 0 || saving" @click="saveDialog = true">
+        {{ saving ? "Saving…" : "Save queue as playlist" }}
+      </UiButton>
+      <UiButton :disabled="queue.tracks.length === 0" @click="queue.clear()">Clear</UiButton>
+    </template>
+
+    <StateMessage v-if="saveError" kind="error">{{ saveError }}</StateMessage>
+    <StateMessage v-if="queue.tracks.length === 0" kind="empty">
       Queue is empty. Play an album, playlist, or search result to fill it.
-    </div>
-    <div v-else class="rows">
+    </StateMessage>
+    <div v-else class="flex flex-col gap-0.5">
       <div
         v-for="(t, i) in queue.tracks"
         :key="t.id"
-        class="track-row qrow"
-        :class="{
-          current: i === queue.index,
-          dragging: dragged === i,
-          'drop-target': dropTarget === i && dragged !== i,
-        }"
+        class="flex cursor-grab items-center gap-3 rounded-md px-2.5 py-[7px]"
+        :class="[
+          i === queue.index ? 'bg-accent/15' : 'hover:bg-hover',
+          dragged === i && 'opacity-40',
+          dropTarget === i && dragged !== i && 'shadow-[inset_0_2px_0_var(--color-accent)]',
+        ]"
+        :data-current="i === queue.index || undefined"
+        data-testid="queue-row"
         :title="rowTitle(t)"
         draggable="true"
         @dragstart="onDragStart(i, $event)"
@@ -119,90 +119,43 @@ async function saveAsPlaylist(): Promise<void> {
         @drop="onDrop(i, $event)"
         @dragend="onDragEnd"
       >
-        <span class="grip" aria-hidden="true">⋮⋮</span>
-        <span class="num">{{ i + 1 }}</span>
+        <span class="shrink-0 cursor-grab tracking-[-2px] text-faint" aria-hidden="true">⋮⋮</span>
+        <span class="w-7 shrink-0 text-right tabular-nums text-faint">{{ i + 1 }}</span>
         <Artwork :hash="null" :size="32" :radius="4" />
-        <div class="main">
-          <div class="title">{{ trackTitle(t) }}</div>
-          <div v-if="t.artist" class="artist-line">{{ t.artist }}</div>
+        <div class="min-w-0 flex-1">
+          <div class="truncate">{{ trackTitle(t) }}</div>
+          <div v-if="t.artist" class="truncate text-xs text-dim">{{ t.artist }}</div>
         </div>
-        <span class="dur">{{ formatDuration(t.duration_ms) }}</span>
-        <span class="row-actions">
-          <button class="icon-btn" title="Move up" :disabled="i === 0" @click="queue.moveUp(i)">▲</button>
-          <button
-            class="icon-btn"
+        <span class="shrink-0 tabular-nums text-dim">{{ formatDuration(t.duration_ms) }}</span>
+        <span class="flex shrink-0 gap-0.5">
+          <UiButton variant="icon" title="Move up" aria-label="Move up" :disabled="i === 0" @click="queue.moveUp(i)">▲</UiButton>
+          <UiButton
+            variant="icon"
             title="Move down"
+            aria-label="Move down"
             :disabled="i === queue.tracks.length - 1"
             @click="queue.moveDown(i)"
           >
             ▼
-          </button>
-          <button class="icon-btn danger" title="Remove from queue" @click="queue.removeAt(i)">✕</button>
+          </UiButton>
+          <UiButton variant="icon-danger"
+            title="Remove from queue"
+            aria-label="Remove from queue"
+            @click="queue.removeAt(i)"
+          >
+            ✕
+          </UiButton>
         </span>
       </div>
     </div>
-  </div>
+
+    <PromptDialog
+      v-model:open="saveDialog"
+      title="Save queue as playlist"
+      label="Playlist name"
+      placeholder="Playlist name"
+      confirm-label="Save"
+      @submit="saveAsPlaylist"
+    />
+  </ViewShell>
 </template>
-
-<style scoped>
-.header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: 16px;
-}
-
-.header h2 {
-  margin: 0 0 4px;
-}
-
-.actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.mode.on {
-  color: #0a84ff;
-  background: rgba(10, 132, 255, 0.14);
-}
-
-.rows {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.qrow {
-  cursor: grab;
-}
-
-.qrow.dragging {
-  opacity: 0.4;
-}
-
-.qrow.drop-target {
-  box-shadow: inset 0 2px 0 var(--accent);
-}
-
-.grip {
-  color: var(--text-faint);
-  letter-spacing: -2px;
-  cursor: grab;
-  flex-shrink: 0;
-}
-
-.row-actions {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.danger {
-  color: var(--text-dim);
-}
-
-.danger:hover {
-  color: var(--danger);
-}
-</style>

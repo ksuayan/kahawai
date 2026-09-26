@@ -1,95 +1,65 @@
 <script setup lang="ts">
-import { useToastsStore } from "../stores/toasts";
+import {
+  ToastClose,
+  ToastDescription,
+  ToastProvider,
+  ToastRoot,
+  ToastTitle,
+  ToastViewport,
+} from "reka-ui";
+import { useToastsStore, type ToastKind } from "../stores/toasts";
 
 const toasts = useToastsStore();
+
+const accent: Record<ToastKind, string> = {
+  info: "border-l-accent",
+  success: "border-l-ok",
+  error: "border-l-danger",
+  progress: "border-l-warn",
+};
 </script>
 
 <template>
-  <div class="toast-host" aria-live="polite">
-    <div v-for="t in toasts.toasts" :key="t.id" class="toast" :class="`kind-${t.kind}`">
-      <div class="t-body">
-        <div class="t-title">{{ t.title }}</div>
-        <div v-if="t.detail" class="t-detail">{{ t.detail }}</div>
-        <div v-if="t.progress != null" class="t-bar">
-          <div class="t-fill" :style="{ width: `${Math.round(t.progress * 100)}%` }" />
+  <!-- The store owns timing (ttl / sticky progress); Reka provides the
+       accessible live region, swipe-to-dismiss and keyboard handling. -->
+  <ToastProvider :duration="Infinity" swipe-direction="right" label="Notification">
+    <ToastRoot
+      v-for="t in toasts.toasts"
+      :key="t.id"
+      :open="true"
+      :duration="Infinity"
+      :type="t.kind === 'error' ? 'foreground' : 'background'"
+      :data-kind="t.kind"
+      class="flex items-start gap-2 rounded-[10px] border border-l-[3px] border-line bg-raised px-3 py-2.5 text-[13px] shadow-[0_8px_24px_rgba(0,0,0,0.45)]"
+      :class="accent[t.kind]"
+      @update:open="(open: boolean) => !open && toasts.dismiss(t.id)"
+    >
+      <div class="min-w-0 flex-1">
+        <ToastTitle class="font-semibold">{{ t.title }}</ToastTitle>
+        <ToastDescription v-if="t.detail" class="mt-0.5 whitespace-pre-wrap break-words text-xs text-dim">
+          {{ t.detail }}
+        </ToastDescription>
+        <div v-if="t.progress != null" class="mt-2 h-1 overflow-hidden rounded-sm bg-active">
+          <div
+            class="h-full bg-warn transition-[width] duration-[400ms] ease-linear"
+            :style="{ width: `${Math.round(t.progress * 100)}%` }"
+            role="progressbar"
+            :aria-valuenow="Math.round(t.progress * 100)"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          />
         </div>
       </div>
-      <button class="icon-btn t-close" title="Dismiss" @click="toasts.dismiss(t.id)">✕</button>
-    </div>
-  </div>
+      <ToastClose
+        aria-label="Dismiss"
+        title="Dismiss"
+        class="rounded-md px-1.5 py-0.5 text-[11px] text-dim hover:bg-hover hover:text-fg"
+      >
+        ✕
+      </ToastClose>
+    </ToastRoot>
+    <ToastViewport
+      class="fixed bottom-24 right-4 z-[100] m-0 flex max-w-[360px] list-none flex-col gap-2 p-0 outline-none"
+    />
+  </ToastProvider>
 </template>
-
-<style scoped>
-.toast-host {
-  position: fixed;
-  right: 16px;
-  bottom: 96px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  z-index: 100;
-  max-width: 360px;
-}
-
-.toast {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-left-width: 3px;
-  border-radius: 10px;
-  padding: 10px 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  font-size: 13px;
-}
-
-.kind-info {
-  border-left-color: #0a84ff;
-}
-.kind-success {
-  border-left-color: #30d158;
-}
-.kind-error {
-  border-left-color: #ff453a;
-}
-.kind-progress {
-  border-left-color: #ffd60a;
-}
-
-.t-body {
-  flex: 1;
-  min-width: 0;
-}
-
-.t-title {
-  font-weight: 600;
-}
-
-.t-detail {
-  color: var(--text-dim);
-  font-size: 12px;
-  margin-top: 2px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.t-bar {
-  height: 4px;
-  background: var(--bg-active);
-  border-radius: 2px;
-  margin-top: 8px;
-  overflow: hidden;
-}
-
-.t-fill {
-  height: 100%;
-  background: #ffd60a;
-  transition: width 0.4s linear;
-}
-
-.t-close {
-  font-size: 11px;
-  padding: 2px 6px;
-}
-</style>

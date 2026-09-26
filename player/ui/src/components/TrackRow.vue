@@ -8,6 +8,7 @@ import {
   unplayableReason,
   type Track,
 } from "../types";
+import UiBadge from "../ui/UiBadge.vue";
 import Artwork from "./Artwork.vue";
 import TrackMenu from "./TrackMenu.vue";
 
@@ -39,21 +40,23 @@ function onDblClick(): void {
 
 <template>
   <div
-    class="track-row"
-    :class="{ current, unplayable: !playable }"
+    class="flex cursor-default items-center gap-3 rounded-md px-2.5 py-[7px]"
+    :class="[current ? 'bg-accent/15' : 'hover:bg-hover', !playable && 'opacity-45']"
+    :data-current="current || undefined"
+    :data-playable="playable"
     :title="playable ? title : `${title} — ${reason}`"
     @dblclick="onDblClick"
   >
-    <span class="num">{{ number ?? track.track_no ?? "–" }}</span>
+    <span class="w-7 shrink-0 text-right tabular-nums text-faint">{{ number ?? track.track_no ?? "–" }}</span>
     <Artwork v-if="showArtwork" :hash="artworkHash" :size="36" :radius="4" />
-    <div class="main">
-      <div class="title">{{ title }}</div>
-      <div v-if="track.artist || track.album" class="artist-line">
+    <div class="min-w-0 flex-1">
+      <div class="truncate">{{ title }}</div>
+      <div v-if="track.artist || track.album" class="truncate text-xs text-dim">
         {{ [track.artist, track.album].filter(Boolean).join(" — ") }}
       </div>
     </div>
-    <span class="badge">{{ formatBadge(track) }}</span>
-    <span class="dur">{{ formatDuration(track.duration_ms) }}</span>
+    <UiBadge>{{ formatBadge(track) }}</UiBadge>
+    <span class="shrink-0 tabular-nums text-dim">{{ formatDuration(track.duration_ms) }}</span>
     <TrackMenu v-if="showMenu" :track="track" />
     <slot />
   </div>
