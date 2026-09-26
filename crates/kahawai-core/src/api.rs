@@ -39,6 +39,14 @@ pub struct Track {
     /// spec §2, S5). Still cataloged and browsable, not playable.
     #[serde(default = "default_true")]
     pub decodable: bool,
+    /// MQA-encoded file (detected from its `MQAENCODER` tag). Plays as
+    /// ordinary FLAC anywhere; an MQA-capable DAC can decode it when the
+    /// samples reach it untouched (see the player's bit-perfect output).
+    #[serde(default)]
+    pub mqa: bool,
+    /// Sample rate of the master before MQA folding (`ORIGINALSAMPLERATE`).
+    #[serde(default)]
+    pub original_sample_rate: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -247,6 +255,8 @@ mod tests {
             year: Some(1959),
             missing: false,
             decodable: true,
+            mqa: false,
+            original_sample_rate: None,
         }
     }
 
@@ -326,5 +336,30 @@ mod tests {
         let f: StreamFormat = serde_json::from_str(r#""flac""#).unwrap();
         assert_eq!(f, StreamFormat::Flac);
         assert_eq!(StreamFormat::default(), StreamFormat::Passthrough);
+    }
+
+    #[test]
+    fn track_json_without_mqa_fields_still_deserializes() {
+        // Older servers / saved queues have no mqa fields: they default off.
+        let json = r#"{"id":1,"path":"/a.flac","hash":"h","format":"flac","sample_rate":48000,
+            "bit_depth":24,"channels":2,"duration_ms":1000,"bitrate":900,"title":"t","album":null,
+            "artist":null,"album_id":null,"track_no":null,"disc_no":null}"#;
+        let t: Track = serde_json::from_str(json).unwrap();
+        assert!(!t.mqa);
+        assert_eq!(t.original_sample_rate, None);
+        assert!(t.decodable);
+    }
+
+    #[test]
+    fn track_mqa_fields_round_trip() {
+        let json = r#"{"id":1,"path":"/a.flac","hash":"h","format":"flac","sample_rate":48000,
+            "bit_depth":24,"channels":2,"duration_ms":1000,"bitrate":900,"title":"t","album":null,
+            "artist":null,"album_id":null,"track_no":null,"disc_no":null,
+            "mqa":true,"original_sample_rate":96000}"#;
+        let t: Track = serde_json::from_str(json).unwrap();
+        assert!(t.mqa);
+        assert_eq!(t.original_sample_rate, Some(96_000));
+        let back = serde_json::to_string(&t).unwrap();
+        assert!(back.contains(r#""mqa":true"#) && back.contains(r#""original_sample_rate":96000"#));
     }
 }

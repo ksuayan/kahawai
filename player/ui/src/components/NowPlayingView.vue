@@ -5,7 +5,7 @@ import { useDspStore } from "../stores/dsp";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
-import { formatBadge, isPlayable, trackTitle, unplayableReason } from "../types";
+import { formatBadge, isPlayable, mqaLabel, mqaTitle, trackTitle, unplayableReason } from "../types";
 import StateMessage from "../ui/StateMessage.vue";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
@@ -71,6 +71,7 @@ function goEq(): void {
 
         <div class="mb-5 flex flex-wrap gap-2">
           <UiBadge>{{ formatBadge(track) }}</UiBadge>
+          <UiBadge v-if="track.mqa" variant="accent" :title="mqaTitle(track)" data-testid="mqa-badge">{{ mqaLabel(track) }}</UiBadge>
           <UiBadge variant="accent" :title="`Audio chain: ${player.chain ?? '—'}`">{{ audioPath }}</UiBadge>
           <UiBadge
             v-if="player.isDopExclusive"

@@ -88,6 +88,13 @@ describe("NowPlayingView", () => {
     });
   });
 
+  it("labels an MQA track, and not an ordinary one", async () => {
+    const w = await boot(makeState({ status: "playing", track: makeTrack({ format: "flac", mqa: true, original_sample_rate: 96000 }) }));
+    expect(w.get('[data-testid="mqa-badge"]').text()).toBe("MQA · 96k");
+    const plain = await boot(makeState({ status: "playing", track: makeTrack({ mqa: false }) }));
+    expect(plain.find('[data-testid="mqa-badge"]').exists()).toBe(false);
+  });
+
   it("flags an unplayable track with the reason", async () => {
     const w = await boot(makeState({ status: "stopped", track: makeTrack({ missing: true }) }));
     expect(w.text()).toContain("File missing from disk");

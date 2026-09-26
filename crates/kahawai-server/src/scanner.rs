@@ -71,6 +71,9 @@ struct FileAnalysis {
     artwork: Option<ArtworkData>,
     /// The server can play it (directly, or via its DSD paths).
     decodable: bool,
+    /// MQA-encoded (MQAENCODER tag) and the pre-fold master rate.
+    mqa: bool,
+    original_sample_rate: Option<u32>,
 }
 
 struct ArtworkData {
@@ -140,6 +143,17 @@ pub async fn run_scan_with_progress(
         );
     }
 
+    // Rows cataloged before MQA detection existed: tags are read (no hashing)
+    // the next time the file is visited.
+    let mut mqa_unchecked: HashSet<String> =
+        sqlx::query("SELECT path FROM tracks WHERE mqa_checked = 0")
+            .fetch_all(pool)
+            .await
+            .map_err(db::cvt)?
+            .iter()
+            .map(|r| r.get::<String, _>("path"))
+            .collect();
+
     let mut report = ScanReport::default();
     let mut seen: HashSet<String> = HashSet::with_capacity(known.len().max(1024));
 
@@ -185,6 +199,24 @@ pub async fn run_scan_with_progress(
                     if *ksize == Some(size) && *kmtime == mtime && !stale.contains(&path_str) =>
                 {
                     report.files_skipped += 1;
+                    if mqa_unchecked.remove(&path_str) {
+                        let owned = path.to_path_buf();
+                        let (mqa, original) = tokio::task::spawn_blocking(move || read_mqa(&owned))
+                            .await
+                            .map_err(|e| {
+                                MusicError::JobFailed(format!("scan worker panicked: {e}"))
+                            })?;
+                        sqlx::query(
+                            "UPDATE tracks SET mqa = ?, original_sample_rate = ?, mqa_checked = 1
+                             WHERE path = ?",
+                        )
+                        .bind(i64::from(mqa))
+                        .bind(original.map(i64::from))
+                        .bind(&path_str)
+                        .execute(pool)
+                        .await
+                        .map_err(db::cvt)?;
+                    }
                 }
                 previous => {
                     let is_new = previous.is_none();
@@ -347,6 +379,8 @@ fn analyze_file(path: &Path) -> Result<FileAnalysis, MusicError> {
         bitrate: None,
         artwork: None,
         decodable: format.is_directly_streamable(),
+        mqa: false,
+        original_sample_rate: None,
     };
 
     // Best effort: undecodable-yet sources (DSD/ISO) may not parse; they are
@@ -369,6 +403,7 @@ fn analyze_file(path: &Path) -> Result<FileAnalysis, MusicError> {
                 a.year = tag.year().and_then(|y| u16::try_from(y).ok());
                 a.track_no = tag.track();
                 a.disc_no = tag.disk();
+                (a.mqa, a.original_sample_rate) = mqa_of(tag);
                 if let Some(pic) = tag.pictures().iter().find(|p| !p.data().is_empty()) {
                     let mime = pic
                         .mime_type()
@@ -401,6 +436,40 @@ fn analyze_file(path: &Path) -> Result<FileAnalysis, MusicError> {
             .map(str::to_string);
     }
     Ok(a)
+}
+
+/// MQA markers in a file's tags. MQA-encoded FLACs carry an `MQAENCODER`
+/// Vorbis comment (the encoder build) and usually `ORIGINALSAMPLERATE` (the
+/// master's rate before folding). Keys are matched case-insensitively.
+///
+/// This is tag-based: a file whose tags were stripped is not recognised (the
+/// MQA signal itself lives in the audio LSBs and is not inspected).
+fn mqa_of(tag: &lofty::tag::Tag) -> (bool, Option<u32>) {
+    let mut mqa = false;
+    let mut original = None;
+    for item in tag.items() {
+        let lofty::tag::ItemKey::Unknown(key) = item.key() else {
+            continue;
+        };
+        let lofty::tag::ItemValue::Text(value) = item.value() else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("MQAENCODER") && !value.trim().is_empty() {
+            mqa = true;
+        } else if key.eq_ignore_ascii_case("ORIGINALSAMPLERATE") {
+            original = value.trim().parse::<u32>().ok().filter(|&r| r > 0);
+        }
+    }
+    (mqa, original.filter(|_| mqa))
+}
+
+/// Tags only (no hashing): used to backfill MQA info for rows cataloged
+/// before the column existed.
+fn read_mqa(path: &Path) -> (bool, Option<u32>) {
+    match lofty::read_from_path(path) {
+        Ok(tagged) => tagged.primary_tag().map(mqa_of).unwrap_or((false, None)),
+        Err(_) => (false, None),
+    }
 }
 
 /// Technical properties and tags of a DSF/DFF file. `decodable` becomes true
@@ -806,7 +875,8 @@ async fn upsert_track(
                      channels = ?, duration_ms = ?, bitrate = ?, title = ?, album = ?,
                      artist = ?, album_id = ?, track_no = ?, disc_no = ?, genre = ?,
                      year = ?, artwork_hash = ?, file_size = ?, file_mtime = ?,
-                     missing = 0, decodable = ? WHERE id = ?",
+                     missing = 0, decodable = ?, mqa = ?, original_sample_rate = ?,
+                     mqa_checked = 1 WHERE id = ?",
             )
             .bind(&a.hash)
             .bind(a.format.wire_name())
@@ -827,6 +897,8 @@ async fn upsert_track(
             .bind(a.size)
             .bind(a.mtime)
             .bind(decodable)
+            .bind(i64::from(a.mqa))
+            .bind(a.original_sample_rate.map(i64::from))
             .bind(id)
             .execute(&mut **tx)
             .await
@@ -841,8 +913,9 @@ async fn upsert_track(
         None => sqlx::query(
             "INSERT INTO tracks (path, hash, format, sample_rate, bit_depth, channels,
                      duration_ms, bitrate, title, album, artist, album_id, track_no, disc_no,
-                     genre, year, artwork_hash, file_size, file_mtime, missing, decodable)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                     genre, year, artwork_hash, file_size, file_mtime, missing, decodable,
+                     mqa, original_sample_rate, mqa_checked)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1)
                      RETURNING id",
         )
         .bind(&a.path)
@@ -865,6 +938,8 @@ async fn upsert_track(
         .bind(a.size)
         .bind(a.mtime)
         .bind(decodable)
+        .bind(i64::from(a.mqa))
+        .bind(a.original_sample_rate.map(i64::from))
         .fetch_one(&mut **tx)
         .await
         .map_err(db::cvt)?
@@ -2413,5 +2488,287 @@ mod dsd_scan_tests {
             .await
             .unwrap();
         assert_eq!((again.files_updated, again.files_skipped), (0, 2));
+    }
+}
+
+/// MQA detection from the `MQAENCODER` / `ORIGINALSAMPLERATE` tags MQA-encoded
+/// FLACs carry.
+#[cfg(test)]
+mod mqa_tests {
+    use super::fixtures::*;
+    use super::*;
+    use lofty::{
+        file::TaggedFileExt,
+        tag::{ItemKey, ItemValue, Tag, TagExt, TagItem, TagType},
+    };
+
+    const ENCODER: &str = "MQAEncode v1.1, 3091 (afa6eeb9), F8EC1703, Oct 22 2020 00:45:31";
+
+    fn vorbis(pairs: &[(&str, &str)]) -> Tag {
+        let mut t = Tag::new(TagType::VorbisComments);
+        for (k, v) in pairs {
+            t.insert_unchecked(TagItem::new(
+                ItemKey::Unknown((*k).to_string()),
+                ItemValue::Text((*v).to_string()),
+            ));
+        }
+        t
+    }
+
+    #[test]
+    fn detects_mqa_from_the_encoder_tag_and_reads_the_original_rate() {
+        let t = vorbis(&[("MQAENCODER", ENCODER), ("ORIGINALSAMPLERATE", "96000")]);
+        assert_eq!(mqa_of(&t), (true, Some(96_000)));
+    }
+
+    #[test]
+    fn keys_are_matched_case_insensitively() {
+        let t = vorbis(&[("mqaencoder", ENCODER), ("OriginalSampleRate", "48000")]);
+        assert_eq!(mqa_of(&t), (true, Some(48_000)));
+    }
+
+    #[test]
+    fn mqa_without_an_original_rate_is_still_mqa() {
+        assert_eq!(mqa_of(&vorbis(&[("MQAENCODER", ENCODER)])), (true, None));
+        assert_eq!(
+            mqa_of(&vorbis(&[
+                ("MQAENCODER", ENCODER),
+                ("ORIGINALSAMPLERATE", "abc")
+            ])),
+            (true, None)
+        );
+        assert_eq!(
+            mqa_of(&vorbis(&[
+                ("MQAENCODER", ENCODER),
+                ("ORIGINALSAMPLERATE", "0")
+            ])),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn a_stray_original_rate_or_empty_encoder_is_not_mqa() {
+        assert_eq!(
+            mqa_of(&vorbis(&[("ORIGINALSAMPLERATE", "96000")])),
+            (false, None)
+        );
+        assert_eq!(mqa_of(&vorbis(&[("MQAENCODER", "   ")])), (false, None));
+        assert_eq!(mqa_of(&vorbis(&[("TITLE", "x")])), (false, None));
+        assert_eq!(mqa_of(&Tag::new(TagType::VorbisComments)), (false, None));
+    }
+
+    fn flac(
+        lib: &Path,
+        dir: &str,
+        file: &str,
+        title: &str,
+        mqa: Option<&[(&str, &str)]>,
+    ) -> PathBuf {
+        make_track(
+            lib,
+            None,
+            &fixtures::TrackSpec {
+                dir,
+                file,
+                codec: "flac",
+                title,
+                artist: "Dave Brubeck",
+                album: "Lullabies",
+                album_artist: None,
+                track_no: 1,
+                year: Some("2020"),
+                genre: None,
+                art: false,
+            },
+        );
+        let path = lib.join(dir).join(file);
+        if let Some(extra) = mqa {
+            let mut tagged = lofty::read_from_path(&path).unwrap();
+            let tag = tagged.primary_tag_mut().unwrap();
+            for (k, v) in extra {
+                tag.insert_unchecked(TagItem::new(
+                    ItemKey::Unknown((*k).to_string()),
+                    ItemValue::Text((*v).to_string()),
+                ));
+            }
+            tag.save_to_path(&path, lofty::config::WriteOptions::default())
+                .unwrap();
+        }
+        path
+    }
+
+    async fn scan(lib: &Path, db: &Path) -> (SqlitePool, ScanReport) {
+        let pool = db::open(db).await.unwrap();
+        let r = run_scan_with_progress(&pool, &[lib.to_path_buf()], |_, _| {})
+            .await
+            .unwrap();
+        (pool, r)
+    }
+
+    #[tokio::test]
+    async fn scan_records_mqa_and_leaves_ordinary_flac_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        flac(
+            &lib,
+            "A",
+            "01.flac",
+            "Brahms Lullaby",
+            Some(&[("MQAENCODER", ENCODER), ("ORIGINALSAMPLERATE", "48000")]),
+        );
+        flac(&lib, "A", "02.flac", "Plain FLAC", None);
+        let (pool, _) = scan(&lib, &dir.path().join("t.db")).await;
+        let rows = sqlx::query(
+            "SELECT title, mqa, original_sample_rate, mqa_checked FROM tracks ORDER BY title",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let got: Vec<(String, i64, Option<i64>, i64)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get("title"),
+                    r.get("mqa"),
+                    r.get("original_sample_rate"),
+                    r.get("mqa_checked"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Brahms Lullaby".into(), 1, Some(48_000), 1),
+                ("Plain FLAC".into(), 0, None, 1)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_track_api_shape_carries_the_mqa_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        flac(
+            &lib,
+            "A",
+            "01.flac",
+            "Brahms Lullaby",
+            Some(&[("MQAENCODER", ENCODER), ("ORIGINALSAMPLERATE", "96000")]),
+        );
+        let (pool, _) = scan(&lib, &dir.path().join("t.db")).await;
+        let t = db::get_track(&pool, 1).await.unwrap().unwrap();
+        assert!(t.mqa);
+        assert_eq!(t.original_sample_rate, Some(96_000));
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["mqa"], true);
+        assert_eq!(json["original_sample_rate"], 96_000);
+    }
+
+    /// Catalogs built before the column existed: the next scan reads just the
+    /// tags (the file is not re-hashed) and the row is never revisited.
+    #[tokio::test]
+    async fn a_scan_backfills_mqa_for_rows_cataloged_before_detection_existed() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        flac(
+            &lib,
+            "A",
+            "01.flac",
+            "Brahms Lullaby",
+            Some(&[("MQAENCODER", ENCODER), ("ORIGINALSAMPLERATE", "48000")]),
+        );
+        flac(&lib, "A", "02.flac", "Plain FLAC", None);
+        let db_path = dir.path().join("t.db");
+        let (pool, _) = scan(&lib, &db_path).await;
+        // Back to the pre-detection state.
+        sqlx::query("UPDATE tracks SET mqa = 0, original_sample_rate = NULL, mqa_checked = 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hash_before: String =
+            sqlx::query("SELECT hash FROM tracks WHERE title = 'Brahms Lullaby'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get(0);
+
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            (r.files_added, r.files_updated, r.files_skipped),
+            (0, 0, 2),
+            "no re-analysis"
+        );
+        let rows = sqlx::query(
+            "SELECT title, mqa, original_sample_rate, mqa_checked, hash FROM tracks ORDER BY title",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows[0].get::<i64, _>("mqa"), 1);
+        assert_eq!(
+            rows[0].get::<Option<i64>, _>("original_sample_rate"),
+            Some(48_000)
+        );
+        assert_eq!(rows[1].get::<i64, _>("mqa"), 0);
+        assert!(rows.iter().all(|r| r.get::<i64, _>("mqa_checked") == 1));
+        assert_eq!(
+            rows[0].get::<String, _>("hash"),
+            hash_before,
+            "hash untouched"
+        );
+
+        // Checked rows are not read again: tag changes on an UNCHANGED file
+        // (same size/mtime) are not picked up until the file changes.
+        sqlx::query("UPDATE tracks SET mqa = 0 WHERE title = 'Brahms Lullaby'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        let still: i64 = sqlx::query("SELECT mqa FROM tracks WHERE title = 'Brahms Lullaby'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(still, 0);
+    }
+
+    #[tokio::test]
+    async fn a_changed_file_is_re_evaluated() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let p = flac(&lib, "A", "01.flac", "Song", None);
+        let db_path = dir.path().join("t.db");
+        let (pool, _) = scan(&lib, &db_path).await;
+        assert_eq!(count(&pool, "tracks").await, 1);
+        let m0: i64 = sqlx::query("SELECT mqa FROM tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(m0, 0);
+        // The user re-tags the file with MQA info (file changes on disk).
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let mut tagged = lofty::read_from_path(&p).unwrap();
+        let tag = tagged.primary_tag_mut().unwrap();
+        tag.insert_unchecked(TagItem::new(
+            ItemKey::Unknown("MQAENCODER".into()),
+            ItemValue::Text(ENCODER.into()),
+        ));
+        tag.save_to_path(&p, lofty::config::WriteOptions::default())
+            .unwrap();
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_updated, 1);
+        let m1: i64 = sqlx::query("SELECT mqa FROM tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(m1, 1);
     }
 }

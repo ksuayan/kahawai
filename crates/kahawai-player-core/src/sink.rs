@@ -439,6 +439,8 @@ mod tests {
             year: None,
             missing: false,
             decodable: true,
+            mqa: false,
+            original_sample_rate: None,
         }
     }
 

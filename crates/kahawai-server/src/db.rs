@@ -43,6 +43,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         (1, include_str!("../migrations/001_init.sql")),
         (2, include_str!("../migrations/002_scan_columns.sql")),
         (3, include_str!("../migrations/003_jobs.sql")),
+        (4, include_str!("../migrations/004_mqa.sql")),
     ];
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)")
         .execute(pool)
@@ -118,12 +119,16 @@ fn track_from_row(r: &SqliteRow) -> Track {
             .and_then(|y| u16::try_from(y).ok()),
         missing: r.get::<i64, _>("missing") != 0,
         decodable: r.get::<i64, _>("decodable") != 0,
+        mqa: r.get::<i64, _>("mqa") != 0,
+        original_sample_rate: r
+            .get::<Option<i64>, _>("original_sample_rate")
+            .and_then(|v| u32::try_from(v).ok()),
     }
 }
 
 const TRACK_COLS: &str = "id, path, hash, format, sample_rate, bit_depth, channels, \
      duration_ms, bitrate, title, album, artist, album_id, track_no, disc_no, \
-     genre, year, missing, decodable";
+     genre, year, missing, decodable, mqa, original_sample_rate";
 
 pub async fn get_track(pool: &SqlitePool, id: i64) -> Result<Option<Track>, MusicError> {
     let row = sqlx::query(&format!("SELECT {TRACK_COLS} FROM tracks WHERE id = ?"))
@@ -214,7 +219,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4]);
 
         // Old row survived; new columns carry their defaults.
         let r = sqlx::query(
@@ -246,6 +251,72 @@ mod tests {
         let track = get_track(&pool, 1).await.unwrap().unwrap();
         assert_eq!(track.path, "/m/a.flac");
         assert!(!track.missing && track.decodable);
+        // MQA columns exist, off by default.
+        assert!(!track.mqa);
+        assert_eq!(track.original_sample_rate, None);
+    }
+
+    /// Migration 004 on a catalog that already has rows: only FLAC rows are
+    /// queued for the MQA tag backfill (`mqa_checked = 0`); every other format
+    /// is already "checked" so a scan never revisits them.
+    #[tokio::test]
+    async fn migration_004_queues_only_flac_rows_for_the_mqa_backfill() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("v3.db");
+        let opts = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (v, sql) in [
+            (1, include_str!("../migrations/001_init.sql")),
+            (2, include_str!("../migrations/002_scan_columns.sql")),
+            (3, include_str!("../migrations/003_jobs.sql")),
+        ] {
+            apply_sql(&pool, sql).await.unwrap();
+            sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+                .bind(v)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (path, fmt) in [
+            ("/m/a.flac", "flac"),
+            ("/m/b.mp3", "mp3"),
+            ("/m/c.m4a", "m4a"),
+            ("/m/d.dsf", "dsf"),
+        ] {
+            sqlx::query("INSERT INTO tracks (path, hash, format) VALUES (?, 'h', ?)")
+                .bind(path)
+                .bind(fmt)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool.close().await;
+
+        let pool = open(&db_path).await.unwrap();
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4]);
+        let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let got: Vec<(String, i64, i64)> = rows
+            .iter()
+            .map(|r| (r.get("format"), r.get("mqa"), r.get("mqa_checked")))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("flac".into(), 0, 0),
+                ("mp3".into(), 0, 1),
+                ("m4a".into(), 0, 1),
+                ("dsf".into(), 0, 1)
+            ]
+        );
     }
 
     /// Fresh databases get every migration, and reopening is idempotent.
@@ -254,9 +325,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("fresh.db");
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4]);
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4]);
     }
 }

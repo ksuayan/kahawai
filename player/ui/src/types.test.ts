@@ -4,6 +4,8 @@ import {
   formatBadge,
   formatDuration,
   isPlayable,
+  mqaLabel,
+  mqaTitle,
   trackTitle,
   unplayableReason,
   validFormatsFor,
@@ -54,5 +56,22 @@ describe("track helpers", () => {
     expect(validFormatsFor(makeTrack({ format: "dsf" }))).toEqual(["flac", "dop"]);
     expect(validFormatsFor(makeTrack({ format: "sacd_iso" }))).toEqual(["flac"]);
     expect(validFormatsFor(makeTrack({ format: "flac" }))).toEqual(["passthrough", "flac", "opus", "mp3"]);
+  });
+});
+
+describe("MQA labelling", () => {
+  it("shows the master's rate when the file says, plain MQA otherwise", () => {
+    expect(mqaLabel(makeTrack({ mqa: true, original_sample_rate: 48000 }))).toBe("MQA · 48k");
+    expect(mqaLabel(makeTrack({ mqa: true, original_sample_rate: 44100 }))).toBe("MQA · 44.1k");
+    expect(mqaLabel(makeTrack({ mqa: true, original_sample_rate: 192000 }))).toBe("MQA · 192k");
+    expect(mqaLabel(makeTrack({ mqa: true, original_sample_rate: null }))).toBe("MQA");
+  });
+
+  it("explains what the badge means without overpromising", () => {
+    const tip = mqaTitle(makeTrack({ mqa: true, original_sample_rate: 96000 }));
+    expect(tip).toContain("master 96 kHz");
+    expect(tip).toContain("plays as ordinary FLAC");
+    expect(tip).toContain("Bit-perfect output");
+    expect(mqaTitle(makeTrack({ mqa: true }))).not.toContain("master");
   });
 });

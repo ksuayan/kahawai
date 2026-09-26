@@ -24,6 +24,8 @@ export function makeTrack(over: Partial<Track> = {}): Track {
     year: 2020,
     missing: false,
     decodable: true,
+    mqa: false,
+    original_sample_rate: null,
     ...over,
   } as Track;
 }

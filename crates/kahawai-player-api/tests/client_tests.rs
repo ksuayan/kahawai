@@ -31,6 +31,8 @@ fn track(id: i64) -> Track {
         year: None,
         missing: false,
         decodable: true,
+        mqa: false,
+        original_sample_rate: None,
     }
 }
 

@@ -89,6 +89,8 @@ fn track(id: i64, format: AudioFormat, duration_ms: u64) -> Track {
         year: None,
         missing: false,
         decodable: true,
+        mqa: false,
+        original_sample_rate: None,
     }
 }
 
@@ -844,6 +846,8 @@ fn dsd_track(id: i64, dsd_rate: u32, duration_ms: u64) -> Track {
         year: None,
         missing: false,
         decodable: true,
+        mqa: false,
+        original_sample_rate: None,
     }
 }
 

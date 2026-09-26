@@ -35,6 +35,10 @@ export interface Track {
   year?: number | null;
   missing: boolean;
   decodable: boolean;
+  /** MQA-encoded FLAC (detected from its tags by the server). */
+  mqa?: boolean;
+  /** Sample rate of the master before MQA folding, when the file says. */
+  original_sample_rate?: number | null;
 }
 
 export interface Album {
@@ -180,6 +184,21 @@ export function formatBadge(t: Track): string {
     parts.push(`${Math.round(t.sample_rate / 100) / 10}kHz`);
   }
   return parts.join(" · ");
+}
+
+/** "MQA · 48k" (the master's rate) or just "MQA". */
+export function mqaLabel(t: Track): string {
+  const r = t.original_sample_rate;
+  return r ? `MQA · ${Math.round(r / 100) / 10}k` : "MQA";
+}
+
+/** Tooltip that says what the badge means and what the player does with it. */
+export function mqaTitle(t: Track): string {
+  const rate = t.original_sample_rate ? ` (master ${Math.round(t.original_sample_rate / 100) / 10} kHz)` : "";
+  return (
+    `MQA-encoded${rate}. It plays as ordinary FLAC everywhere. To let an MQA-capable DAC ` +
+    `decode it, turn on Bit-perfect output in Settings.`
+  );
 }
 
 export function formatDuration(ms?: number | null): string {

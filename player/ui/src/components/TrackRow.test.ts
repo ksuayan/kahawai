@@ -33,6 +33,14 @@ describe("TrackRow", () => {
     expect(mountRow({ track: makeTrack() }).attributes("data-current")).toBeUndefined();
   });
 
+  it("badges MQA tracks with the master rate, and only those", () => {
+    const w = mountRow({ track: makeTrack({ format: "flac", mqa: true, original_sample_rate: 48000 }) });
+    const badge = w.get('[data-testid="mqa-badge"]');
+    expect(badge.text()).toBe("MQA · 48k");
+    expect(badge.attributes("title")).toContain("plays as ordinary FLAC");
+    expect(mountRow({ track: makeTrack({ mqa: false }) }).find('[data-testid="mqa-badge"]').exists()).toBe(false);
+  });
+
   it("plays on double-click when playable", async () => {
     const track = makeTrack();
     const w = mountRow({ track });

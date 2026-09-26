@@ -4,6 +4,8 @@ import {
   formatBadge,
   formatDuration,
   isPlayable,
+  mqaLabel,
+  mqaTitle,
   trackTitle,
   unplayableReason,
   type Track,
@@ -56,6 +58,7 @@ function onDblClick(): void {
       </div>
     </div>
     <UiBadge>{{ formatBadge(track) }}</UiBadge>
+    <UiBadge v-if="track.mqa" variant="accent" :title="mqaTitle(track)" data-testid="mqa-badge">{{ mqaLabel(track) }}</UiBadge>
     <span class="shrink-0 tabular-nums text-dim">{{ formatDuration(track.duration_ms) }}</span>
     <TrackMenu v-if="showMenu" :track="track" />
     <slot />
