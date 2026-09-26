@@ -4,7 +4,7 @@ import { $$, mountApp, openSelect, options, pick, settle } from "../test/helpers
 import { tauri } from "../test/tauri-mock";
 import { useAnalogStore } from "../stores/analog";
 import { usePlayerStore } from "../stores/player";
-import { ANALOG_FLAVOURS, FLAVOUR_INFO } from "../types";
+import { ANALOG_FLAVOURS, FLAVOUR_INFO, LISTENING_RECIPES } from "../types";
 import AnalogSection from "./AnalogSection.vue";
 
 async function boot(state = makeState({ status: "playing", output_path: "pcm-shared" })) {
@@ -114,5 +114,22 @@ describe("Analog warmth: sag and transformer", () => {
     expect(store.b.sag).toBeCloseTo(0.31, 5);
     expect(store.b.transformer).toBeCloseTo(0.29, 5);
     expect(tauri.callsTo("set_analog").at(-1)).toMatchObject({ settings: { sag: 0.31, transformer: 0.29 } });
+  });
+});
+
+describe("Analog warmth: listening suggestions", () => {
+  it("lists every recipe with what to play and listen for, and loads one into A and B", async () => {
+    const { wrapper, store } = await boot();
+    const recipes = wrapper.get('[data-testid="recipes"]');
+    expect(recipes.text()).toContain("Listening suggestions");
+    expect(recipes.findAll("details")).toHaveLength(LISTENING_RECIPES.length);
+    expect(recipes.text()).toContain("Play:");
+    expect(recipes.text()).toContain("Listen for:");
+    await wrapper.get('[data-testid="use-el34-vs-6l6gc"]').trigger("click");
+    expect(store.a.flavour).toBe("push_pull_el34");
+    expect(store.b.flavour).toBe("push_pull_6l6gc");
+    expect(wrapper.get('[data-testid="recipe-applied"]').text()).toContain("British against American power stages");
+    expect(wrapper.get('[data-testid="slot-a-summary"]').text()).toContain("EL34 pair");
+    expect(tauri.callsTo("set_analog").at(-1)).toMatchObject({ settings: { flavour: "push_pull_el34" } });
   });
 });

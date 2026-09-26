@@ -376,6 +376,125 @@ export const DEFAULT_ANALOG_SETTINGS: AnalogSettings = {
   transformer: 0.3,
 };
 
+/** A ready-made A/B comparison: two slots to load, and what to play and listen for. */
+export interface ListeningRecipe {
+  id: string;
+  title: string;
+  /** What the comparison shows, in one sentence. */
+  idea: string;
+  /** What to play. */
+  play: string;
+  /** What to listen for. */
+  listen: string;
+  /** Settings for slot A and slot B (anything not given comes from the defaults and the flavour's typical values). */
+  a: Partial<AnalogSettings>;
+  b: Partial<AnalogSettings>;
+}
+
+const on = (flavour: AnalogFlavour, more: Partial<AnalogSettings> = {}): Partial<AnalogSettings> => ({
+  enabled: true,
+  flavour,
+  ...more,
+});
+const dry: Partial<AnalogSettings> = { enabled: false };
+
+/**
+ * Suggested comparisons. Level-match by ear with the Output slider before you
+ * judge: the louder side always sounds better.
+ */
+export const LISTENING_RECIPES: ListeningRecipe[] = [
+  {
+    id: "warmth-vs-dry",
+    title: "Warmth against nothing",
+    idea: "The plainest test: your music with and without a little 12AX7 colour.",
+    play: "Acoustic guitar, piano or a solo voice, at a normal listening level.",
+    listen: "A touch more body and a little sheen on the notes, without any change in loudness. If you cannot hear it, raise Drive to 60% and Mix to 60%.",
+    a: dry,
+    b: on("warm_triode", { drive: 0.5, mix: 0.5 }),
+  },
+  {
+    id: "jfet-vs-300b",
+    title: "Pure 2nd harmonic: JFET against 300B",
+    idea: "Two kinds of even-harmonic warmth: the JFET's is nearly pure, the 300B adds transformer weight and sag.",
+    play: "A male voice or a cello: something with a strong fundamental.",
+    listen: "The JFET is smooth and clean-sounding with a fuller tone. The 300B is richer and heavier, with a slight softening on loud notes.",
+    a: on("jfet", { drive: 0.6, mix: 0.7 }),
+    b: on("tube_300b", { drive: 0.6, mix: 0.7 }),
+  },
+  {
+    id: "el34-vs-6l6gc",
+    title: "British against American power stages",
+    idea: "Class-AB push-pull pairs: EL34s against 6L6GCs.",
+    play: "Drums and electric guitar or bass, played fairly loud.",
+    listen: "The EL34 pair is warmer, more compressed and a little gritty; the 6L6GC pair is cleaner and tighter, with a firmer low end.",
+    a: on("push_pull_el34", { drive: 0.6, mix: 0.7 }),
+    b: on("push_pull_6l6gc", { drive: 0.6, mix: 0.7 }),
+  },
+  {
+    id: "class-a-vs-class-ab",
+    title: "Class A against class AB at low level",
+    idea: "A class-A pair of 2A3s is smooth at every level; a class-AB pair has crossover grit when quiet.",
+    play: "A quiet, sparse passage: brushed drums, a solo instrument, or the tail of a fade-out.",
+    listen: "The class-AB pair adds a slightly rough, buzzy edge to soft notes that the class-A pair does not.",
+    a: on("push_pull", { drive: 0.6, mix: 1 }),
+    b: on("push_pull_el34", { drive: 0.6, mix: 1 }),
+  },
+  {
+    id: "drive-amount",
+    title: "How much drive?",
+    idea: "The same tube at two drive settings.",
+    play: "A full mix with plenty of dynamics: rock, jazz combo or an orchestra.",
+    listen: "At 30% the colour is a light glow. At 70% loud passages soften and thicken; watch for fatigue and use Output to keep the level even.",
+    a: on("warm_triode", { drive: 0.3, mix: 0.5 }),
+    b: on("warm_triode", { drive: 0.7, mix: 0.5 }),
+  },
+  {
+    id: "small-signal-tubes",
+    title: "Small-signal tubes: clean against colourful",
+    idea: "A 12AU7 (low gain, clean) against a 12AX7 (high gain, more colour).",
+    play: "Vocals and acoustic instruments with some room around them.",
+    listen: "The 12AU7 is subtle and transparent; the 12AX7 is livelier, with more sheen on voices.",
+    a: on("tube_12au7", { drive: 0.7, mix: 0.6 }),
+    b: on("warm_triode", { drive: 0.7, mix: 0.6 }),
+  },
+  {
+    id: "sag-and-iron",
+    title: "Sag and transformer on drums and bass",
+    idea: "No distortion curve at all: only the power supply sag and the transformer's bass saturation.",
+    play: "Kick drum and bass guitar, or a synth bass, played loud.",
+    listen: "With sag and transformer on, loud kicks give way slightly and then bloom back, and bass notes gain weight and grit. Off, they should sound exactly like the source.",
+    a: on("iron_sag", { sag: 0, transformer: 0, mix: 1 }),
+    b: on("iron_sag", { sag: 0.8, transformer: 0.8, mix: 1 }),
+  },
+  {
+    id: "soft-vs-hard",
+    title: "Soft clip against hard clip",
+    idea: "Solid state that rounds off gently against one that clips abruptly.",
+    play: "A loud, dense track. Cymbals and distorted guitars show it best.",
+    listen: "The soft clip thickens and rounds; the hard clip turns harsh and buzzy as soon as it clips. This is the difference between pleasant and unpleasant overload.",
+    a: on("solid_state", { drive: 0.8, mix: 0.8 }),
+    b: on("hard_transistor", { drive: 0.8, mix: 0.8 }),
+  },
+  {
+    id: "silicon-vs-germanium",
+    title: "Symmetric against lopsided clipping",
+    idea: "Silicon diodes clip both halves alike; a germanium diode against a silicon one clips one half sooner.",
+    play: "An electric guitar or a synth lead, played loud.",
+    listen: "The silicon pair sounds even and smooth; the germanium pair is rougher and more buzzy, with a fuzz-like edge.",
+    a: on("silicon_diode", { drive: 0.7, mix: 0.8 }),
+    b: on("germanium_diode", { drive: 0.7, mix: 0.8 }),
+  },
+  {
+    id: "aliasing",
+    title: "Does anti-aliasing matter?",
+    idea: "Hard-driven distortion with no protection against the full 4x oversampling with ADAA.",
+    play: "Bright material at 44.1 or 48 kHz: cymbals, hi-hats, or a high piano. Turn the volume down first.",
+    listen: "Without protection, look for a fine, metallic fizz that is not part of the instrument. With it, the top end stays clean. (At 96 kHz and above the difference is much smaller.)",
+    a: on("warm_triode", { drive: 1, mix: 1, antialias: "x1" }),
+    b: on("warm_triode", { drive: 1, mix: 1, antialias: "x4_adaa" }),
+  },
+];
+
 /** Pull every value into its allowed range (the core does the same). */
 export function clampAnalog(s: AnalogSettings): AnalogSettings {
   const n = (v: number, d: number, lo: number, hi: number): number =>

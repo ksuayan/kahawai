@@ -12,7 +12,7 @@ Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md)
 
 How to read the claims below:
 
-- **[cited]** comes from a source in section 9, found in this research pass.
+- **[cited]** comes from a source listed in the References (section 19), found in this research pass.
   I read the search summaries, not the full papers, so treat details as
   leads to confirm in Phase 0.
 - **[known]** is general audio-DSP background I am confident of but did not
@@ -196,7 +196,7 @@ with something we can listen to and a green test suite.
 
 | # | Item | Output |
 |---|---|---|
-| 0.1 | Read the key sources in section 9 in full (Koren tube models, ADAA, WDF triode, transformer emulation) | **Partly done.** Koren's equations and parameters read and used; ADAA basics implemented and measured. WDF and transformer papers not yet read in full |
+| 0.1 | Read the key sources in the References (section 19) in full (Koren tube models, ADAA, WDF triode, transformer emulation) | **Partly done.** Koren's equations and parameters read and used; ADAA basics implemented and measured. WDF and transformer papers not yet read in full |
 | 0.2 | Choose reference behaviours: target harmonic profiles (2nd/3rd/5th versus drive level) for each flavour | **Provisional.** Profiles measured from the prototype (section 10.2); still to be checked against published measurements |
 | 0.3 | Check libmksim and RT-WDF: maturity, maintenance, license, API fit | **Done.** Neither is a dependency (section 3.4) |
 | 0.4 | Measure the CPU budget | **Done** for a prototype (section 10.4) |
@@ -310,30 +310,7 @@ listening. Listening tests still decide "does it sound good".
 
 ## 9. Sources
 
-Found in this research pass (search summaries read; confirm in full in
-Phase 0.1):
-
-- Koren, "Improved vacuum tube models for SPICE simulations":
-  [part 1](https://www.normankoren.com/Audio/Tubemodspice_article.html),
-  [part 2](https://www.normankoren.com/Audio/Tubemodspice_article_2.html)
-- [Nonlinear SPICE models of vacuum-tube triodes (Electronic Design)](https://www.electronicdesign.com/technologies/analog/article/55246421/modeling-on-mondays-nonlinear-spice-models-of-vacuum-tube-triodes-part-3)
-- [Measures and models of real triodes, for the simulation of guitar amplifiers](https://www.researchgate.net/publication/281075913_Measures_and_models_of_real_triodes_for_the_simulation_of_guitar_amplifiers)
-- [A quadric surface model of vacuum tubes for virtual analog (DAFx 2023)](https://dafx.de/paper-archive/2023/DAFx23_paper_15.pdf)
-- [New family of wave-digital triode models (Aalto)](https://aaltodoc.aalto.fi/bitstreams/c94fca6e-463e-4f8e-a25d-9dce4aa4e8c8/download)
-- [Enhanced wave digital triode model for real-time tube amplifier emulation (IEEE)](https://ieeexplore.ieee.org/document/5272282/)
-- [A Csound opcode for a triode stage of a vacuum tube amplifier (DAFx 2011)](http://recherche.ircam.fr/pub/dafx11/Papers/42_e.pdf)
-- [RT-WDF: modular wave digital filter library (DAFx)](https://www.dafx.de/paper-archive/details/ilZF4akpmSxzyiusoAOolg)
-- [libmksim (Rust, MIT): real-time circuit simulation for audio DSP](https://github.com/mkaudio-company/libmksim)
-- Antialiasing: Parker, Zavalishin, Le Bivic, "Reducing the aliasing of
-  nonlinear waveshaping using continuous-time convolution" (DAFx-16);
-  Bilbao, Esqueda, Parker, Välimäki, "Antiderivative antialiasing for
-  memoryless nonlinearities" (IEEE SPL 2017); see also
-  [the companion code](https://github.com/julian-parker/DAFX-AntiAliasing),
-  [antiderivative antialiasing for stateful systems](https://www.hsu-hh.de/ant/wp-content/uploads/sites/699/2020/10/DAFx2019_paper_4.pdf),
-  and [practical considerations for ADAA](https://jatinchowdhury18.medium.com/practical-considerations-for-antiderivative-anti-aliasing-d5847167f510)
-- Transformers: [a transformer model based on the Jiles-Atherton theory](https://www.researchgate.net/publication/270465159_A_transformer_model_based_on_the_Jiles-Atherton_theory_of_ferromagnetic_hysteresis),
-  [real-time audio transformer emulation for virtual tube amplifiers](https://www.researchgate.net/publication/220057543_Real-Time_Audio_Transformer_Emulation_for_Virtual_Tube_Amplifiers)
-- [Deep learning for tube amplifier emulation](https://arxiv.org/pdf/1811.00334)
+Moved to **References** at the bottom of this document (section 19).
 
 ---
 
@@ -1086,3 +1063,190 @@ tables take about the same 20 ms to build on first use (per flavour).
   feedback. Real amplifiers differ, often a lot; these are characters, not
   amplifier simulations.
 - The JFET, diode and iron flavours are idealised.
+
+---
+
+## 17. Flavour guide (for anyone new to analog tubes)
+
+### 17.1 Terms in plain language
+
+- **Triode, pentode:** kinds of vacuum tube. A triode has three parts inside
+  (cathode, grid, plate) and a smooth, gradual response. A pentode adds two
+  more grids and gives more power and a rougher, brighter sound. A
+  *beam tetrode* (6L6, KT88) behaves like a pentode.
+- **Small-signal (preamp) tube:** a tube used to boost a weak signal, such as
+  the 12AX7. **Power tube:** one that drives a speaker, such as the 300B, EL34
+  or KT88.
+- **Gain (mu):** how much a tube amplifies. High-mu tubes (12AX7, mu about
+  100) amplify a lot; low-mu tubes (12AU7, mu about 20) amplify less and stay
+  cleaner.
+- **Harmonics:** extra notes an imperfect circuit adds at whole-number
+  multiples of each frequency. The **2nd harmonic** is an octave up and sounds
+  warm and full; the **3rd** is an octave and a fifth up and sounds harder and
+  more edgy; higher ones sound harsh. **Even** harmonics (2nd, 4th) are
+  associated with the tube "warmth", **odd** ones (3rd, 5th) with a firmer or
+  grittier sound.
+- **Single-ended vs push-pull:** a single-ended stage uses one tube and is
+  lopsided (lots of 2nd harmonic). A push-pull stage uses two tubes working on
+  opposite halves of the wave, which cancels the even harmonics and leaves the
+  odd ones, and can deliver more power.
+- **Class A vs class AB:** in class A a tube conducts all the time: smooth at
+  every level. In class AB (used in push-pull power stages) each tube rests
+  near cut-off and hands over to the other one near zero, which can leave a
+  small rough patch at very low levels ("crossover distortion").
+- **Sag:** in a real amplifier, loud passages pull the power supply down for a
+  moment, which softens the peaks and then recovers. It gives tube amps a
+  "breathing" feel.
+- **Transformer colour:** output transformers saturate at the bottom of the
+  frequency range when driven hard, which thickens and slightly distorts the
+  bass without touching the mids and highs.
+- **Drive, mix:** how hard the signal is pushed into the effect, and how much
+  of the effect is blended with the untouched signal.
+- **Aliasing, oversampling, ADAA:** digital distortion creates frequencies
+  that the sampled signal cannot hold, and they fold back as harsh, unrelated
+  tones (aliasing). Oversampling (processing at a higher rate) and ADAA
+  (a mathematical correction) keep that out. You should not hear it working.
+
+### 17.2 The flavours, in menu order
+
+| Flavour | What it is like |
+|---|---|
+| 12AX7 | The classic guitar-amp and preamp tube. Soft, even-harmonic warmth. The default. |
+| 12AX7A (Sylvania) | Another measured 12AX7: a touch more even harmonic at low levels. |
+| 12AT7 (ECC81) | A little cleaner than the 12AX7, firmer and more open. |
+| 12AU7 (ECC82) | Low gain, low distortion. The mildest tube colour. |
+| 12AY7 | Between the 12AU7 and 12AT7: clean, with a gentle lift in the 2nd. |
+| 6SN7 | Smooth, full-bodied; a favourite for line stages in hi-fi. |
+| 6SL7GT | Very clean until pushed, then turns over abruptly. |
+| 6DJ8 (ECC88) | Taut and detailed, a low-noise tube. |
+| 300B | The classic single-ended power triode: rich 2nd harmonic, gentle overload, transformer and sag. |
+| 2A3 | Like the 300B, a little lighter and quicker. |
+| EL84 (single-ended) | A class-A pentode: brighter and grittier than a triode, with both even and odd harmonics. |
+| Push-pull tubes (2A3 pair) | Fuller and firmer: even harmonics cancel, odd ones and compression take over as it is driven. |
+| Push-pull EL34 | The British power stage: odd harmonics, firm compression, a touch of low-level grit. |
+| Push-pull 6L6GC | The American power stage: cleaner and stiffer than EL34s. |
+| Push-pull KT88 | Big, tight, high-power: plenty of headroom. |
+| Solid state (soft clip) | Symmetric and clean with a soft odd-harmonic edge, like a transformer-coupled console preamp. |
+| JFET | Nearly pure 2nd harmonic, almost no 3rd: a very smooth warmth. |
+| Silicon diode clipper | A logarithmic soft clip: odd harmonics that build gradually. |
+| Germanium diode clipper | One half of the wave clips earlier than the other: rougher, fuzzier. |
+| Hard transistor | Clean until it clips, then harsh. For effect, not fidelity. |
+| Transformer and sag only | No distortion curve: just the transformer's bass colour and the supply sag. |
+
+These descriptions are the same one-liners shown under the Flavour menu in
+Settings. They describe the *modelled stage*, not a specific product.
+
+---
+
+## 18. Listening suggestions
+
+Ten ready-made comparisons. In Settings, under **Analog warmth**, open
+**Listening suggestions** and press **Set up A and B**: it loads both slots
+and starts you on A. Then play the suggested music and switch.
+
+**Three rules for a fair comparison**
+
+1. **Match the level.** Use the Output slider (plus or minus 6 dB) until A and
+   B are equally loud. The louder one nearly always sounds better, and this is
+   the most common way to fool yourself.
+2. **Switch while the music plays,** on the same passage, and listen for a
+   few seconds each way. Do it several times.
+3. **Trust quiet, careful listening over big settings.** If you cannot hear a
+   difference, raise Drive and Mix to hear what the effect *is*, then bring
+   them back. For a blind check, have someone else switch A and B without
+   telling you which is which.
+
+| # | Recipe | A | B | Play | Listen for |
+|---|---|---|---|---|---|
+| 1 | Warmth against nothing | Off (dry) | 12AX7, drive 50%, mix 50% | Acoustic guitar, piano or a solo voice | A touch more body and sheen, no change in loudness |
+| 2 | Pure 2nd harmonic: JFET against 300B | JFET, drive 60%, mix 70% | 300B, drive 60%, mix 70% | A male voice or cello | JFET: smooth, clean-sounding fullness. 300B: richer and heavier, softening on loud notes |
+| 3 | British against American power stages | EL34 pair, drive 60%, mix 70% | 6L6GC pair, drive 60%, mix 70% | Drums, electric guitar or bass, fairly loud | EL34: warmer, more compressed, a little gritty. 6L6GC: cleaner, tighter, firmer low end |
+| 4 | Class A against class AB at low level | 2A3 push-pull, drive 60%, mix 100% | EL34 pair, drive 60%, mix 100% | A quiet, sparse passage: brushed drums, a solo instrument, a fade-out | Class AB adds a rough, buzzy edge to soft notes that class A does not |
+| 5 | How much drive? | 12AX7, drive 30%, mix 50% | 12AX7, drive 70%, mix 50% | A full mix with dynamics | 30%: a light glow. 70%: loud passages soften and thicken; watch for fatigue |
+| 6 | Small-signal tubes: clean against colourful | 12AU7, drive 70%, mix 60% | 12AX7, drive 70%, mix 60% | Vocals and acoustic instruments | 12AU7: subtle, transparent. 12AX7: livelier, more sheen on voices |
+| 7 | Sag and transformer on drums and bass | Transformer and sag only, both 0%, mix 100% | Transformer and sag only, both 80%, mix 100% | Kick drum and bass, loud | Loud kicks give way slightly and bloom back; bass gains weight and grit. Off should sound like the source |
+| 8 | Soft clip against hard clip | Solid state, drive 80%, mix 80% | Hard transistor, drive 80%, mix 80% | A loud, dense track; cymbals and distorted guitars | Soft: thickens and rounds. Hard: harsh and buzzy as soon as it clips |
+| 9 | Symmetric against lopsided clipping | Silicon diodes, drive 70%, mix 80% | Germanium diodes, drive 70%, mix 80% | An electric guitar or synth lead, loud | Silicon: even and smooth. Germanium: rougher, fuzz-like |
+| 10 | Does anti-aliasing matter? | 12AX7, drive 100%, mix 100%, 1x no protection | Same, 4x + ADAA | Bright material at 44.1 or 48 kHz: cymbals, hi-hats, high piano (turn the volume down first) | Without protection, a fine metallic fizz that is not in the music. With it, a clean top end. (At 96 kHz and above the difference is small.) |
+
+Notes:
+
+- Recipe 1 is the best first test. Recipe 10 is a good way to hear what the
+  engineering in sections 12 to 14 does.
+- Sag and Transformer take each flavour's typical values (section 15); the
+  recipes only override them in recipe 7.
+- The recipes and the button live in the app
+  ([types.ts](player/ui/src/types.ts), `LISTENING_RECIPES`); a test checks that
+  every recipe title appears in this section.
+
+---
+
+## 19. References
+
+How each was used: **read** = read in full or in its main parts; **summary** =
+I read a summary or excerpt only (not the whole paper); **search** = found in
+search results and not opened. Reading depth matters: claims that lean on a
+"summary" or "search" entry should be confirmed before they are relied on.
+
+### Tube models
+
+- Norman Koren, "Improved vacuum tube models for SPICE simulations" (Glass
+  Audio, 1996):
+  [part 1](https://www.normankoren.com/Audio/Tubemodspice_article.html) (read:
+  equations and the 12AX7, 12AU7 and 6L6CG parameter table),
+  [part 2](https://www.normankoren.com/Audio/Tubemodspice_article_2.html) (read:
+  the 12AX7 and 6550 parameter lines).
+- [Koren's tube library](https://polonai.se/audiofreaks/Koren_Tubes.txt) (read:
+  the datasheet-fitted parameters for every tube in sections 15 and 16, and
+  the `TRIODE` and `PENTODE1` equations; an LTspice-format library derived from
+  his work, hosted by a third party).
+- [Nonlinear SPICE models of vacuum-tube triodes, Electronic Design](https://www.electronicdesign.com/technologies/analog/article/55246421/modeling-on-mondays-nonlinear-spice-models-of-vacuum-tube-triodes-part-3) (search).
+- [Measures and models of real triodes, for the simulation of guitar amplifiers](https://www.researchgate.net/publication/281075913_Measures_and_models_of_real_triodes_for_the_simulation_of_guitar_amplifiers) (search).
+- [A quadric surface model of vacuum tubes for virtual analog (DAFx 2023)](https://dafx.de/paper-archive/2023/DAFx23_paper_15.pdf) (search).
+
+### Wave digital filters and circuit simulation
+
+- [New family of wave-digital triode models (Aalto)](https://aaltodoc.aalto.fi/bitstreams/c94fca6e-463e-4f8e-a25d-9dce4aa4e8c8/download) (search).
+- [Enhanced wave digital triode model for real-time tube amplifier emulation (Pakarinen and Karjalainen, IEEE)](https://ieeexplore.ieee.org/document/5272282/) (search).
+- [A Csound opcode for a triode stage of a vacuum tube amplifier (DAFx 2011)](http://recherche.ircam.fr/pub/dafx11/Papers/42_e.pdf) (search).
+- [RT-WDF: a modular wave digital filter library (DAFx)](https://www.dafx.de/paper-archive/details/ilZF4akpmSxzyiusoAOolg) (search; the
+  [repository](https://github.com/RT-WDF/rt-wdf_lib): metadata read, no license file, last pushed 2017).
+- [libmksim](https://github.com/mkaudio-company/libmksim) (read: README summary
+  and repository metadata; MIT, created 2026-03-08).
+
+### Antialiasing
+
+- Julian Parker, Vadim Zavalishin and Efflam Le Bivic, "Reducing the aliasing
+  of nonlinear waveshaping using continuous-time convolution" (DAFx-16)
+  (search), with the
+  [companion code](https://github.com/julian-parker/DAFX-AntiAliasing)
+  (metadata only; no license).
+- Stefan Bilbao, Fabián Esqueda, Julian Parker and Vesa Välimäki,
+  "Antiderivative antialiasing for memoryless nonlinearities" (IEEE Signal
+  Processing Letters, 2017) (search).
+- [Antiderivative antialiasing for stateful systems (DAFx 2019)](https://www.hsu-hh.de/ant/wp-content/uploads/sites/699/2020/10/DAFx2019_paper_4.pdf) (search).
+- [Jatin Chowdhury's ADAA experiments](https://github.com/jatinchowdhury18/ADAA)
+  (metadata only; BSD-3-Clause), and his article
+  [Practical considerations for antiderivative anti-aliasing](https://jatinchowdhury18.medium.com/practical-considerations-for-antiderivative-anti-aliasing-d5847167f510)
+  (search; the page returned an access error when opened).
+
+### Transformers and other approaches
+
+- [A transformer model based on the Jiles-Atherton theory of ferromagnetic hysteresis](https://www.researchgate.net/publication/270465159_A_transformer_model_based_on_the_Jiles-Atherton_theory_of_ferromagnetic_hysteresis) (search).
+- [Real-time audio transformer emulation for virtual tube amplifiers](https://www.researchgate.net/publication/220057543_Real-Time_Audio_Transformer_Emulation_for_Virtual_Tube_Amplifiers) (search).
+- [Deep learning for tube amplifier emulation](https://arxiv.org/pdf/1811.00334) (search).
+
+### Not sourced here
+
+- **Published operating points** used as cross-checks (300B about −62 V at
+  300 V and 65 mA; 2A3 about −45 V at 250 V and 60 mA; EL84 single-ended
+  −7.3 V at 250 V, 250 V screen and 48 mA) come from general knowledge of
+  standard datasheet operating points, not from a link in this list. They are
+  worth checking against the manufacturers' datasheets.
+- **Typical stage values** (supply voltages, load resistances, idle
+  currents, transformer loads) are common textbook values, not from a
+  particular amplifier.
+- **The JFET, diode and hard-clip curves** are idealised closed forms.
+- **Harmonic characteristics of tube stages** (even against odd, class A
+  against class AB) are standard audio-electronics background, confirmed
+  here only by our own measurements of the models (sections 10 to 16).

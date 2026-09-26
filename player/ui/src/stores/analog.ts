@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { getDspSettings, setAnalog } from "../tauri";
-import { clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO, type AnalogFlavour, type AnalogSettings } from "../types";
+import { clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO, type AnalogFlavour, type AnalogSettings, type ListeningRecipe } from "../types";
 
 export type Slot = "a" | "b";
 const KEY = "kahawai-player.analog-ab";
@@ -85,6 +85,21 @@ export const useAnalogStore = defineStore("analog", () => {
     update(slot, { flavour, sag: info.sag, transformer: info.transformer });
   }
 
+  /** The full settings a recipe means for one slot: defaults, then the flavour's typical sag/transformer, then the recipe's own values. */
+  function recipeSlot(part: Partial<AnalogSettings>): AnalogSettings {
+    const flavour = part.flavour ?? DEFAULT_ANALOG_SETTINGS.flavour;
+    const info = FLAVOUR_INFO[flavour];
+    return clampAnalog({ ...DEFAULT_ANALOG_SETTINGS, sag: info.sag, transformer: info.transformer, ...part });
+  }
+
+  /** Load a ready-made comparison into A and B and start on A. */
+  function applyRecipe(recipe: ListeningRecipe): void {
+    a.value = recipeSlot(recipe.a);
+    b.value = recipeSlot(recipe.b);
+    active.value = "a";
+    push();
+  }
+
   /** Listen to a slot: its settings become the engine's. */
   function select(slot: Slot): void {
     if (active.value === slot) return;
@@ -102,5 +117,5 @@ export const useAnalogStore = defineStore("analog", () => {
     update(to, { ...slots[from].value });
   }
 
-  return { a, b, active, current, loaded, init, update, setFlavour, select, toggle, copy };
+  return { a, b, active, current, loaded, init, update, setFlavour, applyRecipe, select, toggle, copy };
 });

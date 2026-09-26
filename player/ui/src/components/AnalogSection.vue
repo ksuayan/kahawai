@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useAnalogStore, type Slot } from "../stores/analog";
 import { usePlayerStore } from "../stores/player";
 import {
   ANALOG_FLAVOURS,
   ANTI_ALIAS_CHOICES,
   FLAVOUR_INFO,
+  LISTENING_RECIPES,
   type AnalogFlavour,
   type AnalogSettings,
   type AntiAliasChoice,
@@ -46,6 +47,14 @@ const pct = (v: number): number => Math.round(v * 100);
 function summary(s: AnalogSettings): string {
   if (!s.enabled) return "Off (dry signal)";
   return `${FLAVOUR_INFO[s.flavour].short} · drive ${pct(s.drive)}% · mix ${pct(s.mix)}%`;
+}
+
+const appliedRecipe = ref<string | null>(null);
+function useRecipe(id: string): void {
+  const r = LISTENING_RECIPES.find((x) => x.id === id);
+  if (!r) return;
+  analog.applyRecipe(r);
+  appliedRecipe.value = r.title;
 }
 
 const status = computed(() => (player.analogPlan ? `Now playing with ${player.analogPlan}.` : "The stage is off, or nothing is playing on the shared output."));
@@ -206,6 +215,27 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
               Copy {{ s.toUpperCase() }} to {{ s === "a" ? "B" : "A" }}
             </UiButton>
           </div>
+        </div>
+      </div>
+      <div class="mt-5" data-testid="recipes">
+        <h4 class="heading-3 m-0 mb-1">Listening suggestions</h4>
+        <p class="prose-text mb-2 mt-0 text-dim">
+          Ready-made comparisons. Choose one to load it into A and B, play the suggested kind of music, and switch. Match the
+          level with the Output slider first: the louder side always sounds better.
+        </p>
+        <p v-if="appliedRecipe" class="m-0 mb-2 text-xs text-ok" role="status" data-testid="recipe-applied">
+          Loaded "{{ appliedRecipe }}" into A and B. You are listening to A.
+        </p>
+        <div class="flex flex-col gap-2">
+          <details v-for="r in LISTENING_RECIPES" :key="r.id" class="rounded-lg border border-line bg-surface" :data-testid="`recipe-${r.id}`">
+            <summary class="cursor-pointer select-none px-3 py-2 font-semibold">{{ r.title }}</summary>
+            <div class="flex flex-col gap-1.5 px-3 pb-3 text-dim">
+              <p class="m-0">{{ r.idea }}</p>
+              <p class="m-0"><span class="text-fg">Play:</span> {{ r.play }}</p>
+              <p class="m-0"><span class="text-fg">Listen for:</span> {{ r.listen }}</p>
+              <div><UiButton :data-testid="`use-${r.id}`" @click="useRecipe(r.id)">Set up A and B</UiButton></div>
+            </div>
+          </details>
         </div>
       </div>
       <UiHint spaced tone="faint">

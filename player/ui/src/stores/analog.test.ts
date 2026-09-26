@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ANALOG_FLAVOURS, clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO } from "../types";
+import { ANALOG_FLAVOURS, ANTI_ALIAS_CHOICES, clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO, LISTENING_RECIPES } from "../types";
 import { tauri } from "../test/tauri-mock";
 import { useAnalogStore } from "./analog";
 
@@ -119,5 +119,50 @@ describe("flavour list stays in step with the Rust core", () => {
     const names = [...rust.matchAll(/\(AnalogFlavour::\w+, "([a-z0-9_]+)"\)/g)].map((m) => m[1]);
     expect(names.length).toBeGreaterThan(0);
     expect([...ANALOG_FLAVOURS].sort()).toEqual([...names].sort());
+  });
+});
+
+describe("listening recipes", () => {
+  it("loads both slots (with the flavours' typical values), starts on A, and sends A to the engine", () => {
+    const s = useAnalogStore();
+    const r = LISTENING_RECIPES.find((x) => x.id === "jfet-vs-300b")!;
+    s.select("b");
+    tauri.calls.length = 0;
+    s.applyRecipe(r);
+    expect(s.active).toBe("a");
+    expect(s.a).toMatchObject({ enabled: true, flavour: "jfet", drive: 0.6, mix: 0.7, sag: 0, transformer: 0 });
+    expect(s.b).toMatchObject({ enabled: true, flavour: "tube_300b", drive: 0.6, mix: 0.7, sag: 0.4, transformer: 0.5 });
+    expect(sent().at(-1)).toMatchObject({ flavour: "jfet" });
+  });
+
+  it("'warmth against nothing' puts a dry signal in A", () => {
+    const s = useAnalogStore();
+    s.applyRecipe(LISTENING_RECIPES[0]);
+    expect(s.a.enabled).toBe(false);
+    expect(s.b.enabled).toBe(true);
+    expect(sent().at(-1)).toMatchObject({ enabled: false });
+  });
+
+  it("every recipe is complete and uses only real flavours and plans", () => {
+    expect(LISTENING_RECIPES.length).toBeGreaterThanOrEqual(8);
+    expect(new Set(LISTENING_RECIPES.map((r) => r.id)).size).toBe(LISTENING_RECIPES.length);
+    for (const r of LISTENING_RECIPES) {
+      expect(r.title && r.idea && r.play && r.listen).toBeTruthy();
+      for (const part of [r.a, r.b]) {
+        if (part.flavour) expect(ANALOG_FLAVOURS).toContain(part.flavour);
+        if (part.antialias) expect(ANTI_ALIAS_CHOICES).toContain(part.antialias);
+      }
+    }
+  });
+});
+
+describe("the design document lists the recipes", () => {
+  it("names every listening recipe in Analog-Emulation.md", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const doc = readFileSync(join(__dirname, "../../../../Analog-Emulation.md"), "utf8");
+    for (const r of LISTENING_RECIPES) expect(doc).toContain(r.title);
+    expect(doc).toMatch(/## 18\. Listening suggestions/);
+    expect(doc.trimEnd().split("\n## ").pop()).toMatch(/^19\. References/); // References is the last section
   });
 });
