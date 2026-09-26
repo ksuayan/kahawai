@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { TriangleAlert } from "lucide-vue-next";
 import { computed, ref } from "vue";
+import { useAbxStore } from "../stores/abx";
 import { useAnalogStore, type Slot } from "../stores/analog";
 import { usePlayerStore } from "../stores/player";
 import {
@@ -25,6 +26,7 @@ import SettingsSection from "./SettingsSection.vue";
  * chooses which one plays. Edits to the slot you are hearing apply live.
  */
 const analog = useAnalogStore();
+const abx = useAbxStore();
 const player = usePlayerStore();
 
 const unsupported = computed(() => player.isExclusive);
@@ -85,6 +87,19 @@ function match(from: Slot, to: Slot): void {
       : `Set the Output of ${to.toUpperCase()} to ${dB(analog[to].output_db)} dB (${dB(r.changed_db)} dB)${r.clamped ? "; that is the limit of the slider, so it may still differ" : ""}. Play a few seconds to confirm.`;
 }
 
+// --- blind test -------------------------------------------------------------
+const trialOptions: UiSelectOption[] = [5, 10, 15, 20].map((n) => ({ value: String(n), label: String(n) }));
+const trialCount = ref(10);
+const startAnyway = ref(false);
+const canStartBlind = computed(() => abx.slotsDiffer && (abx.levelMatched || startAnyway.value));
+const blindCheck = computed(() => {
+  if (!abx.slotsDiffer) return "A and B are identical: change one of them first.";
+  if (abx.levelDifference === null) return "Measure both slots first (play music with A, then with B) so the levels can be matched.";
+  if (!abx.levelMatched) return `The levels differ by ${abx.levelDifference.toFixed(1)} dB. Use Match B to A first: a louder side gives itself away.`;
+  return `Levels are matched (within ${abx.levelDifference.toFixed(1)} dB).`;
+});
+const heardLabel = computed(() => abx.heard.toUpperCase());
+
 const status = computed(() => (player.analogPlan ? `Now playing with ${player.analogPlan}.` : "The stage is off, or nothing is playing on the shared output."));
 </script>
 
@@ -101,7 +116,74 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
     </p>
 
     <div :class="unsupported ? 'pointer-events-none opacity-40 grayscale' : ''" :inert="unsupported || undefined" data-testid="analog-editor">
-      <div class="mb-3 flex flex-wrap items-center gap-3" role="group" aria-label="Listening to">
+      <div v-if="abx.running" class="mb-3 rounded-lg border border-accent bg-surface p-3" data-testid="blind-test">
+        <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <span class="heading-3">Blind test</span>
+          <span class="text-dim tabular-nums" data-testid="blind-progress">Trial {{ abx.answered + 1 }} of {{ abx.total }}</span>
+        </div>
+        <p class="m-0 mb-3 text-xs text-dim">
+          A and B are the two you set up. X is secretly one of them. Switch between A, B and X as often as you like (keys
+          A, B and X), then say which one X is. Settings and levels are hidden until the end.
+        </p>
+        <div class="mb-3 flex flex-wrap items-center gap-3" role="group" aria-label="Listening to">
+          <span class="text-dim">Hearing</span>
+          <div class="inline-flex overflow-hidden rounded-md border border-line">
+            <button
+              v-for="h in (['a', 'b', 'x'] as const)"
+              :key="h"
+              type="button"
+              class="min-w-[72px] border-0 px-4 py-1.5 font-semibold transition-colors"
+              :class="abx.heard === h ? 'bg-accent text-white' : 'bg-surface text-dim hover:bg-hover hover:text-fg'"
+              :aria-pressed="abx.heard === h"
+              :aria-keyshortcuts="h.toUpperCase()"
+              :data-testid="`blind-hear-${h}`"
+              @click="abx.hear(h)"
+            >
+              {{ h.toUpperCase() }}
+            </button>
+          </div>
+          <span class="text-xs text-faint" data-testid="blind-heard">Hearing {{ heardLabel }}</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-dim">X is</span>
+          <UiButton data-testid="blind-answer-a" @click="abx.answer('a')">A</UiButton>
+          <UiButton data-testid="blind-answer-b" @click="abx.answer('b')">B</UiButton>
+          <UiButton class="ml-auto" data-testid="blind-cancel" @click="abx.cancel()">Cancel test</UiButton>
+        </div>
+      </div>
+
+      <div v-else-if="abx.finished" class="mb-3 rounded-lg border border-line bg-surface p-3" data-testid="blind-result">
+        <span class="heading-3">Blind test result</span>
+        <p class="m-0 my-2" data-testid="blind-verdict">{{ abx.verdict }}</p>
+        <ol class="m-0 mb-2 list-none p-0 text-xs text-dim" data-testid="blind-answers">
+          <li v-for="(t, i) in abx.revealed" :key="i" class="tabular-nums">
+            Trial {{ i + 1 }}: X was {{ t.truth.toUpperCase() }}, you said {{ t.guess.toUpperCase() }}
+            <span :class="t.truth === t.guess ? 'text-ok' : 'text-danger-fg'">{{ t.truth === t.guess ? "correct" : "wrong" }}</span>
+          </li>
+        </ol>
+        <UiButton data-testid="blind-dismiss" @click="abx.dismiss()">Done</UiButton>
+      </div>
+
+      <div v-else class="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface p-3" data-testid="blind-start">
+        <span class="heading-3">Blind test</span>
+        <label class="flex items-center gap-2 text-dim">
+          Trials
+          <UiSelect
+            aria-label="Number of trials"
+            trigger-class="w-[80px]"
+            :model-value="String(trialCount)"
+            :options="trialOptions"
+            @update:model-value="(v) => (trialCount = Number(v))"
+          />
+        </label>
+        <UiButton variant="primary" :disabled="!canStartBlind" data-testid="blind-start-button" @click="abx.start(trialCount)">Start blind test</UiButton>
+        <label v-if="abx.slotsDiffer && !abx.levelMatched" class="flex items-center gap-2 text-xs text-dim">
+          <input v-model="startAnyway" type="checkbox" data-testid="blind-anyway" /> Start anyway (results will be unreliable)
+        </label>
+        <p class="m-0 w-full text-xs text-dim" data-testid="blind-check">{{ blindCheck }}</p>
+      </div>
+
+      <div v-if="!abx.running" class="mb-3 flex flex-wrap items-center gap-3" role="group" aria-label="Listening to">
         <span class="text-dim">Listening to</span>
         <div class="inline-flex overflow-hidden rounded-md border border-line">
           <button
@@ -122,9 +204,9 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
         <UiButton data-testid="ab-toggle" title="Switch A/B (press X)" aria-keyshortcuts="X" @click="analog.toggle()">Switch A/B</UiButton>
         <span class="text-xs text-faint">Keys: <kbd class="font-mono">A</kbd> <kbd class="font-mono">B</kbd> <kbd class="font-mono">X</kbd>, from any screen</span>
       </div>
-      <p class="m-0 mb-3 text-xs text-dim" data-testid="analog-status">{{ status }}</p>
+      <p v-if="!abx.running" class="m-0 mb-3 text-xs text-dim" data-testid="analog-status">{{ status }}</p>
 
-      <div class="mb-3 rounded-lg border border-line bg-surface p-3" data-testid="level-meter">
+      <div v-if="!abx.running" class="mb-3 rounded-lg border border-line bg-surface p-3" data-testid="level-meter">
         <div class="mb-1 flex flex-wrap items-baseline justify-between gap-2">
           <span class="heading-3">Level meter</span>
           <span class="text-xs text-dim">what the stage does to the loudness of what you are hearing</span>
@@ -173,7 +255,7 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
         <p v-if="matchNote" class="m-0 mt-2 text-xs text-dim" role="status" data-testid="match-note">{{ matchNote }}</p>
       </div>
 
-      <div class="grid grid-cols-1 gap-3 min-[900px]:grid-cols-2">
+      <div v-if="!abx.running" class="grid grid-cols-1 gap-3 min-[900px]:grid-cols-2" data-testid="slots">
         <div
           v-for="s in slots"
           :key="s"
@@ -297,7 +379,7 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
           </div>
         </div>
       </div>
-      <div class="mt-5" data-testid="recipes">
+      <div v-if="!abx.running" class="mt-5" data-testid="recipes">
         <h4 class="heading-3 m-0 mb-1">Listening suggestions</h4>
         <p class="prose-text mb-2 mt-0 text-dim">
           Ready-made comparisons. Choose one to load it into A and B, play the suggested kind of music, and switch. Match the

@@ -824,19 +824,57 @@ right arithmetic and limits; the panel shows all of it. While building it I
 found and fixed a real bug: the reading included the stage's fade-in, which
 made the first second wrong.
 
-### 13.8 Not done
+### 13.8 Blind test (ABX)
 
-- **A blind-test mode.** Design, not built: an ABX-style test. A and B stay
-  visible as the two references; a hidden **X** is randomly A or B on each
-  trial (kept in memory, not shown). You may switch among A, B and X as much as
-  you like (X is a third key, or a button), then answer "X is A" or "X is B".
-  After, say, ten trials it reports how many you got right and how likely
-  that is by chance (a binomial test). While a test is running the panel hides
-  the slot settings, the level readings and the engine status line (which would
-  give the plan away) and stops the keys and toasts from naming anything. The
-  engine needs no change: the UI just chooses which slot to send. It should
-  require a level match first (now possible with the meter above). Rough
-  size: a day.
+Code: [stores/abx.ts](player/ui/src/stores/abx.ts) and the "Blind test" block
+in [AnalogSection.vue](player/ui/src/components/AnalogSection.vue). It needs no
+engine change: hearing X simply sends the hidden slot's settings, exactly as
+switching to that slot would.
+
+**How it works**
+
+1. Set up A and B (a recipe, or your own), play music with A and then B, and
+   press **Match B to A** so the levels agree.
+2. Choose the number of **trials** (5, 10, 15 or 20) and press **Start blind
+   test**.
+3. A and B stay known. **X** is secretly one of them, picked at random for each
+   trial. Switch among **A**, **B** and **X** as often as you like (buttons, or
+   the keys A, B and X: X now means "hear X").
+4. Answer **X is A** or **X is B**. The next trial starts on X with a new
+   random pick.
+5. At the end you get the score and the chance of doing that well by guessing
+   (a one-sided binomial test at 50%), a plain-language verdict, and a list of
+   every trial showing what X really was.
+
+**Fairness rules**
+
+- **The test will not start unless the two slots differ and the measured
+  levels agree within 0.5 dB.** If they do not, it says why and points you to
+  Match B to A. A checkbox, "Start anyway (results will be unreliable)", lets
+  you override it.
+- **Nothing gives X away while a test runs.** The panel hides the slot
+  settings, the level meter, the engine status line (which names the plan) and
+  the listening suggestions; it never shows which slot is playing. The
+  shortcut messages say only "Blind test: hearing X" (or A or B). The slots
+  cannot be edited during a test. The hidden choice is not held in the
+  reactive state the panel reads.
+- **The random choice** uses the browser's random source, a fair coin per
+  trial.
+
+**Reading the result.** With 10 trials, 9 right has about a 1% chance by
+guessing and 8 right about 5%, so 9 or 10 is convincing and 7 or fewer is not.
+A test that "cannot show you can hear the difference" does not prove you
+cannot; it means this run was not enough. More trials, more careful listening
+(quiet room, the recommended material, a passage that shows the effect) and
+higher drive settings all help.
+
+**Not done**
+
+- No automatic check that the level match holds for the passage playing during
+  the test (the meter measures the music you played earlier).
+- The result is not saved; close it and it is gone.
+- It does not pause or restart the music for you: keep a passage looping, or
+  start it before the test.
 
 ---
 
@@ -1246,8 +1284,8 @@ and starts you on A. Then play the suggested music and switch.
    few seconds each way. Do it several times.
 3. **Trust quiet, careful listening over big settings.** If you cannot hear a
    difference, raise Drive and Mix to hear what the effect *is*, then bring
-   them back. For a blind check, have someone else switch A and B without
-   telling you which is which.
+   them back. For a real test, use the built-in **blind test** (section 13.8):
+   it hides which is which, and it will not start until the levels match.
 
 | # | Recipe | A | B | Play | Listen for |
 |---|---|---|---|---|---|

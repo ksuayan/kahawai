@@ -120,8 +120,8 @@ export const useAnalogStore = defineStore("analog", () => {
   }
 
   /** Listen to a slot: its settings become the engine's. */
-  function select(slot: Slot): void {
-    if (active.value === slot) return;
+  function select(slot: Slot, force = false): void {
+    if (active.value === slot && !force) return;
     active.value = slot;
     push();
   }

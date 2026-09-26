@@ -194,3 +194,79 @@ describe("Analog warmth: level meter", () => {
     expect(wrapper.get('[role="slider"][aria-label="Output B"]').attributes("aria-valuenow")).toBe("-2.5");
   });
 });
+
+describe("Analog warmth: blind test", () => {
+  const ready = async () => {
+    const b = await boot(makeState({ status: "playing", output_path: "pcm-shared" }));
+    b.store.update("b", { flavour: "tube_300b" });
+    b.store.measured.b = 0.1;
+    await settle();
+    return b;
+  };
+  const startBlind = async (wrapper: Awaited<ReturnType<typeof boot>>["wrapper"]) => {
+    await wrapper.get('[data-testid="blind-start-button"]').trigger("click");
+    await settle();
+  };
+
+  it("can only start when the two slots differ and are level, unless you insist", async () => {
+    const { wrapper, store } = await boot();
+    // Fresh: B unmeasured.
+    expect(wrapper.get('[data-testid="blind-start-button"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="blind-check"]').text()).toContain("Measure both slots");
+    store.measured.b = 2.0; // measured but 2 dB louder
+    await settle();
+    expect(wrapper.get('[data-testid="blind-check"]').text()).toContain("levels differ by 2.0 dB");
+    expect(wrapper.get('[data-testid="blind-start-button"]').attributes("disabled")).toBeDefined();
+    await wrapper.get('[data-testid="blind-anyway"]').setValue(true);
+    expect(wrapper.get('[data-testid="blind-start-button"]').attributes("disabled")).toBeUndefined();
+    store.measured.b = 0.1;
+    await settle();
+    expect(wrapper.get('[data-testid="blind-check"]').text()).toContain("Levels are matched");
+  });
+
+  it("hides everything that would give X away while it runs", async () => {
+    const { wrapper } = await ready();
+    expect(wrapper.find('[data-testid="slots"]').exists()).toBe(true);
+    await startBlind(wrapper);
+    expect(wrapper.get('[data-testid="blind-test"]').text()).toContain("Trial 1 of 10");
+    for (const hidden of ["slots", "level-meter", "recipes", "analog-status", "ab-a", "ab-b", "ab-toggle"]) {
+      expect(wrapper.find(`[data-testid="${hidden}"]`).exists(), hidden).toBe(false);
+    }
+    // The panel names no flavour and shows no settings (the intro text above lists tubes generically).
+    const panel = wrapper.get('[data-testid="blind-test"]').text();
+    expect(panel).not.toMatch(/300B|JFET|12AX7|drive|mix|dB/i);
+  });
+
+  it("lets you hear A, B and X, and answer; then shows the score and the reveal", async () => {
+    const { wrapper, store } = await ready();
+    await openSelect(document.body.querySelector('[aria-label="Number of trials"]') as HTMLElement);
+    pick(options()[0]); // 5
+    await settle();
+    await startBlind(wrapper);
+    expect(wrapper.get('[data-testid="blind-progress"]').text()).toContain("of 5");
+    await wrapper.get('[data-testid="blind-hear-x"]').trigger("click");
+    expect(wrapper.get('[data-testid="blind-hear-x"]').attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get('[data-testid="blind-heard"]').text()).toBe("Hearing X");
+    expect(store.a.enabled).toBe(false); // untouched: the test never edits the slots
+    for (let i = 0; i < 5; i++) {
+      await wrapper.get('[data-testid="blind-answer-a"]').trigger("click");
+    }
+    await settle();
+    expect(wrapper.find('[data-testid="blind-test"]').exists()).toBe(false);
+    const result = wrapper.get('[data-testid="blind-result"]');
+    expect(result.get('[data-testid="blind-verdict"]').text()).toContain("of 5 right");
+    expect(result.findAll("li")).toHaveLength(5);
+    expect(result.text()).toMatch(/X was [AB], you said A/);
+    await wrapper.get('[data-testid="blind-dismiss"]').trigger("click");
+    expect(wrapper.find('[data-testid="blind-result"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="slots"]').exists()).toBe(true); // everything is back
+  });
+
+  it("can be cancelled", async () => {
+    const { wrapper } = await ready();
+    await startBlind(wrapper);
+    await wrapper.get('[data-testid="blind-cancel"]').trigger("click");
+    expect(wrapper.find('[data-testid="blind-test"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="slots"]').exists()).toBe(true);
+  });
+});

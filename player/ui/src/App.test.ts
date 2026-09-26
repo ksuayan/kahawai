@@ -4,6 +4,7 @@ import { makeAlbum, makeState, makeTrack, mockFetch } from "./test/fixtures";
 import { key, mountApp, settle, typeInto } from "./test/helpers";
 import { tauri } from "./test/tauri-mock";
 import { useNavStore } from "./stores/nav";
+import { useAbxStore } from "./stores/abx";
 import { useAnalogStore } from "./stores/analog";
 import { useQueueStore } from "./stores/queue";
 import { useToastsStore } from "./stores/toasts";
@@ -260,5 +261,27 @@ describe("App: global keyboard shortcuts", () => {
     key(document.body, "n");
     expect(tauri.callsTo("next_track")).toHaveLength(0);
     void usePlayerStore;
+  });
+});
+
+describe("App: blind test keys", () => {
+  it("during a blind test X means 'hear X', and the message never says which slot is playing", async () => {
+    tauriApp();
+    online();
+    await bootApp();
+    const analog = useAnalogStore();
+    const abx = useAbxStore();
+    const toasts = useToastsStore();
+    analog.update("b", { flavour: "tube_300b" });
+    analog.measured.b = 0.1;
+    abx.start(3, () => 0.9);
+    key(document.body, "x");
+    expect(abx.heard).toBe("x");
+    expect(toasts.toasts.at(-1)).toMatchObject({ title: "Blind test: hearing X", detail: null });
+    key(document.body, "b");
+    expect(abx.heard).toBe("b");
+    expect(toasts.toasts.at(-1)?.title).toBe("Blind test: hearing B");
+    expect(toasts.toasts.some((t) => t.title.startsWith("Analog warmth"))).toBe(false);
+    expect(JSON.stringify(toasts.toasts)).not.toMatch(/300B|12AX7/);
   });
 });
