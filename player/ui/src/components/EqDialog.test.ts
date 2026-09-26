@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { bandResponseDb, bandSeverity, constrainBand, EQ_LIMITS, maxFreqFor, totalResponseDb } from "../eqResponse";
-import { makeState } from "../test/fixtures";
+import { makeState, makeTrack } from "../test/fixtures";
 import { $$, mountApp, settle } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
 import { useDspStore } from "../stores/dsp";
@@ -263,5 +263,33 @@ describe("EQ live preview note", () => {
     await boot("dop-exclusive");
     expect(note()).toBeNull();
     expect(document.body.querySelector('[data-testid="eq-unsupported"]')).not.toBeNull();
+  });
+});
+
+describe("EQ dialog shows the track's sample rate", () => {
+  const rateNote = () => document.body.querySelector('[data-testid="eq-track-rate"]');
+  const play = async (sample_rate: number | null, out: number | null) => {
+    tauri.on("get_state", makeState({ status: "playing", track: makeTrack({ sample_rate }), output_rate_hz: out }));
+    mountApp(EqDialog, { open: true });
+    await usePlayerStore().init();
+    await settle();
+  };
+
+  it("sits right after the EQ enabled switch", async () => {
+    await play(96000, 96000);
+    const label = [...document.body.querySelectorAll("label")].find((l) => l.textContent?.includes("EQ enabled"))!;
+    expect(label.nextElementSibling).toBe(rateNote());
+    expect(rateNote()!.textContent!.trim()).toBe("96 kHz");
+  });
+
+  it("says which rate the EQ runs at when the output resampled the track", async () => {
+    await play(44100, 48000);
+    expect(rateNote()!.textContent).toContain("44.1 kHz");
+    expect(rateNote()!.textContent).toContain("EQ at 48 kHz");
+  });
+
+  it("is absent when there is no track rate to show", async () => {
+    await play(null, null);
+    expect(rateNote()).toBeNull();
   });
 });

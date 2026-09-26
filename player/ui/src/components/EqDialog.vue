@@ -61,6 +61,14 @@ const liveNote = computed(() =>
     ? "EQ is off, so you won't hear changes. Turn it on to preview them."
     : "Changes play live. OK keeps them; Cancel reverts.",
 );
+const khz = (hz: number): string => `${Math.round(hz / 100) / 10} kHz`;
+/** The playing track's own rate, and the rate the EQ runs at when the output resampled it. */
+const trackRate = computed(() => {
+  const hz = player.currentTrack?.sample_rate;
+  if (!hz) return null;
+  const out = player.outputRateHz;
+  return { text: khz(hz), eq: out && out !== hz ? khz(out) : null };
+});
 const UNSUPPORTED_TEXT = "EQ is not supported for this stream type.";
 
 // --- graph geometry ---------------------------------------------------------
@@ -221,6 +229,14 @@ function choose(v: string | null): void {
     >
       <div class="mb-3 flex flex-wrap items-center gap-3">
         <UiSwitch :model-value="dsp.eqEnabled" label="EQ enabled" @update:model-value="(v) => dsp.saveEqEnabled(v)" />
+        <span
+          v-if="trackRate"
+          class="text-xs text-dim tabular-nums"
+          :title="trackRate.eq ? `The output device runs at ${trackRate.eq}, so the audio is resampled and the EQ is designed for ${trackRate.eq}.` : 'Sample rate of the track that is playing.'"
+          data-testid="eq-track-rate"
+        >
+          {{ trackRate.text }}<template v-if="trackRate.eq"> → EQ at {{ trackRate.eq }}</template>
+        </span>
         <UiSelect
           aria-label="EQ preset"
           trigger-class="w-[200px]"
