@@ -32,20 +32,24 @@ const playlists = usePlaylistsStore();
 const dsp = useDspStore();
 const jobs = useJobsStore();
 
+// Cleanup must be registered synchronously: inside the async onMounted below
+// there is no active component instance left after the first await.
+let stopWatch: (() => void) | undefined;
+onUnmounted(() => {
+  stopWatch?.();
+  player.dispose();
+  window.removeEventListener("keydown", onKeydown);
+});
+
 onMounted(async () => {
+  window.addEventListener("keydown", onKeydown);
   await settings.init(); // get_server_url + persisted playback prefs, then point the REST client at it
   await player.init(); // subscribe to player-state events
   await dsp.init(); // persisted EQ/loudness + device/DoP capability
   jobs.init(); // pick up any active server jobs (scan / ISO extraction)
   // Keep the queue store in sync with core-driven queue changes.
-  const stopWatch = player.$subscribe((_m, s) => {
+  stopWatch = player.$subscribe((_m, s) => {
     if (s.raw) void queue.syncFromState(s.raw);
-  });
-  window.addEventListener("keydown", onKeydown);
-  onUnmounted(() => {
-    stopWatch();
-    player.dispose();
-    window.removeEventListener("keydown", onKeydown);
   });
   await Promise.all([lib.loadAll(), playlists.load()]);
 });

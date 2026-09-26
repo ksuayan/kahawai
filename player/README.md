@@ -23,6 +23,31 @@ scripts/
 (platform-independent playback engine), and `crates/kahawai-player-audio` (real
 OS audio sinks) live in the workspace root.
 
+## UI stack and tests (`player/ui`)
+
+Vue 3 + Pinia + strict TypeScript, styled with **Tailwind CSS v4** (design
+tokens in `src/style.css` `@theme`) and built on **Reka UI** headless
+primitives. `src/ui/` holds the shared primitives (`UiButton`, `UiSelect`,
+`UiSlider`, `UiSwitch`, `UiDialog`, `PromptDialog`, `ConfirmDialog`, …);
+components compose them and contain no hand-written CSS. Native
+`prompt()`/`confirm()` are not used (they do not work reliably in the Tauri
+webview) — the dialog components replace them.
+
+```bash
+cd player/ui
+npm test                # Vitest + Vue Test Utils + happy-dom (~370 tests)
+npm run test:coverage   # v8 coverage summary
+npm run build           # vue-tsc (typechecks the tests too) + vite build
+```
+
+Tests never touch the network or a real Tauri: `src/test/setup.ts` stubs
+`fetch` (use `mockFetch` for routes) and provides a controllable Tauri
+IPC/event mock (`tauri.on(cmd, result)`, `tauri.emit(event, payload)`,
+`tauri.callsTo(cmd)`); `src/test/helpers.ts` has helpers for driving Reka
+widgets (`openSelect`, `pick`, `openMenu`, …). Keyboard shortcuts live in
+`src/shortcuts.ts` and yield to widgets that own keys (sliders, selects,
+menus, dialogs, text fields).
+
 ## Architecture boundary
 
 ```

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import {
   SelectContent,
   SelectIcon,
@@ -18,7 +19,7 @@ export interface UiSelectOption {
   disabled?: boolean;
 }
 
-defineProps<{
+const props = defineProps<{
   modelValue: string | null;
   options: UiSelectOption[];
   ariaLabel?: string;
@@ -37,6 +38,13 @@ const emit = defineEmits<{ (e: "update:modelValue", v: string | null): void }>()
 const NONE = "\u0000none";
 const toKey = (v: string | null): string => (v === null ? NONE : v);
 const fromKey = (k: string): string | null => (k === NONE ? null : k);
+
+// Reka caches an item's text when it registers, so its own <SelectValue> goes
+// stale when a label changes later (e.g. "System default (Built-in Output)"
+// after a device rescan). Render the label from our options instead.
+const selectedLabel = computed(
+  () => props.options.find((o) => toKey(o.value) === toKey(props.modelValue))?.label,
+);
 </script>
 
 <template>
@@ -53,7 +61,9 @@ const fromKey = (k: string): string | null => (k === NONE ? null : k);
         triggerClass,
       ]"
     >
-      <span class="truncate"><SelectValue :placeholder="placeholder ?? 'Select…'" /></span>
+      <span class="truncate">
+        <SelectValue :placeholder="placeholder ?? 'Select…'">{{ selectedLabel ?? placeholder ?? "Select…" }}</SelectValue>
+      </span>
       <SelectIcon class="shrink-0 text-faint">▾</SelectIcon>
     </SelectTrigger>
     <SelectPortal>

@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { defineComponent, ref } from "vue";
+import { computed, defineComponent, ref } from "vue";
 import { describe, expect, it } from "vitest";
 import UiSelect, { type UiSelectOption } from "./UiSelect.vue";
 
@@ -44,6 +44,36 @@ describe("UiSelect", () => {
     const w2 = host("Built-in Output");
     await flushPromises();
     expect(w2.findAll('[role="combobox"]').at(-1)!.text()).toContain("Built-in Output");
+  });
+
+  it("keeps the trigger label in sync when the selected option's label changes (regression: went stale)", async () => {
+    const name = ref("");
+    const Host = defineComponent({
+      components: { UiSelect },
+      setup() {
+        const opts = computed(() => [
+          { value: null, label: `System default${name.value ? ` (${name.value})` : ""}` },
+          { value: "A", label: "A" },
+        ]);
+        return { opts, v: ref<string | null>(null) };
+      },
+      template: `<UiSelect v-model="v" :options="opts" aria-label="d" />`,
+    });
+    const w = mount(Host, { attachTo: document.body });
+    await flushPromises();
+    expect(w.find('[role="combobox"]').text()).toContain("System default");
+    name.value = "Built-in Output";
+    await flushPromises();
+    expect(w.find('[role="combobox"]').text()).toContain("System default (Built-in Output)");
+    name.value = "MacBook Speakers";
+    await flushPromises();
+    expect(w.find('[role="combobox"]').text()).toContain("System default (MacBook Speakers)");
+  });
+
+  it("shows the placeholder when the value matches no option", async () => {
+    const w = mount(UiSelect, { props: { modelValue: "gone", options, placeholder: "Pick one" }, attachTo: document.body });
+    await flushPromises();
+    expect(w.find('[role="combobox"]').text()).toContain("Pick one");
   });
 
   it("is labelled for assistive tech", () => {

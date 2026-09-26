@@ -18,5 +18,11 @@ export default defineConfig({
     setupFiles: ["src/test/setup.ts"],
     include: ["src/**/*.test.ts"],
     css: false,
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.{ts,vue}"],
+      exclude: ["src/**/*.test.ts", "src/test/**", "src/main.ts", "src/vite-env.d.ts", "src/types.ts"],
+      reporter: ["text-summary", "text"],
+    },
   },
 });

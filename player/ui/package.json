@@ -9,6 +9,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-vue": "^5.2.1",
+    "@vitest/coverage-v8": "^4.1.11",
     "@vue/test-utils": "^2.5.1",
     "happy-dom": "^20.14.5",
     "tailwindcss": "^4.3.3",
@@ -25,7 +26,8 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "type": "module",
   "version": "0.1.0"

@@ -1,3 +1,4 @@
+import { enableAutoUnmount } from "@vue/test-utils";
 import { afterEach, beforeEach, vi } from "vitest";
 import { tauri } from "./tauri-mock";
 
@@ -84,3 +85,9 @@ afterEach(() => {
   vi.useRealTimers();
   document.body.innerHTML = "";
 });
+
+// Unmount every wrapper after each test so stale components (and their store
+// subscriptions / portals) never react to the next test. afterEach hooks run
+// in reverse order, so registering this LAST makes it run FIRST, before the
+// body is cleared above.
+enableAutoUnmount(afterEach);

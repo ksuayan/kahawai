@@ -3,9 +3,16 @@ import { createPinia, setActivePinia } from "pinia";
 import type { Component } from "vue";
 
 /** Fresh pinia + attach to the document so Reka portals and focus work. */
-export function mountApp(component: Component, props: Record<string, unknown> = {}, slots: Record<string, string> = {}) {
+export function mountApp(
+  component: Component,
+  props: Record<string, unknown> = {},
+  slots: Record<string, string> = {},
+  /** Runs after pinia is active but before the component mounts, to seed stores. */
+  prepare?: () => void,
+) {
   const pinia = createPinia();
   setActivePinia(pinia);
+  prepare?.();
   const wrapper = mount(component, { props: props as never, slots, attachTo: document.body, global: { plugins: [pinia] } });
   return { wrapper, pinia };
 }
@@ -34,9 +41,9 @@ export async function openSelect(trigger: HTMLElement): Promise<void> {
   await settle();
 }
 
-/** Open a Reka dropdown menu trigger the way a mouse does. */
+/** Open a Reka dropdown menu from its trigger (Enter, as a keyboard user would). */
 export async function openMenu(trigger: HTMLElement): Promise<void> {
-  trigger.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "mouse", button: 0, bubbles: true, cancelable: true }));
+  trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
   await settle();
 }
 
@@ -52,3 +59,13 @@ export const byText = (root: ParentNode, selector: string, text: string | RegExp
   );
 
 export type Wrapper = VueWrapper<never>;
+
+/** Type into an input and fire the `input` event v-model listens to. */
+export async function typeInto(input: HTMLInputElement, text: string): Promise<void> {
+  input.value = text;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+}
+
+/** JSON body of a recorded fetch call. */
+export const bodyOf = (init?: RequestInit): unknown => (init?.body ? JSON.parse(String(init.body)) : undefined);
