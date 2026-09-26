@@ -17,6 +17,8 @@ import { useJobsStore } from "./stores/jobs";
 import { useLibraryStore } from "./stores/library";
 import { useNavStore } from "./stores/nav";
 import { useAnalogStore } from "./stores/analog";
+import { useToastsStore } from "./stores/toasts";
+import { describeAnalog } from "./types";
 import { useDspStore } from "./stores/dsp";
 import { usePlayerStore } from "./stores/player";
 import { usePlaylistsStore } from "./stores/playlists";
@@ -33,6 +35,7 @@ const playlists = usePlaylistsStore();
 const dsp = useDspStore();
 const analog = useAnalogStore();
 const jobs = useJobsStore();
+const toasts = useToastsStore();
 
 // Cleanup must be registered synchronously: inside the async onMounted below
 // there is no active component instance left after the first await.
@@ -68,6 +71,20 @@ function onKeydown(e: KeyboardEvent): void {
     next: () => void player.nextTrack(),
     prev: () => void player.prevTrack(),
     go: (v) => nav.go(v),
+    ab: (which) => switchAnalog(which),
+  });
+}
+
+/** A / B / X: swap the analog-warmth slot from anywhere, and say what is playing. */
+let abToast: number | null = null;
+function switchAnalog(which: "a" | "b" | "toggle"): void {
+  if (!analog.loaded) return;
+  if (which === "toggle") analog.toggle();
+  else analog.select(which);
+  if (abToast !== null) toasts.dismiss(abToast);
+  abToast = toasts.push("info", `Analog warmth: listening to ${analog.active.toUpperCase()}`, {
+    detail: describeAnalog(analog.current),
+    ttl: 2500,
   });
 }
 </script>

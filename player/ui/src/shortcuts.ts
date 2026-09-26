@@ -14,6 +14,8 @@ export interface ShortcutActions {
   next(): void;
   prev(): void;
   go(view: NavState["name"]): void;
+  /** Analog warmth A/B: listen to slot A, slot B, or switch. Optional. */
+  ab?(which: "a" | "b" | "toggle"): void;
 }
 
 const TYPING_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
@@ -99,6 +101,21 @@ export function handleShortcut(e: KeyboardEvent, a: ShortcutActions): boolean {
     case "p":
     case "P":
       a.prev();
+      return true;
+    case "a":
+    case "A":
+      if (!a.ab) return false;
+      a.ab("a");
+      return true;
+    case "b":
+    case "B":
+      if (!a.ab) return false;
+      a.ab("b");
+      return true;
+    case "x":
+    case "X":
+      if (!a.ab) return false;
+      a.ab("toggle");
       return true;
     default: {
       const view = VIEW_KEYS[e.key.toLowerCase()];

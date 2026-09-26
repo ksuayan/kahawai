@@ -4,7 +4,9 @@ import { makeAlbum, makeState, makeTrack, mockFetch } from "./test/fixtures";
 import { key, mountApp, settle, typeInto } from "./test/helpers";
 import { tauri } from "./test/tauri-mock";
 import { useNavStore } from "./stores/nav";
+import { useAnalogStore } from "./stores/analog";
 import { useQueueStore } from "./stores/queue";
+import { useToastsStore } from "./stores/toasts";
 import { usePlayerStore } from "./stores/player";
 
 const albums = [makeAlbum({ title: "Stranger in the Alps", artist: "Phoebe Bridgers", track_count: 3 })];
@@ -145,6 +147,38 @@ describe("App: global keyboard shortcuts", () => {
       expect(useNavStore().view.name).toBe(view);
     },
   );
+
+  it("A, B and X pick or swap the analog-warmth slot from any screen, and say what is playing", async () => {
+    await ready();
+    const analog = useAnalogStore();
+    const toasts = useToastsStore();
+    const sent = () => tauri.callsTo("set_analog").map((c) => (c as { settings: { enabled: boolean } }).settings.enabled);
+    expect(analog.active).toBe("a");
+    key(document.body, "b");
+    await settle();
+    expect(analog.active).toBe("b");
+    expect(sent().at(-1)).toBe(true); // B is the warm one
+    expect(toasts.toasts.at(-1)).toMatchObject({ title: "Analog warmth: listening to B" });
+    expect(toasts.toasts.at(-1)?.detail).toContain("12AX7");
+    key(document.body, "a");
+    expect(analog.active).toBe("a");
+    expect(sent().at(-1)).toBe(false);
+    expect(toasts.toasts.at(-1)?.detail).toBe("Off (dry signal)");
+    key(document.body, "X");
+    expect(analog.active).toBe("b");
+    key(document.body, "x");
+    expect(analog.active).toBe("a");
+    expect(toasts.toasts.filter((t) => t.title.startsWith("Analog warmth"))).toHaveLength(1); // one toast, replaced each time
+  });
+
+  it("A / B / X are ignored while typing", async () => {
+    await ready();
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    key(input, "b");
+    expect(useAnalogStore().active).toBe("a");
+    input.remove();
+  });
 
   it("Space toggles playback", async () => {
     await ready();

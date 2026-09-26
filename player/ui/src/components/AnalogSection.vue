@@ -5,10 +5,10 @@ import { usePlayerStore } from "../stores/player";
 import {
   ANALOG_FLAVOURS,
   ANTI_ALIAS_CHOICES,
+  describeAnalog,
   FLAVOUR_INFO,
   LISTENING_RECIPES,
   type AnalogFlavour,
-  type AnalogSettings,
   type AntiAliasChoice,
 } from "../types";
 import UiButton from "../ui/UiButton.vue";
@@ -44,10 +44,7 @@ const aliasOptions: UiSelectOption[] = ANTI_ALIAS_CHOICES.map((c) => ({ value: c
 
 const pct = (v: number): number => Math.round(v * 100);
 
-function summary(s: AnalogSettings): string {
-  if (!s.enabled) return "Off (dry signal)";
-  return `${FLAVOUR_INFO[s.flavour].short} · drive ${pct(s.drive)}% · mix ${pct(s.mix)}%`;
-}
+const summary = describeAnalog;
 
 const appliedRecipe = ref<string | null>(null);
 function useRecipe(id: string): void {
@@ -83,13 +80,16 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
             class="min-w-[72px] border-0 px-4 py-1.5 font-semibold transition-colors"
             :class="analog.active === s ? 'bg-accent text-white' : 'bg-surface text-dim hover:bg-hover hover:text-fg'"
             :aria-pressed="analog.active === s"
+            :aria-keyshortcuts="s.toUpperCase()"
+            :title="`Listen to ${s.toUpperCase()} (press ${s.toUpperCase()})`"
             :data-testid="`ab-${s}`"
             @click="analog.select(s)"
           >
             {{ s.toUpperCase() }}
           </button>
         </div>
-        <UiButton data-testid="ab-toggle" @click="analog.toggle()">Switch A/B</UiButton>
+        <UiButton data-testid="ab-toggle" title="Switch A/B (press X)" aria-keyshortcuts="X" @click="analog.toggle()">Switch A/B</UiButton>
+        <span class="text-xs text-faint">Keys: <kbd class="font-mono">A</kbd> <kbd class="font-mono">B</kbd> <kbd class="font-mono">X</kbd>, from any screen</span>
       </div>
       <p class="m-0 mb-3 text-xs text-dim" data-testid="analog-status">{{ status }}</p>
 

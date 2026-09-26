@@ -148,6 +148,7 @@ const KEYBOARD_MAP: [string, string][] = [
   ["↑ / ↓", "Volume up / down"],
   ["N / P", "Next / previous track"],
   ["F", "Go to search"],
+  ["A / B / X", "Analog warmth: listen to A, listen to B, switch"],
   ["1 … 6", "Albums / Artists / Playlists / Search / Queue / Settings"],
 ];
 

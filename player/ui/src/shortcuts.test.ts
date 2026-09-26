@@ -85,6 +85,26 @@ describe("global shortcuts", () => {
   });
 });
 
+describe("analog A/B keys", () => {
+  it("A and B pick a slot and X switches, in either case", () => {
+    const ab = vi.fn();
+    const a = { ...actions(), ab } as ShortcutActions;
+    for (const [k, want] of [["a", "a"], ["A", "a"], ["b", "b"], ["B", "b"], ["x", "toggle"], ["X", "toggle"]] as const) {
+      expect(handleShortcut(fire(k), a)).toBe(true);
+      expect(ab).toHaveBeenLastCalledWith(want);
+    }
+  });
+
+  it("is not handled without an A/B action, when modified, or while typing", () => {
+    expect(handleShortcut(fire("x"), actions())).toBe(false);
+    const ab = vi.fn();
+    const a = { ...actions(), ab } as ShortcutActions;
+    expect(handleShortcut(fire("x", document.body, { ctrlKey: true }), a)).toBe(false);
+    expect(handleShortcut(fire("b", el("<input>")), a)).toBe(false);
+    expect(ab).not.toHaveBeenCalled();
+  });
+});
+
 describe("Reka widgets own their keys (regression: one keypress must not do two things)", () => {
   it.each([
     ['<div role="slider" tabindex="0"></div>', "ArrowRight"],

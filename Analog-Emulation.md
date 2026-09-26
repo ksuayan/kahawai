@@ -737,13 +737,38 @@ you hear, otherwise the louder side will sound better.
   store (slot handling, persistence, clamping) and the component (A/B
   switching, live edits, all choices, dimming on exclusive output).
 
-### 13.6 Not done
+### 13.6 Keyboard shortcut
 
-- No keyboard shortcut for A/B yet (a quick key would be handy for blind-ish
-  comparisons).
-- No true blind test (hidden identities, random order): the labels A and B
-  show their settings.
-- No live level meter to check the match.
+From any screen (not while typing in a text box, and not with Ctrl, Cmd or
+Alt held):
+
+| Key | Does |
+|---|---|
+| **A** | Listen to slot A |
+| **B** | Listen to slot B |
+| **X** | Switch between A and B |
+
+A small message ("Analog warmth: listening to B", with a one-line summary of
+the slot) appears for a couple of seconds so you can tell what you are hearing
+even when the Settings page is not on screen; each press replaces the last
+message. The keys are listed in Settings, under Keyboard shortcuts, and the A/B
+buttons show them in their tooltips.
+
+### 13.7 Not done
+
+- **A blind-test mode.** Design, not built: an ABX-style test. A and B stay
+  visible as the two references; a hidden **X** is randomly A or B on each
+  trial (kept in memory, not shown). You may switch among A, B and X as much as
+  you like (X is a third key, or a button), then answer "X is A" or "X is B".
+  After, say, ten trials it reports how many you got right and how likely
+  that is by chance (a binomial test). While a test is running the panel hides
+  the slot settings and the engine status line (which would give the plan away)
+  and stops the keys and toasts from naming anything. The engine needs no
+  change: the UI just chooses which slot to send. Its weak spot is level: a
+  loudness difference gives the answer away, so the test should insist on a
+  level match first (there is no automatic way to check it yet). Rough size:
+  a day.
+- No live level meter to check the level match.
 
 ---
 

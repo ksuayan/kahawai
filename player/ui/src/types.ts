@@ -495,6 +495,13 @@ export const LISTENING_RECIPES: ListeningRecipe[] = [
   },
 ];
 
+/** One line on a slot: "12AX7 · drive 50% · mix 50%", or "Off (dry signal)". */
+export function describeAnalog(s: AnalogSettings): string {
+  if (!s.enabled) return "Off (dry signal)";
+  const pct = (v: number): number => Math.round(v * 100);
+  return `${FLAVOUR_INFO[s.flavour].short} · drive ${pct(s.drive)}% · mix ${pct(s.mix)}%`;
+}
+
 /** Pull every value into its allowed range (the core does the same). */
 export function clampAnalog(s: AnalogSettings): AnalogSettings {
   const n = (v: number, d: number, lo: number, hi: number): number =>
