@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { bandResponseDb, constrainBand, EQ_LIMITS, maxFreqFor, totalResponseDb } from "../eqResponse";
+import { bandResponseDb, bandSeverity, constrainBand, EQ_LIMITS, maxFreqFor, totalResponseDb } from "../eqResponse";
 import { makeState } from "../test/fixtures";
 import { $$, mountApp, settle } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
@@ -189,5 +189,55 @@ describe("EQ guardrails", () => {
     await settle();
     expect(document.body.querySelector('[data-testid="eq-headroom"]')!.textContent).toContain("can clip");
     expect(totalResponseDb(dsp.activeBands, 1000)).toBeGreaterThan(0.5);
+  });
+});
+
+describe("EQ point severity colours", () => {
+  const peak = (gain_db: number, freq = 1000, q = 1) => ({ band_type: "peaking" as const, freq, gain_db, q });
+
+  it("rates bands: fine, warning (yellow), bad (red)", () => {
+    expect(bandSeverity(peak(3), 48000, 3).level).toBe("ok");
+    expect(bandSeverity(peak(4), 48000, 5).level).toBe("ok"); // the usual preset boosts stay quiet
+    expect(bandSeverity(peak(-12), 48000, 0).level).toBe("ok"); // cuts are safe
+    expect(bandSeverity(peak(7), 48000, 7).level).toBe("warn");
+    expect(bandSeverity(peak(2), 48000, 6.5).level).toBe("warn"); // combined boost may clip
+    expect(bandSeverity(peak(16), 48000, 5).level).toBe("bad"); // one huge boost
+    expect(bandSeverity(peak(2), 48000, 10.5).level).toBe("bad"); // combined boost will clip
+    expect(bandSeverity(peak(0, 1000, 15), 48000, 0).level).toBe("warn"); // very narrow
+    expect(bandSeverity(peak(0, 21000), 44100, 0).level).toBe("bad"); // above the cap
+    expect(bandSeverity(peak(0, 18500), 44100, 0).level).toBe("warn"); // near the cap
+    expect(bandSeverity(peak(0, 18500), 44100, 0).reason).toMatch(/top of the usable range/);
+  });
+
+  it("colours the graph's points and says why, not by colour alone", async () => {
+    const { dsp } = await boot();
+    dsp.addBand();
+    await settle();
+    const node = () => nodes()[0];
+    expect(node().getAttribute("data-severity")).toBe("ok");
+    expect(node().getAttribute("class")).toContain("fill-accent");
+    dsp.updateRow(0, { gain_db: 8 });
+    await settle();
+    expect(node().getAttribute("data-severity")).toBe("warn");
+    expect(node().getAttribute("class")).toContain("fill-warn");
+    dsp.updateRow(0, { gain_db: 14 });
+    await settle();
+    expect(node().getAttribute("data-severity")).toBe("bad");
+    expect(node().getAttribute("class")).toContain("fill-danger");
+    expect(node().getAttribute("aria-label")).toContain("Bad:");
+    node().dispatchEvent(new Event("focus"));
+    await settle();
+    const note = document.body.querySelector('[data-testid="eq-band-severity"]')!;
+    expect(note.getAttribute("data-severity")).toBe("bad");
+    expect(note.textContent).toContain("Bad for sound quality");
+  });
+
+  it("a disabled band is grey, whatever its settings", async () => {
+    const { dsp } = await boot();
+    dsp.addBand();
+    dsp.updateRow(0, { gain_db: 14 });
+    dsp.toggleRow(0);
+    await settle();
+    expect(nodes()[0].getAttribute("class")).toContain("fill-faint");
   });
 });

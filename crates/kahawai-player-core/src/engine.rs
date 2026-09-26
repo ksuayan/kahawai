@@ -428,6 +428,9 @@ pub struct Player {
     /// Where the queue (tracks + cursor + modes) is persisted. `None`
     /// disables persistence (some tests).
     queue_path: Option<PathBuf>,
+    /// Where the restored queue was left inside its current track. Used once,
+    /// by the first `resume`; any other way of opening a track discards it.
+    resume_at_ms: Option<u64>,
     /// Consecutive responses that produced zero audio frames. Guards
     /// against an infinite skip loop on a poison track with repeat-all.
     empty_streak: u32,
@@ -458,6 +461,7 @@ impl Player {
             active: None,
             error: None,
             queue_path: None,
+            resume_at_ms: None,
             empty_streak: 0,
             eq: ParametricEq::new(44100),
             loudness: LoudnessNorm::new(DEFAULT_LOUDNESS_TARGET),
@@ -488,7 +492,14 @@ impl Player {
     /// Restore a persisted queue without starting playback (launch
     /// restore). The cursor lands on the persisted index; status stays
     /// Stopped so the UI can hydrate and the user presses play.
-    pub fn restore_queue(&mut self, tracks: Vec<Track>, index: usize) {
+    pub fn restore_queue(
+        &mut self,
+        tracks: Vec<Track>,
+        index: usize,
+        repeat: RepeatMode,
+        shuffle: bool,
+        position_ms: u64,
+    ) {
         self.error = None;
         self.active = None;
         let _ = self.sink.stop();
@@ -497,9 +508,16 @@ impl Player {
             self.status = PlayerStatus::Stopped;
             return;
         }
+        // Modes are set here, in memory, without persisting: writing the
+        // file while the queue is still empty would erase what is being
+        // restored. Shuffle order is deterministic, so the cursor lands on
+        // the same track.
+        self.queue.repeat = repeat;
+        self.queue.set_shuffle(shuffle);
         for _ in 0..index.min(self.queue.len().saturating_sub(1)) {
             self.queue.next_track();
         }
+        self.resume_at_ms = (position_ms > 0).then_some(position_ms);
         self.status = PlayerStatus::Stopped;
         self.persist_queue();
     }
@@ -570,6 +588,20 @@ impl Player {
         self.dsd_story = story;
     }
 
+    /// Playhead worth remembering: the live one, or the restored one not yet
+    /// resumed. A stopped player has none.
+    fn saved_position_ms(&self) -> u64 {
+        match self.status {
+            PlayerStatus::Playing | PlayerStatus::Paused => self.position_ms(),
+            _ => self.resume_at_ms.unwrap_or(0),
+        }
+    }
+
+    /// Save the queue and playhead (called ~every 5 s while playing).
+    pub fn persist_position(&self) {
+        self.persist_queue();
+    }
+
     /// Best-effort queue persistence: tracks + cursor + modes as JSON.
     /// Failures are logged, never fatal to playback.
     fn persist_queue(&self) {
@@ -581,6 +613,7 @@ impl Player {
             index: self.queue.index().min(self.queue.len().saturating_sub(1)),
             repeat: self.queue.repeat,
             shuffle: self.queue.shuffle,
+            position_ms: self.saved_position_ms(),
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -599,6 +632,7 @@ impl Player {
         if self.status == PlayerStatus::Playing {
             self.status = PlayerStatus::Paused;
             let _ = self.sink.pause();
+            self.persist_queue();
         }
     }
 
@@ -609,7 +643,8 @@ impl Player {
                 let _ = self.sink.play();
             }
             PlayerStatus::Stopped if self.queue.current().is_some() => {
-                self.open_current(None);
+                let at = self.resume_at_ms.take();
+                self.open_current(at);
             }
             _ => {}
         }
@@ -626,7 +661,9 @@ impl Player {
     pub fn stop(&mut self) {
         self.status = PlayerStatus::Stopped;
         self.active = None;
+        self.resume_at_ms = None;
         let _ = self.sink.stop();
+        self.persist_queue();
     }
 
     /// User-initiated next: abandon any chained audio and start the next
@@ -750,6 +787,7 @@ impl Player {
 
     /// Open the current queue item. `seek` = scrub target in ms.
     fn open_current(&mut self, seek: Option<u64>) {
+        self.resume_at_ms = None; // a restored position only applies to the first resume
         let track = match self.queue.current().cloned() {
             Some(t) => t,
             None => {
@@ -1308,7 +1346,13 @@ impl Player {
                     a.chain().clone(),
                 )
             }
-            None => (self.queue.current().cloned(), 0, None, None, None, None, None),
+            None => {
+                // Idle. A restored queue shows where it will resume.
+                let t = self.queue.current().cloned();
+                let at = self.resume_at_ms.unwrap_or(0);
+                let dur = t.as_ref().and_then(|t| t.duration_ms).filter(|_| at > 0);
+                (t, at, dur, None, None, None, None)
+            }
         };
         PlayerSnapshot {
             status: self.status,
@@ -1385,7 +1429,13 @@ pub enum EngineCommand {
     /// Insert right after the current item in playback order ("play next").
     InsertTracksNext(Vec<Track>),
     /// Restore a persisted queue without starting playback (launch).
-    RestoreQueue(Vec<Track>, usize),
+    RestoreQueue {
+        tracks: Vec<Track>,
+        index: usize,
+        repeat: RepeatMode,
+        shuffle: bool,
+        position_ms: u64,
+    },
     /// PCM only; has no effect on DoP (bit-perfect hog mode).
     SetVolume(f32),
     /// Output device by name; `None` = system default.
@@ -1443,6 +1493,10 @@ struct PersistedQueue {
     index: usize,
     repeat: RepeatMode,
     shuffle: bool,
+    /// Playhead inside the current track when it was last saved; playback
+    /// resumes from here after a restart.
+    #[serde(default)]
+    position_ms: u64,
 }
 
 impl PersistedQueue {
@@ -1537,12 +1591,24 @@ impl EngineController {
         let qp = queue_path_for(&ctrl.settings_path);
         if let Some(pq) = PersistedQueue::load(&qp) {
             if !pq.tracks.is_empty() {
-                ctrl.send(EngineCommand::SetRepeat(pq.repeat));
-                ctrl.send(EngineCommand::SetShuffle(pq.shuffle));
-                ctrl.send(EngineCommand::RestoreQueue(pq.tracks, pq.index));
+                ctrl.send(EngineCommand::RestoreQueue {
+                    tracks: pq.tracks,
+                    index: pq.index,
+                    repeat: pq.repeat,
+                    shuffle: pq.shuffle,
+                    position_ms: pq.position_ms,
+                });
             }
         }
         ctrl
+    }
+
+    /// The tracks in the saved queue (`queue.json`), in list order. Lets the
+    /// UI show a restored queue without asking the server for every track.
+    pub fn saved_queue_tracks(&self) -> Vec<Track> {
+        PersistedQueue::load(&queue_path_for(&self.settings_path))
+            .map(|pq| pq.tracks)
+            .unwrap_or_default()
     }
 
     /// Test seam: inject any [`Transport`] (the live constructor always
@@ -1759,6 +1825,7 @@ fn playback_loop(
     events: Arc<Mutex<Vec<PlayerEvent>>>,
 ) {
     let mut last_emit = Instant::now() - Duration::from_secs(10);
+    let mut last_saved = Instant::now();
     let mut last_key = snapshot_key(&PlayerSnapshot::default());
 
     loop {
@@ -1796,6 +1863,10 @@ fn playback_loop(
         let snap = player.snapshot();
         let key = snapshot_key(&snap);
         let changed = key != last_key;
+        if player.status() == PlayerStatus::Playing && last_saved.elapsed() >= Duration::from_secs(5) {
+            last_saved = Instant::now();
+            player.persist_position();
+        }
         if changed || (player.wants_pump() && last_emit.elapsed() >= Duration::from_millis(250)) {
             last_key = key;
             last_emit = Instant::now();
@@ -1860,7 +1931,13 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
         EngineCommand::SetShuffle(b) => player.set_shuffle(b),
         EngineCommand::AppendTracks(t) => player.append_tracks(t),
         EngineCommand::InsertTracksNext(t) => player.insert_tracks_next(t),
-        EngineCommand::RestoreQueue(t, i) => player.restore_queue(t, i),
+        EngineCommand::RestoreQueue {
+            tracks,
+            index,
+            repeat,
+            shuffle,
+            position_ms,
+        } => player.restore_queue(tracks, index, repeat, shuffle, position_ms),
         EngineCommand::SetVolume(v) => player.set_volume(v),
         EngineCommand::SetOutputDevice(d) => player.set_output_device(d),
         EngineCommand::SetBitPerfect(m) => player.set_bit_perfect(m),

@@ -197,7 +197,7 @@ exposes the current device's accepted rates to Settings.
   and survives restarts with the queue.
 - **Queue**: play-all-from, insert play-next, append, reorder
   (drag-and-drop), move up/down, remove, clear, save-as-playlist.
-  Persisted to `queue.json` (tracks, cursor, repeat, shuffle) and restored
+  Persisted to `queue.json` (tracks, cursor, repeat, shuffle, playhead) and restored
   on launch **without autoplay**.
 
 ### Track & album actions (⋯ menu)
@@ -267,7 +267,7 @@ except while typing in a text field:
 | What | Where |
 |------|-------|
 | Server URL, global format, DSD preference, DSP (EQ/loudness) | `<app-config-dir>/engine-settings.json` (Rust core) |
-| Queue tracks, cursor, repeat, shuffle | `queue.json` next to it (Rust core) |
+| Queue tracks, cursor, repeat, shuffle, playhead | `queue.json` next to it (Rust core) |
 | EQ row model (incl. disabled rows), server URL for the browse client | browser `localStorage` |
 
 Artwork comes through the browser's HTTP cache (ETag/304 from the server);

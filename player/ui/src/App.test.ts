@@ -4,6 +4,7 @@ import { makeAlbum, makeState, makeTrack, mockFetch } from "./test/fixtures";
 import { key, mountApp, settle, typeInto } from "./test/helpers";
 import { tauri } from "./test/tauri-mock";
 import { useNavStore } from "./stores/nav";
+import { useQueueStore } from "./stores/queue";
 import { usePlayerStore } from "./stores/player";
 
 const albums = [makeAlbum({ title: "Stranger in the Alps", artist: "Phoebe Bridgers", track_count: 3 })];
@@ -59,6 +60,26 @@ describe("App: boot", () => {
     online();
     const w = await bootApp();
     expect(w.get('[data-testid="title"]').text()).toBe("Restored track");
+  });
+
+  it("shows a queue the engine restored from disk, with no further events (regression: empty Queue after restart)", async () => {
+    const tracks = [makeTrack({ title: "One" }), makeTrack({ title: "Two" }), makeTrack({ title: "Three" })];
+    tauriApp(makeState({ status: "stopped", track: tracks[1], queue_ids: tracks.map((t) => t.id), queue_index: 1 }));
+    tauri.on("get_queue_tracks", tracks);
+    online();
+    await bootApp();
+    const q = useQueueStore();
+    expect(q.tracks.map((t) => t.title)).toEqual(["One", "Two", "Three"]);
+    expect(q.index).toBe(1);
+  });
+
+  it("restores the queue from the saved copy even when the server is down", async () => {
+    const tracks = [makeTrack({ title: "One" }), makeTrack({ title: "Two" })];
+    tauriApp(makeState({ status: "stopped", track: tracks[0], queue_ids: tracks.map((t) => t.id), queue_index: 0 }));
+    tauri.on("get_queue_tracks", tracks);
+    mockFetch({}); // nothing answers: no server
+    await bootApp();
+    expect(useQueueStore().tracks.map((t) => t.title)).toEqual(["One", "Two"]);
   });
 
   it("reflects live engine events after launch (regression: UI went stale)", async () => {

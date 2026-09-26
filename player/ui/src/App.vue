@@ -51,6 +51,9 @@ onMounted(async () => {
   stopWatch = player.$subscribe((_m, s) => {
     if (s.raw) void queue.syncFromState(s.raw);
   });
+  // The launch state (a restored queue) arrived during player.init(), before
+  // the watcher existed, and an idle engine sends nothing after it.
+  if (player.raw) void queue.syncFromState(player.raw);
   await Promise.all([lib.loadAll(), playlists.load()]);
 });
 

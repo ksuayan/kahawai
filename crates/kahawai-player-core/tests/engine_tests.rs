@@ -1429,6 +1429,73 @@ fn queue_persists_and_restores_across_controllers() {
 }
 
 #[test]
+fn pausing_saves_the_playhead_in_queue_json() {
+    let dir = std::env::temp_dir().join("kahawai-player-core-position");
+    let _ = std::fs::remove_dir_all(&dir);
+    let qp = dir.join("queue.json");
+    let mut h = Harness::new(None);
+    h.player.set_queue_path(Some(qp.clone()));
+    h.stub.add(1, &[(440.0, 44100 * 10)]);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
+    while h.player.snapshot().position_ms < 500 {
+        h.player.pump();
+    }
+    let saved = || {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&qp).unwrap()).unwrap();
+        v["position_ms"].as_u64().unwrap()
+    };
+    h.player.pause();
+    assert!(saved() >= 500, "pause saves how far into the track playback was");
+    h.player.resume();
+    h.player.pump();
+    h.player.persist_position();
+    assert!(saved() >= 500, "the periodic save keeps it current while playing");
+    h.player.stop();
+    assert_eq!(saved(), 0, "an explicit stop forgets the position");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restored_queue_resumes_from_its_saved_position_once() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 40)]);
+    h.stub.add(2, &[(440.0, 44100 * 40)]);
+    let tracks = vec![track(1, AudioFormat::Wav, 40_000), track(2, AudioFormat::Wav, 40_000)];
+
+    h.player.restore_queue(tracks.clone(), 1, RepeatMode::All, true, 30_000);
+    let snap = h.player.snapshot();
+    assert_eq!(snap.status, PlayerStatus::Stopped, "restore never starts playback");
+    assert_eq!(snap.repeat, RepeatMode::All);
+    assert!(snap.shuffle);
+    assert_eq!(snap.position_ms, 30_000, "the idle snapshot shows where it will resume");
+    assert_eq!(snap.duration_ms, Some(40_000));
+
+    h.player.resume();
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+    assert!(h.player.snapshot().position_ms >= 30_000, "resumed at the saved playhead");
+
+    // Only the first resume uses it: stop, then play again from the top.
+    h.player.stop();
+    assert_eq!(h.player.snapshot().position_ms, 0);
+    h.player.resume();
+    assert!(h.player.snapshot().position_ms < 5_000, "a later resume starts the track over");
+}
+
+#[test]
+fn opening_another_track_discards_the_restored_position() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 40)]);
+    h.stub.add(2, &[(440.0, 44100 * 40)]);
+    let tracks = vec![track(1, AudioFormat::Wav, 40_000), track(2, AudioFormat::Wav, 40_000)];
+    h.player.restore_queue(tracks.clone(), 0, RepeatMode::Off, false, 30_000);
+    h.player.play_queue(tracks, 1); // the user picked something else
+    assert!(h.player.snapshot().position_ms < 5_000);
+    h.player.stop();
+    h.player.resume();
+    assert!(h.player.snapshot().position_ms < 5_000, "the old position must not come back");
+}
+
+#[test]
 fn repeat_shuffle_commands_reach_snapshot() {
     let (ctl, dir) = stub_controller("modes", vec![track(1, AudioFormat::Wav, 500)]);
     ctl.play_queue(vec![track(1, AudioFormat::Wav, 500)], 0);

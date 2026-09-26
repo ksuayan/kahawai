@@ -206,6 +206,13 @@ fn get_state(state: State<'_, AppState>) -> PlayerStateDto {
     PlayerStateDto::from(state.engine.snapshot())
 }
 
+/// The tracks of the saved queue (from `queue.json`), so the UI can show a
+/// restored queue without asking the server for each one.
+#[tauri::command]
+fn get_queue_tracks(state: State<'_, AppState>) -> Vec<Track> {
+    state.engine.saved_queue_tracks()
+}
+
 #[tauri::command]
 fn get_server_url(state: State<'_, AppState>) -> String {
     state.engine.server_url()
@@ -625,6 +632,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            get_queue_tracks,
             set_bit_perfect,
             get_server_url,
             artwork_cache_stats,

@@ -127,6 +127,12 @@ export async function getState(): Promise<PlayerState | undefined> {
   return cmd<PlayerState>("get_state");
 }
 
+/** The tracks of the queue the engine saved to disk (list order). Empty
+ *  outside Tauri. Lets a restored queue show even when the server is down. */
+export async function getQueueTracks(): Promise<Track[]> {
+  return (await cmd<Track[]>("get_queue_tracks")) ?? [];
+}
+
 export async function setRepeat(mode: RepeatMode): Promise<void> {
   await cmd("set_repeat", { mode });
 }

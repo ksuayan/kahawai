@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Plus, Trash2, TriangleAlert } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
-import { bandHasGain, constrainBand, DEFAULT_RATE_HZ, EQ_LIMITS, maxFreqFor, qRange, totalResponseDb } from "../eqResponse";
+import { bandHasGain, bandSeverity, constrainBand, DEFAULT_RATE_HZ, EQ_LIMITS, maxFreqFor, qRange, totalResponseDb } from "../eqResponse";
 import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
 import { EQ_BAND_TYPES, MAX_EQ_BANDS, type EqBandType } from "../types";
@@ -87,6 +87,9 @@ const curve = computed(() =>
 );
 /** Highest boost of the combined curve; above 0 dB loud material can clip. */
 const peakDb = computed(() => Math.max(0, ...samples.value.map((p) => p.db)));
+/** Per band: how risky it is for sound quality (drives node colour, tooltip and panel note). */
+const severities = computed(() => dsp.rows.map((r) => (r.enabled ? bandSeverity(r, rate.value, peakDb.value) : { level: "ok" as const, reason: null })));
+const selSeverity = computed(() => (selected.value === null ? null : (severities.value[selected.value] ?? null)));
 const clipRisk = computed(() => dsp.eqEnabled && peakDb.value > 0.5);
 const fill = computed(() => `${curve.value} L${xOf(F_MAX)},${yOf(0)} L${xOf(F_MIN)},${yOf(0)} Z`);
 
@@ -253,12 +256,13 @@ function choose(v: string | null): void {
             :cx="xOf(Math.min(r.freq, maxFreq))"
             :cy="yOf(hasGain(r.band_type) ? clamp(r.gain_db, -DB, DB) : 0)"
             :r="selected === i ? 9 : 7"
-            :class="[r.enabled ? 'fill-accent' : 'fill-faint', selected === i ? 'stroke-fg' : 'stroke-canvas']"
+            :class="[!r.enabled ? 'fill-faint' : severities[i]?.level === 'bad' ? 'fill-danger' : severities[i]?.level === 'warn' ? 'fill-warn' : 'fill-accent', selected === i ? 'stroke-fg' : 'stroke-canvas']"
+            :data-severity="severities[i]?.level"
             stroke-width="2"
             class="cursor-grab outline-none focus-visible:stroke-fg active:cursor-grabbing"
             tabindex="0"
             role="slider"
-            :aria-label="`Band ${i + 1}: ${typeLabel[r.band_type]} ${r.freq} Hz ${r.gain_db} dB`"
+            :aria-label="`Band ${i + 1}: ${typeLabel[r.band_type]} ${r.freq} Hz ${r.gain_db} dB${severities[i]?.reason ? `. ${severities[i]!.level === 'bad' ? 'Bad' : 'Warning'}: ${severities[i]!.reason}` : ''}`"
             :aria-valuenow="r.gain_db"
             aria-valuemin="-24"
             aria-valuemax="24"
@@ -272,14 +276,22 @@ function choose(v: string | null): void {
       </svg>
 
       <p class="m-0 mt-1.5 text-[11px] text-faint" data-testid="eq-rate">
-        Curve for {{ rateLabel }} output{{ player.outputRateHz ? "" : " (nothing playing)" }}. Bands are limited to {{ maxFreq }} Hz and ±{{ EQ_LIMITS.gainMax }} dB.
+        Curve for {{ rateLabel }} output{{ player.outputRateHz ? "" : " (nothing playing)" }}. Bands are limited to {{ maxFreq }} Hz and ±{{ EQ_LIMITS.gainMax }} dB. A yellow point is risky; a red one will likely sound bad.
       </p>
       <p v-if="clipRisk" class="m-0 mt-2 flex items-start gap-1.5 text-xs text-warn-fg" role="status" data-testid="eq-headroom">
         <TriangleAlert class="mt-px size-3.5 shrink-0" />
         Peak boost of +{{ peakDb.toFixed(1) }} dB can clip loud tracks. Lower the boost, or cut the loud bands instead.
       </p>
-      <p v-if="sel && sel.freq > maxFreq" class="m-0 mt-2 text-xs text-warn-fg" role="status" data-testid="eq-band-capped">
-        Band {{ selected! + 1 }} is above the usable range at {{ rateLabel }} and is applied at {{ maxFreq }} Hz.
+      <p
+        v-if="selSeverity?.reason"
+        class="m-0 mt-2 flex items-start gap-1.5 text-xs"
+        :class="selSeverity.level === 'bad' ? 'text-danger-fg' : 'text-warn-fg'"
+        role="status"
+        data-testid="eq-band-severity"
+        :data-severity="selSeverity.level"
+      >
+        <TriangleAlert class="mt-px size-3.5 shrink-0" />
+        {{ selSeverity.level === "bad" ? "Bad for sound quality" : "Warning" }}: band {{ selected! + 1 }} {{ selSeverity.reason }}.
       </p>
 
       <div class="mt-3 flex min-h-[44px] flex-wrap items-center gap-3 text-xs text-dim" data-testid="eq-band-panel">

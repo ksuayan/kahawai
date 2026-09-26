@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { queuePlay, seekMs, stop } from "../tauri";
+import { getQueueTracks, queuePlay, seekMs, stop } from "../tauri";
 import { useLibraryStore } from "./library";
 import { usePlayerStore } from "./player";
 import type { PlayerState, Track } from "../types";
@@ -37,6 +37,9 @@ export const useQueueStore = defineStore("queue", () => {
     if (!same) {
       const lib = useLibraryStore();
       try {
+        // Tracks the library cache doesn't know (a queue restored at launch,
+        // before or without the server) come from the engine's saved copy.
+        if (ids.some((id) => !lib.trackCache.has(id))) lib.cacheTracks(await getQueueTracks());
         tracks.value = await lib.ensureTracks(ids);
       } catch (e) {
         console.warn("[queue] could not hydrate queue tracks:", e);

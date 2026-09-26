@@ -102,3 +102,45 @@ export function bandResponseDb(band: EqBand, f: number, fs = DEFAULT_RATE_HZ): n
 export function totalResponseDb(bands: EqBand[], f: number, fs = DEFAULT_RATE_HZ): number {
   return bands.reduce((sum, b) => sum + bandResponseDb(b, f, fs), 0);
 }
+
+export type BandSeverity = "ok" | "warn" | "bad";
+
+/** Thresholds for "this will sound bad". Kept together so they are easy to tune. */
+export const SEVERITY = {
+  boostWarnDb: 9,
+  boostBadDb: 15,
+  qWarn: 12,
+  peakWarnDb: 6,
+  peakBadDb: 10,
+  nearCapFraction: 0.9,
+} as const;
+
+/**
+ * How risky one band is for sound quality, and why (`null` reason when fine).
+ * `peakDb` is the highest boost of the whole curve: any boosting band shares
+ * the blame for clipping.
+ */
+export function bandSeverity(
+  band: EqBand,
+  fs: number,
+  peakDb: number,
+): { level: BandSeverity; reason: string | null } {
+  const cap = fs * NYQUIST_FRACTION;
+  const boosting = bandHasGain(band.band_type) && band.gain_db > 0;
+  let level: BandSeverity = "ok";
+  let reason: string | null = null;
+  const raise = (l: BandSeverity, why: string): void => {
+    if (l === "bad" || (l === "warn" && level === "ok")) {
+      level = l;
+      reason = why;
+    }
+  };
+  if (band.freq > cap) raise("bad", `above the usable range at ${Math.round(fs / 100) / 10} kHz; applied at ${Math.floor(cap)} Hz`);
+  else if (band.freq > cap * SEVERITY.nearCapFraction) raise("warn", "close to the top of the usable range; the shape gets distorted");
+  if (boosting && band.gain_db >= SEVERITY.boostBadDb) raise("bad", `+${band.gain_db} dB boost is very large and will likely distort`);
+  else if (boosting && band.gain_db >= SEVERITY.boostWarnDb) raise("warn", `+${band.gain_db} dB boost is large`);
+  if (boosting && peakDb >= SEVERITY.peakBadDb) raise("bad", `the combined boost of +${peakDb.toFixed(1)} dB will clip loud tracks`);
+  else if (boosting && peakDb > SEVERITY.peakWarnDb) raise("warn", `the combined boost of +${peakDb.toFixed(1)} dB can clip loud tracks`);
+  if (band.band_type !== "low_shelf" && band.band_type !== "high_shelf" && band.q > SEVERITY.qWarn) raise("warn", `Q ${band.q} is very narrow and can ring`);
+  return { level, reason };
+}
