@@ -6,6 +6,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AnalogSettings,
   BitPerfectMode,
   DsdStory,
   DopStatus,
@@ -189,6 +190,10 @@ export async function setEqBands(bands: EqBand[]): Promise<void> {
 
 export async function setEqEnabled(enabled: boolean): Promise<void> {
   await cmd("set_eq_enabled", { enabled });
+}
+
+export async function setAnalog(settings: AnalogSettings): Promise<void> {
+  await cmd("set_analog", { settings });
 }
 
 export async function setLoudnessTarget(lufs: number): Promise<void> {

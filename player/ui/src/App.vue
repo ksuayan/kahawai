@@ -16,6 +16,7 @@ import ToastHost from "./components/ToastHost.vue";
 import { useJobsStore } from "./stores/jobs";
 import { useLibraryStore } from "./stores/library";
 import { useNavStore } from "./stores/nav";
+import { useAnalogStore } from "./stores/analog";
 import { useDspStore } from "./stores/dsp";
 import { usePlayerStore } from "./stores/player";
 import { usePlaylistsStore } from "./stores/playlists";
@@ -30,6 +31,7 @@ const player = usePlayerStore();
 const queue = useQueueStore();
 const playlists = usePlaylistsStore();
 const dsp = useDspStore();
+const analog = useAnalogStore();
 const jobs = useJobsStore();
 
 // Cleanup must be registered synchronously: inside the async onMounted below
@@ -46,6 +48,7 @@ onMounted(async () => {
   await settings.init(); // get_server_url + persisted playback prefs, then point the REST client at it
   await player.init(); // subscribe to player-state events
   await dsp.init(); // persisted EQ/loudness + device/DoP capability
+  await analog.init(); // the A/B pair of analog-warmth settings
   jobs.init(); // pick up any active server jobs (scan / ISO extraction)
   // Keep the queue store in sync with core-driven queue changes.
   stopWatch = player.$subscribe((_m, s) => {

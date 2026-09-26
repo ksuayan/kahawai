@@ -97,6 +97,7 @@ export const usePlayerStore = defineStore("player", () => {
   const durationMs = computed(() => raw.value?.duration_ms ?? null);
   const bufferedMs = computed(() => raw.value?.buffered_ms ?? null);
   const outputRateHz = computed(() => raw.value?.output_rate_hz ?? null);
+  const analogPlan = computed(() => raw.value?.analog_plan ?? null);
   const chain = computed(() => raw.value?.chain ?? null);
   const activeFormat = computed(() => raw.value?.format ?? null);
   const outputPath = computed(() => raw.value?.output_path ?? "pcm-shared");
@@ -192,6 +193,7 @@ export const usePlayerStore = defineStore("player", () => {
     durationMs,
     bufferedMs,
     outputRateHz,
+    analogPlan,
     chain,
     activeFormat,
     outputPath,

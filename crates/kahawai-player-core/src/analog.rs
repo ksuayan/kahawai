@@ -32,6 +32,48 @@ pub enum AnalogFlavour {
     SolidState,
 }
 
+/// How to keep aliasing out of the audible band. `Auto` follows the sample
+/// rate (see [`anti_alias_plan`]); the others force a plan, for A/B listening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AntiAliasChoice {
+    #[default]
+    Auto,
+    X1,
+    X1Adaa,
+    X2,
+    X2Adaa,
+    X4,
+    X4Adaa,
+}
+
+impl AntiAliasChoice {
+    /// The plan this choice means at `sample_rate`.
+    pub fn resolve(self, sample_rate: u32) -> AntiAlias {
+        let (factor, adaa) = match self {
+            Self::Auto => return anti_alias_plan(sample_rate),
+            Self::X1 => (1, false),
+            Self::X1Adaa => (1, true),
+            Self::X2 => (2, false),
+            Self::X2Adaa => (2, true),
+            Self::X4 => (4, false),
+            Self::X4Adaa => (4, true),
+        };
+        AntiAlias { factor, adaa }
+    }
+
+    fn from_plan(plan: AntiAlias) -> Self {
+        match (plan.factor, plan.adaa) {
+            (1, false) => Self::X1,
+            (1, true) => Self::X1Adaa,
+            (2, false) => Self::X2,
+            (2, true) => Self::X2Adaa,
+            (_, false) => Self::X4,
+            (_, true) => Self::X4Adaa,
+        }
+    }
+}
+
 /// User-facing settings; persisted in `engine-settings.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -46,6 +88,8 @@ pub struct AnalogSettings {
     pub output_db: f32,
     /// Match the processed level to the dry level (at a -12 dBFS reference).
     pub auto_gain: bool,
+    /// Anti-aliasing plan; `auto` follows the sample rate.
+    pub antialias: AntiAliasChoice,
 }
 
 impl Default for AnalogSettings {
@@ -57,6 +101,7 @@ impl Default for AnalogSettings {
             mix: 0.4,
             output_db: 0.0,
             auto_gain: true,
+            antialias: AntiAliasChoice::Auto,
         }
     }
 }
@@ -414,6 +459,28 @@ impl Chan {
 /// How long parameter changes and on/off take to fade, in seconds.
 const RAMP_SECONDS: f32 = 0.015;
 
+/// What the stage is doing right now, for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalogStatus {
+    pub plan: AntiAlias,
+    pub latency_frames: u32,
+    pub sample_rate: u32,
+}
+
+impl AnalogStatus {
+    /// e.g. "4x + ADAA, 0.7 ms latency".
+    pub fn describe(&self) -> String {
+        let ms = self.latency_frames as f64 * 1000.0 / self.sample_rate.max(1) as f64;
+        let alias = match (self.plan.factor, self.plan.adaa) {
+            (1, false) => "no anti-aliasing".to_string(),
+            (1, true) => "ADAA".to_string(),
+            (f, false) => format!("{f}x oversampling"),
+            (f, true) => format!("{f}x oversampling + ADAA"),
+        };
+        format!("{alias}, {ms:.1} ms latency")
+    }
+}
+
 pub struct AnalogStage {
     settings: AnalogSettings,
     plan: AntiAlias,
@@ -421,6 +488,8 @@ pub struct AnalogStage {
     /// The curve in use. A flavour change waits for a fade-out (see `pending`).
     active: AnalogFlavour,
     pending: Option<AnalogFlavour>,
+    /// A changed anti-aliasing plan also waits for a fade-out.
+    pending_plan: Option<AntiAlias>,
     sample_rate: u32,
     l: usize,
     h: Vec<f32>,
@@ -444,11 +513,12 @@ impl AnalogStage {
     /// A stage with an explicit anti-aliasing plan (for measurements).
     pub fn with_plan(sample_rate: u32, plan: AntiAlias) -> Self {
         let mut s = Self {
-            settings: AnalogSettings::default(),
+            settings: AnalogSettings { antialias: AntiAliasChoice::from_plan(plan), ..AnalogSettings::default() },
             plan,
             shaper: Shaper::new(AnalogFlavour::default()),
             active: AnalogFlavour::default(),
             pending: None,
+            pending_plan: None,
             sample_rate,
             l: 1,
             h: Vec::new(),
@@ -509,17 +579,51 @@ impl AnalogStage {
     pub fn set_settings(&mut self, settings: AnalogSettings) {
         self.settings = settings.clamped();
         let want = self.settings.flavour;
+        let idle = !self.primed || self.fade == 0.0;
         if want == self.active {
             self.pending = None;
-        } else if !self.primed || self.fade == 0.0 {
+        } else if idle {
             self.active = want;
             self.shaper = Shaper::new(want);
             self.pending = None;
         } else {
             self.pending = Some(want);
         }
+        let want_plan = self.settings.antialias.resolve(self.sample_rate);
+        if want_plan == self.plan {
+            self.pending_plan = None;
+        } else if idle {
+            self.plan = want_plan;
+            self.pending_plan = None;
+            self.design();
+        } else {
+            self.pending_plan = Some(want_plan);
+        }
         if !self.primed {
             self.snap_params();
+        }
+    }
+
+    /// The plan in use and its latency, while the stage is on.
+    pub fn status(&self) -> Option<AnalogStatus> {
+        (self.settings.enabled || self.fade > 0.0).then(|| AnalogStatus {
+            plan: self.plan,
+            latency_frames: self.latency() as u32,
+            sample_rate: self.sample_rate,
+        })
+    }
+
+    /// Apply a waiting flavour or plan change (the caller has faded out).
+    fn swap_pending(&mut self) {
+        if let Some(f) = self.pending.take() {
+            self.active = f;
+            self.shaper = Shaper::new(f);
+        }
+        if let Some(p) = self.pending_plan.take() {
+            if p != self.plan {
+                self.plan = p;
+                self.design();
+            }
         }
     }
 
@@ -543,11 +647,9 @@ impl AnalogStage {
 impl DspStage for AnalogStage {
     fn prepare(&mut self, sample_rate: u32) {
         if sample_rate != self.sample_rate {
-            let forced = self.plan != anti_alias_plan(self.sample_rate);
             self.sample_rate = sample_rate;
-            if !forced {
-                self.plan = anti_alias_plan(sample_rate);
-            }
+            self.plan = self.settings.antialias.resolve(sample_rate);
+            self.pending_plan = None;
             self.design();
             self.primed = false;
             self.snap();
@@ -570,12 +672,10 @@ impl DspStage for AnalogStage {
             return;
         }
         if self.fade == 0.0 {
-            if let Some(p) = self.pending.take() {
-                self.active = p;
-                self.shaper = Shaper::new(p);
-            }
+            self.swap_pending();
         }
-        let mut target_fade = if self.settings.enabled && self.pending.is_none() { 1.0 } else { 0.0 };
+        let waiting = self.pending.is_some() || self.pending_plan.is_some();
+        let mut target_fade = if self.settings.enabled && !waiting { 1.0 } else { 0.0 };
         if self.fade == 0.0 && target_fade == 0.0 {
             return; // bit-transparent bypass
         }
@@ -596,11 +696,11 @@ impl DspStage for AnalogStage {
             (tmix - self.mix) / ramp,
             (target_fade - self.fade) / ramp,
         );
-        let l = self.l;
-        let adaa = self.plan.adaa;
-        let latency = self.latency();
+        let mut l = self.l;
+        let mut adaa = self.plan.adaa;
+        let mut latency = self.latency();
         let (dc_r, taps_phase) = (self.dc_r, TAPS_PER_PHASE + 1);
-        let gain_up = l as f32;
+        let mut gain_up = l as f32;
 
         for frame in samples.chunks_exact_mut(channels) {
             // Glide the parameters (linear, per frame).
@@ -609,11 +709,15 @@ impl DspStage for AnalogStage {
             step(&mut self.out, tout, &mut so);
             step(&mut self.mix, tmix, &mut sm);
             step(&mut self.fade, target_fade, &mut sf);
-            if self.fade == 0.0 && self.pending.is_some() {
-                // Faded out mid-block: swap the curve, clear its history and
-                // fade back in, right here (not at the next block).
-                self.active = self.pending.take().expect("checked above");
-                self.shaper = Shaper::new(self.active);
+            if self.fade == 0.0 && (self.pending.is_some() || self.pending_plan.is_some()) {
+                // Faded out mid-block: swap the curve and plan, clear their
+                // history and fade back in, right here (not at the next block).
+                self.swap_pending();
+                self.ensure_chans(channels);
+                l = self.l;
+                adaa = self.plan.adaa;
+                latency = self.latency();
+                gain_up = l as f32;
                 let shaper = self.shaper;
                 self.chans.iter_mut().for_each(|c| c.clear(&shaper));
                 self.comp = if self.settings.auto_gain { gain_match(shaper, tg) } else { 1.0 };
@@ -696,7 +800,7 @@ mod tests {
     use std::f64::consts::PI;
 
     fn on(flavour: AnalogFlavour, drive: f32, mix: f32) -> AnalogSettings {
-        AnalogSettings { enabled: true, flavour, drive, mix, output_db: 0.0, auto_gain: false }
+        AnalogSettings { enabled: true, flavour, drive, mix, output_db: 0.0, auto_gain: false, antialias: AntiAliasChoice::Auto }
     }
 
     fn tone(bin: usize, n: usize, periods: usize, amp: f32, channels: usize) -> Vec<f32> {
@@ -824,7 +928,8 @@ mod tests {
             Some(p) => AnalogStage::with_plan(fs, p),
             None => AnalogStage::new(fs),
         };
-        st.set_settings(on(flavour, drive, 1.0));
+        let aa = plan.map(AntiAliasChoice::from_plan).unwrap_or_default();
+        st.set_settings(AnalogSettings { antialias: aa, ..on(flavour, drive, 1.0) });
         let sp = spectrum(&run(&mut st, bin, n, amp));
         let lim = (20_000.0 / fs as f64 * n as f64) as usize;
         let err = (1..lim.min(n / 2))
@@ -1063,6 +1168,60 @@ mod tests {
         assert!(parsed.enabled && parsed.flavour == AnalogFlavour::WarmTriode && parsed.mix == 0.4);
         let json = serde_json::to_string(&AnalogSettings::default()).unwrap();
         assert!(json.contains("\"warm_triode\""), "{json}");
+    }
+
+    fn with_aa(flavour: AnalogFlavour, aa: AntiAliasChoice) -> AnalogSettings {
+        AnalogSettings { antialias: aa, ..on(flavour, 0.7, 1.0) }
+    }
+
+    #[test]
+    fn anti_alias_choices_map_to_plans_and_serialize_by_name() {
+        assert_eq!(AntiAliasChoice::Auto.resolve(44_100), AntiAlias { factor: 4, adaa: true });
+        assert_eq!(AntiAliasChoice::Auto.resolve(192_000), AntiAlias { factor: 1, adaa: true });
+        assert_eq!(AntiAliasChoice::X2.resolve(44_100), AntiAlias { factor: 2, adaa: false });
+        assert_eq!(AntiAliasChoice::X4Adaa.resolve(192_000), AntiAlias { factor: 4, adaa: true });
+        for (c, name) in [(AntiAliasChoice::Auto, "auto"), (AntiAliasChoice::X1, "x1"), (AntiAliasChoice::X1Adaa, "x1_adaa"), (AntiAliasChoice::X2Adaa, "x2_adaa"), (AntiAliasChoice::X4, "x4")] {
+            assert_eq!(serde_json::to_string(&c).unwrap(), format!("\"{name}\""));
+        }
+        let plan = AntiAlias { factor: 2, adaa: true };
+        assert_eq!(AntiAliasChoice::from_plan(plan).resolve(48_000), plan);
+    }
+
+    #[test]
+    fn a_forced_plan_is_used_and_reported() {
+        let mut st = AnalogStage::new(44_100);
+        st.set_settings(with_aa(AnalogFlavour::WarmTriode, AntiAliasChoice::X1));
+        let s = st.status().expect("on");
+        assert_eq!((s.plan.factor, s.plan.adaa, s.latency_frames), (1, false, 0));
+        assert_eq!(s.describe(), "no anti-aliasing, 0.0 ms latency");
+        st.set_settings(with_aa(AnalogFlavour::WarmTriode, AntiAliasChoice::X4Adaa));
+        assert_eq!(st.status().unwrap().describe(), "4x oversampling + ADAA, 0.7 ms latency");
+        // A forced plan survives a sample-rate change; auto follows it.
+        st.prepare(96_000);
+        assert_eq!(st.status().unwrap().plan, AntiAlias { factor: 4, adaa: true });
+        st.set_settings(with_aa(AnalogFlavour::WarmTriode, AntiAliasChoice::Auto));
+        assert_eq!(st.status().unwrap().plan, AntiAlias { factor: 2, adaa: true });
+        assert!(AnalogStage::new(44_100).status().is_none(), "off: nothing to report");
+    }
+
+    #[test]
+    fn switching_plans_live_fades_without_a_click() {
+        let (n, bin) = (1 << 13, 40);
+        let mut st = AnalogStage::new(44_100);
+        st.set_settings(with_aa(AnalogFlavour::WarmTriode, AntiAliasChoice::X4Adaa));
+        let mut a = tone(bin, n, 2, 0.4, 1);
+        st.process(&mut a, 1);
+        st.set_settings(with_aa(AnalogFlavour::WarmTriode, AntiAliasChoice::X1));
+        assert_eq!(st.status().unwrap().plan.factor, 4, "the swap waits for the fade-out");
+        let mut b = tone(bin, n, 2, 0.4, 1);
+        st.process(&mut b, 1);
+        let s = st.status().unwrap();
+        assert_eq!((s.plan.factor, s.latency_frames), (1, 0), "swapped once faded out");
+        let seam = [a, b.clone()].concat();
+        assert!(max_step(&seam[n..], 1) < 0.05, "no click across the plan change");
+        // ...and it came back at full level, not stuck faded out.
+        let rms = (b[n..].iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / n as f64).sqrt();
+        assert!(rms > 0.2, "signal present after the swap: rms {rms}");
     }
 
     #[test]

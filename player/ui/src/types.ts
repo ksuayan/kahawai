@@ -90,6 +90,8 @@ export interface PlayerState {
   buffered_ms?: number | null;
   /** Rate of the audio reaching the output (what the EQ is designed at); null when idle. */
   output_rate_hz?: number | null;
+  /** What the analog stage is doing (plan, latency); null when off. */
+  analog_plan?: string | null;
   format: string | null;
   chain: string | null;
   /** "pcm-shared" (DSP chain active) or "dop-exclusive" (bit-perfect). */
@@ -132,11 +134,57 @@ export interface EqBandRow extends EqBand {
   enabled: boolean;
 }
 
+/** Analog warmth (tube / transistor character); mirrors `AnalogSettings` in the Rust core. */
+export type AnalogFlavour = "warm_triode" | "solid_state";
+export type AntiAliasChoice = "auto" | "x1" | "x1_adaa" | "x2" | "x2_adaa" | "x4" | "x4_adaa";
+export const ANALOG_FLAVOURS: AnalogFlavour[] = ["warm_triode", "solid_state"];
+export const ANTI_ALIAS_CHOICES: AntiAliasChoice[] = ["auto", "x1", "x1_adaa", "x2", "x2_adaa", "x4", "x4_adaa"];
+
+export interface AnalogSettings {
+  enabled: boolean;
+  flavour: AnalogFlavour;
+  /** 0..1: how hard the signal is pushed into the curve. */
+  drive: number;
+  /** 0..1: parallel blend of the processed signal. */
+  mix: number;
+  /** Output trim, -6..6 dB. */
+  output_db: number;
+  /** Match the processed level to the dry level. */
+  auto_gain: boolean;
+  antialias: AntiAliasChoice;
+}
+
+export const DEFAULT_ANALOG_SETTINGS: AnalogSettings = {
+  enabled: false,
+  flavour: "warm_triode",
+  drive: 0.4,
+  mix: 0.4,
+  output_db: 0,
+  auto_gain: true,
+  antialias: "auto",
+};
+
+/** Pull every value into its allowed range (the core does the same). */
+export function clampAnalog(s: AnalogSettings): AnalogSettings {
+  const n = (v: number, d: number, lo: number, hi: number): number =>
+    Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : d));
+  return {
+    ...s,
+    flavour: ANALOG_FLAVOURS.includes(s.flavour) ? s.flavour : "warm_triode",
+    antialias: ANTI_ALIAS_CHOICES.includes(s.antialias) ? s.antialias : "auto",
+    drive: n(s.drive, 0.4, 0, 1),
+    mix: n(s.mix, 0.4, 0, 1),
+    output_db: n(s.output_db, 0, -6, 6),
+  };
+}
+
 export interface DspSettings {
   eq_bands: EqBand[];
   eq_enabled: boolean;
   loudness_enabled: boolean;
   loudness_target: number;
+  /** Absent in settings files from before the analog stage. */
+  analog?: AnalogSettings;
 }
 
 export const DEFAULT_DSP_SETTINGS: DspSettings = {
@@ -144,6 +192,7 @@ export const DEFAULT_DSP_SETTINGS: DspSettings = {
   eq_enabled: true,
   loudness_enabled: false,
   loudness_target: -14,
+  analog: DEFAULT_ANALOG_SETTINGS,
 };
 
 export const MAX_EQ_BANDS = 8;

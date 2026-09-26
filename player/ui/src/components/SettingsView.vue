@@ -24,6 +24,7 @@ import UiInput from "../ui/UiInput.vue";
 import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import UiSwitch from "../ui/UiSwitch.vue";
 import ViewShell from "../ui/ViewShell.vue";
+import AnalogSection from "./AnalogSection.vue";
 import SettingsSection from "./SettingsSection.vue";
 
 const settings = useSettingsStore();
@@ -390,6 +391,8 @@ const dopRates = computed(() =>
       </div>
       <UiButton variant="icon" :disabled="!dsp.canAddBand" @click="dsp.addBand()"><Plus /> Add band</UiButton>
     </SettingsSection>
+
+    <AnalogSection />
 
     <SettingsSection title="Loudness normalization">
       <UiHint>

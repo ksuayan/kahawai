@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use kahawai_core::{api::StreamFormat, format::AudioFormat, MusicError, Track};
 use kahawai_player_core::{
-    AnalogFlavour, AnalogSettings, resolve_format, valid_formats, AudioSink, BitPerfect, EngineController, EqBand, EqBandType,
+    AnalogFlavour, AnalogSettings, AntiAliasChoice, resolve_format, valid_formats, AudioSink, BitPerfect, EngineController, EqBand, EqBandType,
     OutputPath, PcmChunk, Player, PlayerStatus, StreamInfo, StreamOptions, Transport, VecSink,
 };
 
@@ -1097,7 +1097,7 @@ fn dop_bypasses_dsp_entirely() {
         }])
         .expect("valid band");
     h.player.set_eq_enabled(true);
-    h.player.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 1.0, mix: 1.0, output_db: 6.0, auto_gain: false });
+    h.player.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 1.0, mix: 1.0, output_db: 6.0, auto_gain: false, ..Default::default() });
     h.player.set_loudness_enabled(true);
     h.player.set_volume(0.0);
     h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
@@ -1167,11 +1167,25 @@ fn analog_stage_colours_the_pcm_path_and_is_off_by_default() {
         h.samples()
     };
     let dry = run(None);
-    let warm = run(Some(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 0.8, mix: 1.0, output_db: 0.0, auto_gain: false }));
+    let warm = run(Some(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 0.8, mix: 1.0, output_db: 0.0, auto_gain: false, ..Default::default() }));
     assert_eq!(run(Some(AnalogSettings::default())), dry, "default settings leave the audio untouched");
     assert_eq!(warm.len(), dry.len(), "the stage adds no samples");
     let diff = warm.iter().zip(&dry).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
     assert!(diff > 0.01, "enabled: the audio is coloured (max difference {diff})");
+}
+
+#[test]
+fn snapshot_reports_the_analog_plan_only_while_it_is_on_and_playing() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 5)]);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 5000)], 0);
+    h.player.pump();
+    assert_eq!(h.player.snapshot().analog_plan, None, "off: nothing to report");
+    h.player.set_analog(AnalogSettings { enabled: true, antialias: AntiAliasChoice::X2Adaa, ..AnalogSettings::default() });
+    h.player.pump();
+    assert_eq!(h.player.snapshot().analog_plan.as_deref(), Some("2x oversampling + ADAA, 0.7 ms latency"));
+    h.player.stop();
+    assert_eq!(h.player.snapshot().analog_plan, None, "nothing playing");
 }
 
 #[test]
@@ -1181,7 +1195,7 @@ fn analog_settings_persist_and_old_files_default_to_off() {
     let settings_path = dir.join("settings.json");
     let url_lock = Arc::new(std::sync::RwLock::new("http://stub".to_string()));
     let ctl = EngineController::with_transport(Box::new(VecSink::new()), Box::new(StubTransport::new(None)), url_lock, settings_path.clone());
-    ctl.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::SolidState, drive: 9.0, mix: 0.25, output_db: -2.0, auto_gain: true });
+    ctl.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::SolidState, drive: 9.0, mix: 0.25, output_db: -2.0, auto_gain: true, ..Default::default() });
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("saved")).expect("json");
     assert_eq!(v["dsp"]["analog"]["enabled"], true);
     assert_eq!(v["dsp"]["analog"]["flavour"], "solid_state");
@@ -1719,7 +1733,7 @@ fn bit_perfect_ignores_volume_eq_and_loudness() {
         }])
         .expect("valid band");
     h.player.set_eq_enabled(true);
-    h.player.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 1.0, mix: 1.0, output_db: 6.0, auto_gain: false });
+    h.player.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 1.0, mix: 1.0, output_db: 6.0, auto_gain: false, ..Default::default() });
     h.player.set_loudness_enabled(true);
     h.stub.add(1, &[(440.0, 8820)]);
     h.player

@@ -25,7 +25,7 @@ fn main() {
         for (label, flavour) in [("triode", AnalogFlavour::WarmTriode), ("solid state", AnalogFlavour::SolidState)] {
             for (factor, adaa) in [(1usize, false), (1, true), (2, false), (2, true), (4, false), (4, true)] {
                 let mut st = AnalogStage::with_plan(fs as u32, AntiAlias { factor, adaa });
-                st.set_settings(AnalogSettings { enabled: true, flavour, drive: 0.6, mix: 0.5, output_db: 0.0, auto_gain: true });
+                st.set_settings(AnalogSettings { enabled: true, flavour, drive: 0.6, mix: 0.5, output_db: 0.0, auto_gain: true, ..Default::default() });
                 run(&format!("{label}: {factor}x{}", if adaa { " + ADAA" } else { "" }), &mut |c| st.process(c, 2));
             }
         }

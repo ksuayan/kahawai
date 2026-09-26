@@ -3,7 +3,7 @@
 Research summary and an itemized plan for adding tube and transistor
 character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 2 done** (research, a working stage in the engine,
 the triode curve derived from Koren's model, and antiderivative
-antialiasing); **no UI yet**. Findings: section 10; Phase 1 results: 11;
+antialiasing), plus **an A/B test panel in Settings** (section 13). Findings: section 10; Phase 1 results: 11;
 Phase 2 results: 12.
 
 Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md)
@@ -553,7 +553,9 @@ Measured by [phase1_cost.rs](research/analog-spike/src/bin/phase1_cost.rs)
 Plenty of room. The FIR is a straightforward implementation; there is
 obvious headroom for optimisation if it is ever needed.
 
-### 11.5 How to try it now (no UI yet)
+### 11.5 How to try it (the Settings panel in section 13 replaces this)
+
+Before the Settings panel existed, the stage could only be switched on by editing the file:
 
 Quit the app, edit `engine-settings.json` in the app's data folder
 (`~/Library/Application Support/com.suayan.kahawai-player/` on macOS), and
@@ -690,3 +692,76 @@ better still at 192 kHz; measured to −70 dB or better in the test). If CPU eve
 - Whether it sounds right by ear; only measured so far.
 - Push-pull and hard-transistor flavours (Phase 3 and later), sag and
   transformer colour (Phase 3), UI (Phase 4).
+
+---
+
+## 13. A/B test panel (Settings)
+
+Settings, section **Analog warmth (experimental)**, right after the
+Parametric EQ. Code: [AnalogSection.vue](player/ui/src/components/AnalogSection.vue),
+[stores/analog.ts](player/ui/src/stores/analog.ts).
+
+### 13.1 How it works
+
+- **Two slots, A and B**, each a complete set of settings: *Warmth on*,
+  *Flavour* (warm triode or solid state), *Drive*, *Mix*, *Output* trim,
+  *Match level to the dry signal*, and *Anti-aliasing*.
+- **Listening to A / B** chooses which slot the engine plays. **Switch A/B**
+  toggles. The switch fades out and in (about 15 ms per step), so it never
+  clicks, and it works while music plays.
+- **A starts as "off"** (the dry signal) and **B as the warm triode**, so the
+  first comparison is warmth against nothing. Change either slot to compare
+  anything else: triode against solid state, drive 30% against 70%, 4x + ADAA
+  against 1x with no protection, and so on.
+- **Edits to the slot you are hearing apply live.** Edits to the other slot
+  wait until you switch to it.
+- **Copy A to B** (and B to A) duplicates a slot, which is the quickest way to
+  change one setting and compare.
+- The panel says what the engine is doing right now, taken from the player
+  state: for example "Now playing with 4x oversampling + ADAA, 0.7 ms
+  latency." It says the stage is off when it is off or nothing plays on the
+  shared output.
+- On DoP and bit-perfect output the panel is dimmed with "Analog warmth is
+  not supported for this stream type." (the same rule as the EQ).
+
+### 13.2 Anti-aliasing choices (for listening tests)
+
+*Auto* follows the sample rate (section 12.3). The others force a plan, so
+you can hear what the measurements in section 12 mean: **1x, no protection**;
+**1x + ADAA**; **2x**; **2x + ADAA**; **4x**; **4x + ADAA**. A plan change is
+faded like any other (out, swap, in). The engine also reports the latency
+each plan adds (0 ms for 1x; about 0.7 ms at 44.1 kHz with oversampling).
+
+### 13.3 Level matching
+
+"Match level" scales the processed signal so a −12 dBFS RMS sine comes out at
+the dry level. Real music is louder and denser, so it is **not** a perfect
+match; when you compare, use **Output** (plus or minus 6 dB) to even out what
+you hear, otherwise the louder side will sound better.
+
+### 13.4 Where things are stored
+
+- The engine saves the slot being heard in `engine-settings.json` (as before),
+  so playback keeps working with no UI.
+- The pair (both slots and which one is active) is kept by the app in its
+  browser storage. Clearing app data resets it; the engine setting stays.
+
+### 13.5 What was added underneath
+
+- The core's settings gained `antialias` (`auto`, `x1`, `x1_adaa`, `x2`,
+  `x2_adaa`, `x4`, `x4_adaa`); a changed plan or flavour waits for the fade-out
+  before swapping.
+- The player state gained `analog_plan` (text such as "4x oversampling + ADAA,
+  0.7 ms latency").
+- Tests: plan mapping and serialization, a forced plan surviving a
+  sample-rate change, live plan changes without clicks, the state field, the
+  store (slot handling, persistence, clamping) and the component (A/B
+  switching, live edits, all choices, dimming on exclusive output).
+
+### 13.6 Not done
+
+- No keyboard shortcut for A/B yet (a quick key would be handy for blind-ish
+  comparisons).
+- No true blind test (hidden identities, random order): the labels A and B
+  show their settings.
+- No live level meter to check the match.

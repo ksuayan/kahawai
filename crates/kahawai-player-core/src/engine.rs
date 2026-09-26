@@ -148,6 +148,10 @@ pub struct PlayerSnapshot {
     /// the rate the EQ is designed at. `None` when idle.
     #[serde(default)]
     pub output_rate_hz: Option<u32>,
+    /// What the analog stage is doing, e.g. "4x oversampling + ADAA, 0.7 ms
+    /// latency"; `None` when it is off or nothing is playing on the shared path.
+    #[serde(default)]
+    pub analog_plan: Option<String>,
     /// The rendition actually streaming (explicit `?format=` value).
     pub format: Option<StreamFormat>,
     /// `X-Transcode-Chain` of the active response.
@@ -174,6 +178,7 @@ impl Default for PlayerSnapshot {
             duration_ms: None,
             buffered_ms: None,
             output_rate_hz: None,
+            analog_plan: None,
             format: None,
             chain: None,
             output_path: OutputPath::Pcm,
@@ -1381,6 +1386,11 @@ impl Player {
             duration_ms,
             buffered_ms,
             output_rate_hz,
+            analog_plan: if self.active.is_some() && self.output_path == OutputPath::Pcm {
+                self.analog.status().map(|s| s.describe())
+            } else {
+                None
+            },
             format,
             chain,
             output_path: self.output_path,

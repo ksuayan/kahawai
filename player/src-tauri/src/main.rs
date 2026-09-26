@@ -122,6 +122,8 @@ struct PlayerStateDto {
     buffered_ms: Option<u64>,
     /// Rate of the audio reaching the output; the rate the EQ is designed at.
     output_rate_hz: Option<u32>,
+    /// What the analog stage is doing right now (plan and latency), if on.
+    analog_plan: Option<String>,
     format: Option<&'static str>,
     chain: Option<String>,
     /// "pcm-shared" | "dop-exclusive" — drives the Exclusive DoP badge.
@@ -179,6 +181,7 @@ impl From<PlayerSnapshot> for PlayerStateDto {
             duration_ms: s.duration_ms,
             buffered_ms: s.buffered_ms,
             output_rate_hz: s.output_rate_hz,
+            analog_plan: s.analog_plan,
             format: s.format.map(format_str),
             chain: s.chain,
             output_path: output_path_str(s.output_path),
