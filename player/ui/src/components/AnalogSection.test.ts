@@ -133,3 +133,64 @@ describe("Analog warmth: listening suggestions", () => {
     expect(tauri.callsTo("set_analog").at(-1)).toMatchObject({ settings: { flavour: "push_pull_el34" } });
   });
 });
+
+describe("Analog warmth: level meter", () => {
+  const lvl = (delta_db: number, peak_dbfs = -6, seconds = 5) => ({ input_lufs: -20, output_lufs: -20 + delta_db, delta_db, peak_dbfs, seconds });
+  const heardB = async (state: ReturnType<typeof makeState>) => {
+    const b = await boot(state);
+    await b.wrapper.get('[data-testid="ab-b"]').trigger("click");
+    await settle();
+    return b;
+  };
+
+  it("shows before, after, change and peak for the slot being heard, with a marker on the scale", async () => {
+    const { wrapper } = await heardB(makeState({ status: "playing", output_path: "pcm-shared", analog_level: lvl(1.8, -4.2) }));
+    expect(wrapper.get('[data-testid="meter-in"]').text()).toBe("-20.0");
+    expect(wrapper.get('[data-testid="meter-out"]').text()).toBe("-18.2");
+    expect(wrapper.get('[data-testid="meter-delta"]').text()).toBe("+1.8 dB");
+    expect(wrapper.get('[data-testid="meter-peak"]').text()).toBe("-4.2");
+    expect(wrapper.get('[data-testid="meter-marker"]').attributes("style")).toContain("calc(65%"); // (1.8 + 6) / 12
+  });
+
+  it("colours the change by how far it is from level: ok, warning, bad", async () => {
+    for (const [delta, state] of [[0.2, "ok"], [1.0, "warn"], [-3, "bad"]] as const) {
+      const { wrapper } = await heardB(makeState({ status: "playing", output_path: "pcm-shared", analog_level: lvl(delta) }));
+      expect(wrapper.get('[data-testid="meter-delta"]').attributes("data-state")).toBe(state);
+      wrapper.unmount();
+    }
+  });
+
+  it("warns when the peak is at full scale", async () => {
+    const quiet = await heardB(makeState({ status: "playing", output_path: "pcm-shared", analog_level: lvl(0, -3) }));
+    expect(quiet.wrapper.find('[data-testid="meter-clip"]').exists()).toBe(false);
+    quiet.wrapper.unmount();
+    const hot = await heardB(makeState({ status: "playing", output_path: "pcm-shared", analog_level: lvl(0, 0.4) }));
+    expect(hot.wrapper.get('[data-testid="meter-clip"]').text()).toContain("may clip");
+  });
+
+  it("says why there is no reading: dry slot, nothing playing, or still measuring", async () => {
+    const dry = await boot(makeState({ status: "playing", output_path: "pcm-shared" }));
+    expect(dry.wrapper.get('[data-testid="meter-idle"]').text()).toContain("dry signal");
+    dry.wrapper.unmount();
+    const idle = await heardB(makeState({ status: "stopped", output_path: "pcm-shared" }));
+    expect(idle.wrapper.get('[data-testid="meter-idle"]').text()).toContain("Play music");
+    idle.wrapper.unmount();
+    const measuring = await heardB(makeState({ status: "playing", output_path: "pcm-shared" }));
+    expect(measuring.wrapper.get('[data-testid="meter-idle"]').text()).toContain("Measuring");
+  });
+
+  it("match buttons need both slots measured, then trim the Output and explain what changed", async () => {
+    const { wrapper, store } = await boot();
+    expect(wrapper.get('[data-testid="match-b"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="measured-a"]').text()).toContain("0.0 dB (dry)");
+    expect(wrapper.get('[data-testid="measured-b"]').text()).toContain("not measured yet");
+    store.measured.b = 2.4;
+    await settle();
+    expect(wrapper.get('[data-testid="match-b"]').attributes("disabled")).toBeUndefined();
+    await wrapper.get('[data-testid="match-b"]').trigger("click");
+    await settle();
+    expect(store.b.output_db).toBe(-2.5);
+    expect(wrapper.get('[data-testid="match-note"]').text()).toContain("Output of B to -2.5 dB");
+    expect(wrapper.get('[role="slider"][aria-label="Output B"]').attributes("aria-valuenow")).toBe("-2.5");
+  });
+});

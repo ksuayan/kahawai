@@ -1,9 +1,12 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { getDspSettings, setAnalog } from "../tauri";
-import { clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO, type AnalogFlavour, type AnalogSettings, type ListeningRecipe } from "../types";
+import { clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO, type AnalogFlavour, type AnalogLevel, type AnalogSettings, type ListeningRecipe } from "../types";
 
 export type Slot = "a" | "b";
+
+/** A reading needs this many seconds of audio behind it before it is trusted. */
+export const MIN_MEASURE_SECONDS = 2;
 const KEY = "kahawai-player.analog-ab";
 
 interface Saved {
@@ -37,9 +40,16 @@ export const useAnalogStore = defineStore("analog", () => {
   const b = ref<AnalogSettings>({ ...DEFAULT_ANALOG_SETTINGS, enabled: true });
   const active = ref<Slot>("a");
   const loaded = ref(false);
+  /** Level change each slot makes (dB, output minus input), once measured while it played; a dry slot is 0 by definition. */
+  const measured = ref<Record<Slot, number | null>>({ a: 0, b: null });
 
   const slots = { a, b };
   const current = computed(() => slots[active.value].value);
+
+  /** Forget a slot's measurement (its settings changed), keeping the dry slot's 0. */
+  function resetMeasured(slot: Slot): void {
+    measured.value[slot] = slots[slot].value.enabled ? null : 0;
+  }
 
   function persist(): void {
     try {
@@ -49,7 +59,11 @@ export const useAnalogStore = defineStore("analog", () => {
     }
   }
 
+  /** When settings last went to the engine: readings older than that describe the previous settings. */
+  let lastPushAt = 0;
+
   function push(): void {
+    lastPushAt = Date.now();
     void setAnalog(current.value);
     persist();
   }
@@ -68,12 +82,15 @@ export const useAnalogStore = defineStore("analog", () => {
         active.value = "b";
       }
     }
+    resetMeasured("a");
+    resetMeasured("b");
     loaded.value = true;
   }
 
   /** Change one slot. Only the active slot reaches the engine. */
   function update(slot: Slot, patch: Partial<AnalogSettings>): void {
     slots[slot].value = clampAnalog({ ...slots[slot].value, ...patch });
+    resetMeasured(slot); // any change moves the level
     if (slot === active.value) push();
     else persist();
   }
@@ -96,6 +113,8 @@ export const useAnalogStore = defineStore("analog", () => {
   function applyRecipe(recipe: ListeningRecipe): void {
     a.value = recipeSlot(recipe.a);
     b.value = recipeSlot(recipe.b);
+    resetMeasured("a");
+    resetMeasured("b");
     active.value = "a";
     push();
   }
@@ -111,11 +130,40 @@ export const useAnalogStore = defineStore("analog", () => {
     select(active.value === "a" ? "b" : "a");
   }
 
+  /** The engine's level reading for the slot being heard. Trusted after a few seconds of audio. */
+  function noteLevel(level: AnalogLevel | null | undefined): void {
+    if (!current.value.enabled) {
+      measured.value[active.value] = 0;
+      return;
+    }
+    if (!level || level.seconds < MIN_MEASURE_SECONDS) return;
+    // The engine starts a fresh reading whenever settings change; a reading with
+    // more audio behind it than time has passed since then is the old one.
+    if (level.seconds > (Date.now() - lastPushAt) / 1000 + 0.5) return;
+    measured.value[active.value] = level.delta_db;
+  }
+
+  /** Trim `to` (with its Output slider) so it is as loud as `from`. Returns the change applied, or null when a slot is unmeasured. */
+  function matchLevel(from: Slot, to: Slot): { changed_db: number; clamped: boolean } | null {
+    const [f, t] = [measured.value[from], measured.value[to]];
+    if (f === null || t === null) return null;
+    const want = slots[to].value.output_db + (f - t);
+    const clamped = want > 6 || want < -6;
+    const target = Math.min(6, Math.max(-6, Math.round(want * 2) / 2)); // the slider moves in half-dB steps
+    const before = slots[to].value.output_db;
+    if (target !== before) {
+      update(to, { output_db: target });
+      // The change is known: carry the measurement over instead of waiting to re-measure.
+      measured.value[to] = t + (target - before);
+    }
+    return { changed_db: target - before, clamped };
+  }
+
   /** Copy one slot's settings over the other (handy for tweaking one setting). */
   function copy(from: Slot, to: Slot): void {
     if (from === to) return;
     update(to, { ...slots[from].value });
   }
 
-  return { a, b, active, current, loaded, init, update, setFlavour, applyRecipe, select, toggle, copy };
+  return { a, b, active, current, loaded, measured, noteLevel, matchLevel, init, update, setFlavour, applyRecipe, select, toggle, copy };
 });

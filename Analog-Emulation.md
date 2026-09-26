@@ -754,7 +754,77 @@ even when the Settings page is not on screen; each press replaces the last
 message. The keys are listed in Settings, under Keyboard shortcuts, and the A/B
 buttons show them in their tooltips.
 
-### 13.7 Not done
+### 13.7 Level meter and level matching
+
+A/B comparisons are only fair when both sides are equally loud, so the panel
+now measures it. Code: `LoudnessMeter` in
+[dsp.rs](crates/kahawai-player-core/src/dsp.rs), the wiring in
+[engine.rs](crates/kahawai-player-core/src/engine.rs), the panel in
+[AnalogSection.vue](player/ui/src/components/AnalogSection.vue) and the
+matching logic in [stores/analog.ts](player/ui/src/stores/analog.ts).
+
+**What it measures.** The engine measures the loudness of the signal going
+into the stage and coming out of it, and reports the difference: *what the
+stage adds to the level*. The measurement:
+
+- uses the same K-weighting as the loudness normalizer (a high-shelf and a
+  60 Hz high-pass, all channels weighted equally), so bass-heavy and bright
+  material are weighed roughly the way ears do, not by raw RMS;
+- is smoothed with a time constant of 1.5 seconds, so it follows the music
+  without jumping, and skips silence (below −70 LUFS);
+- integrates only while the stage is fully on: not during the fade in or out,
+  not while a flavour or plan swap is waiting (the wet and dry signals are
+  mixed during a fade, which would corrupt the reading);
+- starts over whenever any analog setting changes (the level has changed), so a
+  reading needs about a second of audio, and the app trusts it after two;
+- also tracks the output peak (decaying about 6 dB per second).
+
+The numbers are **relative** (LUFS-like), good for comparing before and after,
+not calibrated to a broadcast standard.
+
+**In the panel** (a "Level meter" block above the two slots):
+
+- *Before*, *After*, *Change* and *Peak* for the slot you are hearing, with the
+  change coloured green (within 0.5 dB), amber (within 1.5 dB) or red, and a
+  marker on a −6 to +6 dB scale.
+- A warning when the output peak reaches full scale ("may clip").
+- When there is no reading it says why: the slot is dry (its change is 0 dB by
+  definition), nothing is playing, or it is still measuring.
+- For each slot, the level change last measured while you listened to it.
+  A slot's measurement is forgotten when you edit it.
+
+**Matching.** Play music with A for a few seconds, then with B. When both are
+measured, **Match B to A** (or **Match A to B**) sets the Output slider of that
+slot so that it comes out as loud as the other: it adds the difference to the
+current Output, rounded to the slider's half-dB steps and limited to ±6 dB. It
+says what it did, and if it hit the limit. The result is carried over so you
+can press it again without re-measuring; play a few seconds to confirm.
+
+**Limits.**
+
+- It measures the music you are playing. Different passages give slightly
+  different differences (a bass note moves it more than a cymbal). Match on
+  the kind of material you will listen to.
+- Half-dB steps mean a match is within about a quarter of a decibel, which
+  is small but not nothing for a blind test.
+- It measures loudness, not "how it sounds": two equally loud versions can
+  still feel different in level because of dynamics and tone.
+- It works on the shared PCM output only (the stage does not run on DoP or
+  bit-perfect output).
+- CPU cost was not measured separately; it adds two K-weighting filter pairs
+  per sample while the stage is on.
+
+**Tests.** The meter follows amplitude (+6.02 dB for double, and the
+K-weighting shape), ignores silence, and starts fresh when reset; the engine's
+reading agrees with an independent offline measurement, follows a −6 dB
+Output trim within 0.15 dB, shows no change at mix 0, and reports nothing when
+the stage is off; the store records readings only with enough audio, rejects
+readings older than the last change, forgets on edit, and matches with the
+right arithmetic and limits; the panel shows all of it. While building it I
+found and fixed a real bug: the reading included the stage's fade-in, which
+made the first second wrong.
+
+### 13.8 Not done
 
 - **A blind-test mode.** Design, not built: an ABX-style test. A and B stay
   visible as the two references; a hidden **X** is randomly A or B on each
@@ -762,13 +832,11 @@ buttons show them in their tooltips.
   you like (X is a third key, or a button), then answer "X is A" or "X is B".
   After, say, ten trials it reports how many you got right and how likely
   that is by chance (a binomial test). While a test is running the panel hides
-  the slot settings and the engine status line (which would give the plan away)
-  and stops the keys and toasts from naming anything. The engine needs no
-  change: the UI just chooses which slot to send. Its weak spot is level: a
-  loudness difference gives the answer away, so the test should insist on a
-  level match first (there is no automatic way to check it yet). Rough size:
-  a day.
-- No live level meter to check the level match.
+  the slot settings, the level readings and the engine status line (which would
+  give the plan away) and stops the keys and toasts from naming anything. The
+  engine needs no change: the UI just chooses which slot to send. It should
+  require a level match first (now possible with the meter above). Rough
+  size: a day.
 
 ---
 

@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ANALOG_FLAVOURS, ANTI_ALIAS_CHOICES, clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO, LISTENING_RECIPES } from "../types";
 import { tauri } from "../test/tauri-mock";
 import { useAnalogStore } from "./analog";
@@ -164,5 +164,77 @@ describe("the design document lists the recipes", () => {
     for (const r of LISTENING_RECIPES) expect(doc).toContain(r.title);
     expect(doc).toMatch(/## 18\. Listening suggestions/);
     expect(doc.trimEnd().split("\n## ").pop()).toMatch(/^19\. References/); // References is the last section
+  });
+});
+
+describe("level measurements and matching", () => {
+  const level = (delta_db: number, seconds = 5, peak_dbfs = -6) => ({ input_lufs: -20, output_lufs: -20 + delta_db, delta_db, peak_dbfs, seconds });
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-26T12:00:00Z"));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("records the level change of the slot being heard, once enough audio is behind it", () => {
+    const s = useAnalogStore();
+    expect(s.measured).toEqual({ a: 0, b: null }); // A is dry: 0 by definition
+    s.select("b");
+    vi.advanceTimersByTime(10_000);
+    s.noteLevel(level(1.8, 1.0)); // too little audio
+    expect(s.measured.b).toBeNull();
+    s.noteLevel(level(1.8));
+    expect(s.measured.b).toBe(1.8);
+    s.noteLevel(null);
+    expect(s.measured.b).toBe(1.8);
+  });
+
+  it("ignores a reading that predates the last change of settings", () => {
+    const s = useAnalogStore();
+    s.select("b"); // sends settings to the engine "now"
+    s.noteLevel(level(4, 10)); // 10 s of audio, but the settings changed just now: that is the old reading
+    expect(s.measured.b).toBeNull();
+    vi.advanceTimersByTime(11_000);
+    s.noteLevel(level(4, 10));
+    expect(s.measured.b).toBe(4);
+  });
+
+  it("forgets a slot's measurement when it is edited, and keeps a dry slot at 0", () => {
+    const s = useAnalogStore();
+    s.select("b");
+    vi.advanceTimersByTime(10_000);
+    s.noteLevel(level(2));
+    s.update("b", { drive: 0.9 });
+    expect(s.measured.b).toBeNull();
+    s.update("b", { enabled: false });
+    expect(s.measured.b).toBe(0);
+    s.update("a", { enabled: true });
+    expect(s.measured.a).toBeNull();
+  });
+
+  it("matches one slot to the other with the Output trim, in half-dB steps, and carries the measurement over", () => {
+    const s = useAnalogStore();
+    s.measured.b = 1.26; // B is 1.26 dB louder than A (dry, 0)
+    const r = s.matchLevel("a", "b");
+    expect(s.b.output_db).toBe(-1.5);
+    expect(r).toEqual({ changed_db: -1.5, clamped: false });
+    expect(s.measured.b).toBeCloseTo(-0.24, 5); // 1.26 - 1.5
+    expect(s.matchLevel("a", "b")).toMatchObject({ changed_db: 0 }); // the 0.24 dB left is inside half a step: already as level as the slider allows
+  });
+
+  it("does not go beyond the slider, and says so; needs both slots measured", () => {
+    const s = useAnalogStore();
+    expect(s.matchLevel("a", "b")).toBeNull(); // B unmeasured
+    s.measured.b = 9;
+    expect(s.matchLevel("a", "b")).toEqual({ changed_db: -6, clamped: true });
+    expect(s.b.output_db).toBe(-6);
+  });
+
+  it("a matched change goes live when that slot is the one being heard", () => {
+    const s = useAnalogStore();
+    s.select("b");
+    tauri.calls.length = 0;
+    s.measured.b = 2;
+    s.matchLevel("a", "b");
+    expect(sent().at(-1)).toMatchObject({ output_db: -2 });
   });
 });

@@ -1189,6 +1189,40 @@ fn snapshot_reports_the_analog_plan_only_while_it_is_on_and_playing() {
 }
 
 #[test]
+fn the_level_meter_reports_what_the_analog_stage_does_to_the_loudness() {
+    let run = |a: AnalogSettings| {
+        let mut h = Harness::new(None);
+        h.stub.add(1, &[(300.0, 44100 * 4)]);
+        h.player.set_analog(a);
+        h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+        // Pump most of the way (not to the end, so the snapshot still has a stream).
+        for _ in 0..40 {
+            h.player.pump();
+        }
+        (h.player.snapshot(), h.samples())
+    };
+    let loud = AnalogSettings { enabled: true, flavour: AnalogFlavour::Tube2a3, drive: 1.0, mix: 1.0, output_db: 0.0, auto_gain: false, sag: 0.0, transformer: 0.0, ..Default::default() };
+    let (snap, out) = run(loud);
+    let lvl = snap.analog_level.expect("measured after a couple of seconds");
+    assert!(lvl.seconds > 1.0, "seconds behind the reading: {}", lvl.seconds);
+    assert!((lvl.output_lufs - lvl.input_lufs - lvl.delta_db).abs() < 1e-3);
+    // The reading agrees with an independent measurement of what reached the sink.
+    let want = kahawai_player_core::integrated_lufs(&out[out.len() / 4 * 2..], 2, 44_100).expect("audio");
+    assert!((lvl.output_lufs - want).abs() < 1.5, "output {:.1} LUFS vs offline {:.1}", lvl.output_lufs, want);
+    assert!(lvl.peak_dbfs < 3.0 && lvl.peak_dbfs > -30.0, "a sensible peak: {}", lvl.peak_dbfs);
+    // Trim the output and the delta follows one for one.
+    let (snap2, _) = run(AnalogSettings { output_db: -6.0, ..loud });
+    let d = snap2.analog_level.unwrap().delta_db - lvl.delta_db;
+    assert!((d + 6.0).abs() < 0.15, "-6 dB of output trim moves the level by {d:.2} dB");
+    // With the mix at zero the stage passes the dry signal: no change.
+    let (snap3, _) = run(AnalogSettings { mix: 0.0, ..loud });
+    assert!(snap3.analog_level.unwrap().delta_db.abs() < 0.3, "mix 0 changes nothing");
+    // Off, there is nothing to report.
+    let (off, _) = run(AnalogSettings::default());
+    assert!(off.analog_level.is_none());
+}
+
+#[test]
 fn analog_settings_persist_and_old_files_default_to_off() {
     let dir = std::env::temp_dir().join("kahawai-player-core-test-analog-settings");
     let _ = std::fs::remove_dir_all(&dir);

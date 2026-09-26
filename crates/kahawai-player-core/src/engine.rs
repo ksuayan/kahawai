@@ -32,7 +32,7 @@ use crate::bitperfect::{f32_to_i24_le, BitPerfect};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
 use crate::analog::{AnalogSettings, AnalogStage};
-use crate::dsp::{DspStage, 
+use crate::dsp::{DspStage, LoudnessMeter, 
     scan_track_lufs, EqBand, GainRamp, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
 };
 use crate::queue::{Queue, RepeatMode};
@@ -124,6 +124,22 @@ pub enum PlayerStatus {
     Paused,
 }
 
+/// The analog stage's effect on the level (K-weighted, smoothed over a few
+/// seconds). Relative readings, for level-matching an A/B comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AnalogLevel {
+    /// Loudness going into the stage (LUFS-like).
+    pub input_lufs: f32,
+    /// Loudness coming out of it.
+    pub output_lufs: f32,
+    /// Output minus input, in dB: what the stage adds to the level.
+    pub delta_db: f32,
+    /// Output peak, dBFS, decaying about 6 dB per second.
+    pub peak_dbfs: f32,
+    /// Seconds of audio behind the reading.
+    pub seconds: f32,
+}
+
 /// Serializable snapshot pushed to the UI (~4 Hz while playing, immediately
 /// on track/state changes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +168,10 @@ pub struct PlayerSnapshot {
     /// latency"; `None` when it is off or nothing is playing on the shared path.
     #[serde(default)]
     pub analog_plan: Option<String>,
+    /// How the analog stage changes the level: loudness before and after, and
+    /// the output peak. `None` when the stage is off or nothing has been measured yet.
+    #[serde(default)]
+    pub analog_level: Option<AnalogLevel>,
     /// The rendition actually streaming (explicit `?format=` value).
     pub format: Option<StreamFormat>,
     /// `X-Transcode-Chain` of the active response.
@@ -179,6 +199,7 @@ impl Default for PlayerSnapshot {
             buffered_ms: None,
             output_rate_hz: None,
             analog_plan: None,
+            analog_level: None,
             format: None,
             chain: None,
             output_path: OutputPath::Pcm,
@@ -448,6 +469,11 @@ pub struct Player {
     // -- v1 DSP (PCM only; the DoP path never touches these) --
     eq: ParametricEq,
     analog: AnalogStage,
+    /// Level before and after the analog stage, to compare them.
+    meter_in: LoudnessMeter,
+    meter_out: LoudnessMeter,
+    /// Output peak (linear), decaying about 6 dB per second.
+    peak_out: f32,
     loudness: LoudnessNorm,
     /// Click-free gain transitions between tracks with different
     /// loudness gains (~50 ms linear ramp).
@@ -477,6 +503,9 @@ impl Player {
             empty_streak: 0,
             eq: ParametricEq::new(44100),
             analog: AnalogStage::new(44100),
+            meter_in: LoudnessMeter::new(44100),
+            meter_out: LoudnessMeter::new(44100),
+            peak_out: 0.0,
             loudness: LoudnessNorm::new(DEFAULT_LOUDNESS_TARGET),
             gain_ramp: GainRamp::new(2205),
             output_path: OutputPath::Pcm,
@@ -776,6 +805,11 @@ impl Player {
     /// Analog character stage (PCM shared path only; DoP and bit-perfect
     /// never call it).
     pub fn set_analog(&mut self, settings: AnalogSettings) {
+        if settings != self.analog.settings() {
+            // A new setting means a new level: start the reading over.
+            self.meter_in.reset();
+            self.meter_out.reset();
+        }
         self.analog.set_settings(settings);
     }
 
@@ -785,6 +819,21 @@ impl Player {
 
     pub fn set_loudness_target(&mut self, lufs: f32) {
         self.loudness.set_target(lufs);
+    }
+
+    /// The analog stage's effect on the level, once about a second of audio is behind it.
+    fn analog_level(&self) -> Option<AnalogLevel> {
+        if !self.analog.is_active() || self.meter_in.seconds() < 1.0 {
+            return None;
+        }
+        let (i, o) = (self.meter_in.lufs()?, self.meter_out.lufs()?);
+        Some(AnalogLevel {
+            input_lufs: i,
+            output_lufs: o,
+            delta_db: o - i,
+            peak_dbfs: 20.0 * self.peak_out.max(1e-6).log10(),
+            seconds: self.meter_in.seconds(),
+        })
     }
 
     /// Current DSP settings, for the shell to persist and the UI to mirror.
@@ -1094,6 +1143,9 @@ impl Player {
         // it is designed at the sink rate, not the file's.
         self.eq.set_sample_rate(sink_rate);
         self.analog.prepare(sink_rate);
+        self.meter_in.set_sample_rate(sink_rate);
+        self.meter_out.set_sample_rate(sink_rate);
+        self.peak_out = 0.0;
 
         // The playhead starts at the seek target for *both* seek styles.
         // (Passthrough skips decoded frames without counting them as
@@ -1232,7 +1284,28 @@ impl Player {
         // v1 DSP chain, fixed order: EQ -> loudness gain (ramped) -> volume.
         let mut chunk: Vec<f32> = out.to_vec();
         self.eq.process(&mut chunk, channels);
+        let measuring = self.analog.is_active();
+        let steady_before = self.analog.is_steady();
+        let ms_in = if measuring { self.meter_in.measure(&chunk, channels) } else { 0.0 };
         self.analog.process(&mut chunk, channels);
+        if measuring {
+            let ms_out = self.meter_out.measure(&chunk, channels);
+            let frames = chunk.len() / channels;
+            // Both meters integrate the same chunks (gated on the input), so
+            // their difference is the stage's effect on the level.
+            if steady_before && self.analog.is_steady() && ms_in >= 1.174e-7 {
+                self.meter_in.integrate(ms_in, frames);
+                self.meter_out.integrate(ms_out, frames);
+            }
+            let dt = frames as f32 / active.sink_rate.max(1) as f32;
+            let peak = chunk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            self.peak_out = peak.max(self.peak_out * 0.5f32.powf(dt));
+        } else if self.meter_in.seconds() > 0.0 || self.peak_out > 0.0 {
+            // Off: forget, so the next reading starts fresh.
+            self.meter_in.reset();
+            self.meter_out.reset();
+            self.peak_out = 0.0;
+        }
         self.gain_ramp.apply(&mut chunk);
         let vol = self.volume;
         if vol < 0.999 {
@@ -1388,6 +1461,11 @@ impl Player {
             output_rate_hz,
             analog_plan: if self.active.is_some() && self.output_path == OutputPath::Pcm {
                 self.analog.status().map(|s| s.describe())
+            } else {
+                None
+            },
+            analog_level: if self.active.is_some() && self.output_path == OutputPath::Pcm {
+                self.analog_level()
             } else {
                 None
             },

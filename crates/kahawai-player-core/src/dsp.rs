@@ -497,6 +497,93 @@ fn k_weighting(sample_rate: u32) -> (Biquad, Biquad) {
     (pre, rlb)
 }
 
+/// A running loudness meter: K-weighted mean square (BS.1770 pre-filter and
+/// RLB high-pass, all channels weighted 1.0), smoothed over a few seconds.
+/// Used to compare the level before and after a stage; the readings are
+/// relative, not calibrated to a broadcast standard.
+pub struct LoudnessMeter {
+    sample_rate: u32,
+    pre: Biquad,
+    rlb: Biquad,
+    pre_state: Vec<BiquadState>,
+    rlb_state: Vec<BiquadState>,
+    /// Smoothed K-weighted mean square (summed over channels).
+    ms: f64,
+    /// Seconds of (non-silent) audio integrated so far.
+    seconds: f64,
+}
+
+/// Time constant of the smoothing, in seconds.
+const METER_TAU_S: f64 = 1.5;
+/// Chunks quieter than this (K-weighted, -70 LUFS) are silence: not integrated.
+const METER_GATE_MS: f64 = 1.174e-7;
+
+impl LoudnessMeter {
+    pub fn new(sample_rate: u32) -> Self {
+        let (pre, rlb) = k_weighting(sample_rate.max(8000));
+        Self { sample_rate, pre, rlb, pre_state: Vec::new(), rlb_state: Vec::new(), ms: 0.0, seconds: 0.0 }
+    }
+
+    /// Re-tune for a new rate and forget everything.
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        *self = Self::new(sample_rate);
+    }
+
+    pub fn reset(&mut self) {
+        self.ms = 0.0;
+        self.seconds = 0.0;
+        self.pre_state.clear();
+        self.rlb_state.clear();
+    }
+
+    /// Run the filters over a chunk and return its K-weighted mean square
+    /// (summed over channels). The filter state always advances.
+    pub fn measure(&mut self, samples: &[f32], channels: usize) -> f64 {
+        if channels == 0 || samples.is_empty() {
+            return 0.0;
+        }
+        if self.pre_state.len() != channels {
+            self.pre_state = vec![BiquadState::default(); channels];
+            self.rlb_state = vec![BiquadState::default(); channels];
+        }
+        let mut sum = vec![0.0f64; channels];
+        for frame in samples.chunks_exact(channels) {
+            for (ch, &x) in frame.iter().enumerate() {
+                let y = biquad_step(&self.pre, &mut self.pre_state[ch], x);
+                let z = biquad_step(&self.rlb, &mut self.rlb_state[ch], y) as f64;
+                sum[ch] += z * z;
+            }
+        }
+        let frames = (samples.len() / channels).max(1) as f64;
+        sum.iter().map(|s| s / frames).sum()
+    }
+
+    /// Fold a chunk's mean square into the running value. Silence is skipped.
+    pub fn integrate(&mut self, chunk_ms: f64, frames: usize) {
+        if chunk_ms < METER_GATE_MS {
+            return;
+        }
+        let dt = frames as f64 / self.sample_rate.max(1) as f64;
+        if self.seconds == 0.0 {
+            self.ms = chunk_ms;
+        } else {
+            let alpha = 1.0 - (-dt / METER_TAU_S).exp();
+            self.ms += alpha * (chunk_ms - self.ms);
+        }
+        self.seconds += dt;
+    }
+
+    /// Smoothed loudness in LUFS-like units, once something has been integrated.
+    pub fn lufs(&self) -> Option<f32> {
+        (self.seconds > 0.0 && self.ms > 0.0).then(|| (-0.691 + 10.0 * self.ms.log10()) as f32)
+    }
+
+    /// Seconds of audio behind the reading.
+    pub fn seconds(&self) -> f32 {
+        self.seconds as f32
+    }
+}
+
 /// Integrated loudness of interleaved f32 PCM, or `None` for silence
 /// (every block below the absolute gate). Pure function — unit-testable.
 pub fn integrated_lufs(frames: &[f32], channels: usize, sample_rate: u32) -> Option<f32> {
@@ -998,6 +1085,52 @@ mod tests {
         let mut out = input.clone();
         eq.process(&mut out, 2);
         assert_eq!(out, input, "disabled before the first sample: untouched from sample one");
+    }
+
+    #[test]
+    fn loudness_meter_follows_level_and_ignores_silence() {
+        let rate = 44_100;
+        let mut m = LoudnessMeter::new(rate);
+        assert!(m.lufs().is_none(), "nothing measured yet");
+        let tone = |amp: f32| stereo(&sine(1000.0, rate as usize * 2, rate, amp));
+        let read = |amp: f32| {
+            let mut m = LoudnessMeter::new(rate);
+            for c in tone(amp).chunks(4096 * 2) {
+                let ms = m.measure(c, 2);
+                m.integrate(ms, c.len() / 2);
+            }
+            m.lufs().unwrap()
+        };
+        let (a, b, c) = (read(0.05), read(0.1), read(0.4));
+        assert!(((b - a) - 6.02).abs() < 0.1, "double the amplitude is +6 dB: {}", b - a);
+        assert!(((c - b) - 12.04).abs() < 0.1, "four times is +12 dB: {}", c - b);
+        assert!((-30.0..-10.0).contains(&b), "a plausible LUFS reading: {b}");
+        // Silence is not integrated: the reading holds.
+        let before = read(0.1);
+        let mut m2 = LoudnessMeter::new(rate);
+        for c in tone(0.1).chunks(4096 * 2) {
+            let ms = m2.measure(c, 2);
+            m2.integrate(ms, c.len() / 2);
+        }
+        let silence = vec![0.0f32; 4096 * 2];
+        for _ in 0..20 {
+            let ms = m2.measure(&silence, 2);
+            m2.integrate(ms, 4096);
+        }
+        assert!((m2.lufs().unwrap() - before).abs() < 0.3, "silence does not pull the reading down ({} vs {before})", m2.lufs().unwrap());
+        assert!(m2.seconds() > 1.5);
+        // K-weighting: the same amplitude reads lower at 60 Hz than at 1 kHz (the high-pass), higher at 8 kHz (the shelf).
+        let at = |hz: f32| {
+            let mut m = LoudnessMeter::new(rate);
+            for c in stereo(&sine(hz, rate as usize * 2, rate, 0.1)).chunks(4096 * 2) {
+                let ms = m.measure(c, 2);
+                m.integrate(ms, c.len() / 2);
+            }
+            m.lufs().unwrap()
+        };
+        assert!(at(60.0) < at(1000.0) - 1.0 && at(8000.0) > at(1000.0) + 1.0);
+        m.reset();
+        assert!(m.lufs().is_none());
     }
 
     #[test]

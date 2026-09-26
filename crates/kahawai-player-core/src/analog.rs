@@ -583,8 +583,7 @@ pub fn triode_table() -> &'static TubeTable {
 }
 
 fn tube_table(tube: Tube) -> &'static TubeTable {
-    const EMPTY: OnceLock<TubeTable> = OnceLock::new();
-    static TABLES: [OnceLock<TubeTable>; 14] = [EMPTY; 14];
+    static TABLES: [OnceLock<TubeTable>; 14] = [const { OnceLock::new() }; 14];
     let i = match tube {
         Tube::Ax7 => 0,
         Tube::At7 => 1,
@@ -1078,6 +1077,18 @@ impl AnalogStage {
         if !self.primed {
             self.snap_params();
         }
+    }
+
+    /// True once the stage is fully on: not fading in or out, no swap waiting.
+    /// (While it is not, the wet and dry signals are still being mixed
+    /// through the fade, so a level reading would mislead.)
+    pub fn is_steady(&self) -> bool {
+        self.settings.enabled && self.fade >= 1.0 && self.pending.is_none() && self.pending_plan.is_none()
+    }
+
+    /// True while the stage is processing (on, or fading out).
+    pub fn is_active(&self) -> bool {
+        self.settings.enabled || self.fade > 0.0
     }
 
     /// The plan in use and its latency, while the stage is on.

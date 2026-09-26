@@ -108,6 +108,16 @@ fn clear_artwork_cache(state: State<'_, ArtworkState>) -> usize {
     state.cache.clear()
 }
 
+/// The analog stage's effect on the level (matches `AnalogLevel` in the UI types).
+#[derive(Debug, Clone, serde::Serialize)]
+struct AnalogLevelDto {
+    input_lufs: f32,
+    output_lufs: f32,
+    delta_db: f32,
+    peak_dbfs: f32,
+    seconds: f32,
+}
+
 /// `player-state` payload. Field names match `ui/src/types.ts PlayerState`
 /// exactly (snake_case).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -124,6 +134,8 @@ struct PlayerStateDto {
     output_rate_hz: Option<u32>,
     /// What the analog stage is doing right now (plan and latency), if on.
     analog_plan: Option<String>,
+    /// How the analog stage changes the level (before/after loudness, peak).
+    analog_level: Option<AnalogLevelDto>,
     format: Option<&'static str>,
     chain: Option<String>,
     /// "pcm-shared" | "dop-exclusive" — drives the Exclusive DoP badge.
@@ -182,6 +194,13 @@ impl From<PlayerSnapshot> for PlayerStateDto {
             buffered_ms: s.buffered_ms,
             output_rate_hz: s.output_rate_hz,
             analog_plan: s.analog_plan,
+            analog_level: s.analog_level.map(|l| AnalogLevelDto {
+                input_lufs: l.input_lufs,
+                output_lufs: l.output_lufs,
+                delta_db: l.delta_db,
+                peak_dbfs: l.peak_dbfs,
+                seconds: l.seconds,
+            }),
             format: s.format.map(format_str),
             chain: s.chain,
             output_path: output_path_str(s.output_path),

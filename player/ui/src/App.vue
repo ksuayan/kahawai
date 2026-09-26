@@ -55,7 +55,10 @@ onMounted(async () => {
   jobs.init(); // pick up any active server jobs (scan / ISO extraction)
   // Keep the queue store in sync with core-driven queue changes.
   stopWatch = player.$subscribe((_m, s) => {
-    if (s.raw) void queue.syncFromState(s.raw);
+    if (s.raw) {
+      void queue.syncFromState(s.raw);
+      analog.noteLevel(s.raw.analog_level);
+    }
   });
   // The launch state (a restored queue) arrived during player.init(), before
   // the watcher existed, and an idle engine sends nothing after it.

@@ -92,6 +92,8 @@ export interface PlayerState {
   output_rate_hz?: number | null;
   /** What the analog stage is doing (plan, latency); null when off. */
   analog_plan?: string | null;
+  /** How the analog stage changes the level; null when off or not yet measured. */
+  analog_level?: AnalogLevel | null;
   format: string | null;
   chain: string | null;
   /** "pcm-shared" (DSP chain active) or "dop-exclusive" (bit-perfect). */
@@ -375,6 +377,18 @@ export const DEFAULT_ANALOG_SETTINGS: AnalogSettings = {
   sag: 0.3,
   transformer: 0.3,
 };
+
+/** The analog stage's effect on the level (K-weighted, smoothed over a few seconds). */
+export interface AnalogLevel {
+  input_lufs: number;
+  output_lufs: number;
+  /** Output minus input, dB: what the stage adds to the level. */
+  delta_db: number;
+  /** Output peak, dBFS, decaying about 6 dB per second. */
+  peak_dbfs: number;
+  /** Seconds of audio behind the reading. */
+  seconds: number;
+}
 
 /** A ready-made A/B comparison: two slots to load, and what to play and listen for. */
 export interface ListeningRecipe {

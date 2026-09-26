@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TriangleAlert } from "lucide-vue-next";
 import { computed, ref } from "vue";
 import { useAnalogStore, type Slot } from "../stores/analog";
 import { usePlayerStore } from "../stores/player";
@@ -54,6 +55,36 @@ function useRecipe(id: string): void {
   appliedRecipe.value = r.title;
 }
 
+// --- level meter ---------------------------------------------------------
+const level = computed(() => player.analogLevel);
+const dB = (v: number, d = 1): string => `${v > 0 ? "+" : ""}${v.toFixed(d)}`;
+/** Position of the marker on the −6…+6 dB scale, as a percentage. */
+const markerPct = computed(() => (level.value ? Math.min(100, Math.max(0, ((level.value.delta_db + 6) / 12) * 100)) : 50));
+const meterState = computed<"ok" | "warn" | "bad">(() => {
+  const d = Math.abs(level.value?.delta_db ?? 0);
+  return d < 0.5 ? "ok" : d < 1.5 ? "warn" : "bad";
+});
+const clipping = computed(() => (level.value?.peak_dbfs ?? -99) > -0.3);
+const meterMessage = computed(() => {
+  if (!analog.current.enabled) return "Slot " + analog.active.toUpperCase() + " is the dry signal: nothing to measure. Its level change is 0 dB by definition.";
+  if (!player.isPlaying) return "Play music on the shared output to measure.";
+  return "Measuring… (a couple of seconds of audio)";
+});
+const measuredText = (s: Slot): string => {
+  const m = analog.measured[s];
+  return m === null ? "not measured yet" : `${dB(m)} dB${analog[s].enabled ? "" : " (dry)"}`;
+};
+const canMatch = computed(() => analog.measured.a !== null && analog.measured.b !== null);
+const matchNote = ref<string | null>(null);
+function match(from: Slot, to: Slot): void {
+  const r = analog.matchLevel(from, to);
+  if (!r) return;
+  matchNote.value =
+    r.changed_db === 0
+      ? `${to.toUpperCase()} is already level with ${from.toUpperCase()}.`
+      : `Set the Output of ${to.toUpperCase()} to ${dB(analog[to].output_db)} dB (${dB(r.changed_db)} dB)${r.clamped ? "; that is the limit of the slider, so it may still differ" : ""}. Play a few seconds to confirm.`;
+}
+
 const status = computed(() => (player.analogPlan ? `Now playing with ${player.analogPlan}.` : "The stage is off, or nothing is playing on the shared output."));
 </script>
 
@@ -92,6 +123,55 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
         <span class="text-xs text-faint">Keys: <kbd class="font-mono">A</kbd> <kbd class="font-mono">B</kbd> <kbd class="font-mono">X</kbd>, from any screen</span>
       </div>
       <p class="m-0 mb-3 text-xs text-dim" data-testid="analog-status">{{ status }}</p>
+
+      <div class="mb-3 rounded-lg border border-line bg-surface p-3" data-testid="level-meter">
+        <div class="mb-1 flex flex-wrap items-baseline justify-between gap-2">
+          <span class="heading-3">Level meter</span>
+          <span class="text-xs text-dim">what the stage does to the loudness of what you are hearing</span>
+        </div>
+        <template v-if="level && analog.current.enabled">
+          <div class="mb-2 flex flex-wrap items-baseline gap-x-6 gap-y-1 tabular-nums">
+            <span class="text-dim">Before <span class="text-fg" data-testid="meter-in">{{ level.input_lufs.toFixed(1) }}</span> LUFS</span>
+            <span class="text-dim">After <span class="text-fg" data-testid="meter-out">{{ level.output_lufs.toFixed(1) }}</span> LUFS</span>
+            <span class="text-dim">
+              Change
+              <span
+                class="font-semibold"
+                :class="meterState === 'ok' ? 'text-ok' : meterState === 'warn' ? 'text-warn-fg' : 'text-danger-fg'"
+                data-testid="meter-delta"
+                :data-state="meterState"
+              >{{ dB(level.delta_db) }} dB</span>
+            </span>
+            <span class="text-dim">Peak <span class="text-fg" data-testid="meter-peak">{{ level.peak_dbfs.toFixed(1) }}</span> dBFS</span>
+          </div>
+          <div class="relative h-2 rounded-sm bg-active" role="img" :aria-label="`Level change ${dB(level.delta_db)} dB on a scale from minus 6 to plus 6`">
+            <div class="absolute left-1/2 top-0 h-full w-px bg-faint" />
+            <div
+              class="absolute top-[-2px] h-3 w-1.5 rounded-sm"
+              :class="meterState === 'ok' ? 'bg-ok' : meterState === 'warn' ? 'bg-warn' : 'bg-danger'"
+              :style="{ left: `calc(${markerPct}% - 3px)` }"
+              data-testid="meter-marker"
+            />
+          </div>
+          <div class="mt-1 flex justify-between text-[11px] text-faint tabular-nums"><span>−6 dB</span><span>0</span><span>+6 dB</span></div>
+          <p v-if="clipping" class="m-0 mt-2 flex items-start gap-1.5 text-xs text-danger-fg" role="status" data-testid="meter-clip">
+            <TriangleAlert class="mt-px size-3.5 shrink-0" />
+            The output peaks at {{ level.peak_dbfs.toFixed(1) }} dBFS and may clip. Lower Drive or Output.
+          </p>
+        </template>
+        <p v-else class="m-0 text-xs text-dim" data-testid="meter-idle">{{ meterMessage }}</p>
+
+        <div class="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs">
+          <span class="text-dim" data-testid="measured-a">A: {{ measuredText("a") }}</span>
+          <span class="text-dim" data-testid="measured-b">B: {{ measuredText("b") }}</span>
+          <UiButton :disabled="!canMatch" data-testid="match-b" title="Change B's Output so B is as loud as A" @click="match('a', 'b')">Match B to A</UiButton>
+          <UiButton :disabled="!canMatch" data-testid="match-a" title="Change A's Output so A is as loud as B" @click="match('b', 'a')">Match A to B</UiButton>
+        </div>
+        <p v-if="!canMatch" class="m-0 mt-2 text-xs text-faint">
+          To match levels, play music with A, then with B, for a few seconds each. Each slot's level change is remembered until you edit it.
+        </p>
+        <p v-if="matchNote" class="m-0 mt-2 text-xs text-dim" role="status" data-testid="match-note">{{ matchNote }}</p>
+      </div>
 
       <div class="grid grid-cols-1 gap-3 min-[900px]:grid-cols-2">
         <div
