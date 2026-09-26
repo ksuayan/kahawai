@@ -42,3 +42,6 @@ node_modules/
 # start-server.sh runtime files
 /.kahawai-server.pid
 /kahawai-server.log
+
+# Keep npm lockfiles even though a global gitignore excludes them
+!package-lock.json
