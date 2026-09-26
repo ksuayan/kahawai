@@ -56,6 +56,11 @@ const unsupported = computed(() => player.isExclusive);
 const rate = computed(() => player.outputRateHz ?? DEFAULT_RATE_HZ);
 const maxFreq = computed(() => maxFreqFor(rate.value));
 const rateLabel = computed(() => `${Math.round(rate.value / 100) / 10} kHz`);
+const liveNote = computed(() =>
+  !dsp.eqEnabled
+    ? "EQ is off, so you won't hear changes. Turn it on to preview them."
+    : "Changes play live. OK keeps them; Cancel reverts.",
+);
 const UNSUPPORTED_TEXT = "EQ is not supported for this stream type.";
 
 // --- graph geometry ---------------------------------------------------------
@@ -204,6 +209,9 @@ function choose(v: string | null): void {
   <UiDialog :open="open" wide @update:open="onOpenChange" title="Equalizer" description="Drag a point to shape the sound. Double-click the graph to add a band.">
     <p v-if="unsupported" class="mb-3 rounded-md border border-line bg-active px-3 py-2 text-sm text-dim" role="status" data-testid="eq-unsupported">
       {{ UNSUPPORTED_TEXT }}
+    </p>
+    <p v-if="!unsupported" class="m-0 mb-3 text-xs" :class="dsp.eqEnabled ? 'text-dim' : 'text-warn-fg'" data-testid="eq-live-note">
+      {{ liveNote }}
     </p>
     <div
       :class="unsupported ? 'pointer-events-none opacity-40 grayscale' : ''"

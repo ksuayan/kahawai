@@ -182,17 +182,93 @@ fn design_band(band: &EqBand, sample_rate: u32) -> Biquad {
     }
 }
 
+/// How long a live change (bands, on/off) takes to fade in, in seconds.
+/// Long enough to be free of clicks, short enough to feel immediate.
+const EQ_RAMP_SECONDS: f32 = 0.015;
+
+const IDENTITY: Biquad = Biquad {
+    b0: 1.0,
+    b1: 0.0,
+    b2: 0.0,
+    a1: 0.0,
+    a2: 0.0,
+};
+
+/// One filter stage. On a live edit the coefficients glide from `cur` to
+/// `target` while the filter state is kept, which is what avoids clicks.
+struct Slot {
+    cur: Biquad,
+    target: Biquad,
+    step: Biquad,
+    remaining: usize,
+    /// Fading toward a pass-through; dropped once it gets there.
+    removing: bool,
+    /// One state pair per channel.
+    states: Vec<BiquadState>,
+}
+
+impl Slot {
+    fn snapped(c: Biquad) -> Self {
+        Self {
+            cur: c,
+            target: c,
+            step: Biquad { b0: 0.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 },
+            remaining: 0,
+            removing: false,
+            states: Vec::new(),
+        }
+    }
+
+    fn retarget(&mut self, to: Biquad, frames: usize, removing: bool) {
+        let n = frames.max(1) as f64;
+        self.step = Biquad {
+            b0: (to.b0 - self.cur.b0) / n,
+            b1: (to.b1 - self.cur.b1) / n,
+            b2: (to.b2 - self.cur.b2) / n,
+            a1: (to.a1 - self.cur.a1) / n,
+            a2: (to.a2 - self.cur.a2) / n,
+        };
+        self.target = to;
+        self.remaining = frames.max(1);
+        self.removing = removing;
+    }
+
+    #[inline]
+    fn advance(&mut self) {
+        if self.remaining == 0 {
+            return;
+        }
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            self.cur = self.target;
+        } else {
+            self.cur.b0 += self.step.b0;
+            self.cur.b1 += self.step.b1;
+            self.cur.b2 += self.step.b2;
+            self.cur.a1 += self.step.a1;
+            self.cur.a2 += self.step.a2;
+        }
+    }
+}
+
 /// Up-to-8-band parametric EQ over interleaved f32.
 ///
-/// Bypass is bit-transparent: when disabled (or with no bands) `process`
-/// does not touch the buffer at all.
+/// Bypass is bit-transparent: once faded out (or with no bands) `process`
+/// does not touch the buffer at all. Edits made while audio is flowing (new
+/// bands, on/off) fade in over ~15 ms with the filter state kept, so
+/// dragging a control point does not click. Before any audio has passed
+/// (a new track or rate), changes apply at once.
 pub struct ParametricEq {
     bands: Vec<EqBand>,
     enabled: bool,
     sample_rate: u32,
-    coeffs: Vec<Biquad>,
-    /// states[band][channel]
-    states: Vec<Vec<BiquadState>>,
+    slots: Vec<Slot>,
+    /// Wet/dry mix: 1 = fully equalized, 0 = untouched. Moves toward the
+    /// enabled/disabled target so toggling does not click.
+    mix: f32,
+    /// Audio has passed through since the last reset; only then is it worth
+    /// fading a change.
+    primed: bool,
 }
 
 impl ParametricEq {
@@ -201,15 +277,43 @@ impl ParametricEq {
             bands: Vec::new(),
             enabled: true,
             sample_rate,
-            coeffs: Vec::new(),
-            states: Vec::new(),
+            slots: Vec::new(),
+            mix: 1.0,
+            primed: false,
         }
+    }
+
+    fn ramp_frames(&self) -> usize {
+        ((self.sample_rate as f32 * EQ_RAMP_SECONDS) as usize).max(1)
+    }
+
+    fn design_all(&self, bands: &[EqBand]) -> Vec<Biquad> {
+        bands.iter().map(|b| design_band(b, self.sample_rate)).collect()
     }
 
     pub fn set_bands(&mut self, bands: Vec<EqBand>) -> Result<(), MusicError> {
         validate_bands(&bands)?;
+        let designed = self.design_all(&bands);
         self.bands = bands;
-        self.redesign();
+        if !self.primed {
+            self.slots = designed.into_iter().map(Slot::snapped).collect();
+            return Ok(());
+        }
+        let ramp = self.ramp_frames();
+        for (i, c) in designed.iter().enumerate() {
+            match self.slots.get_mut(i) {
+                Some(slot) => slot.retarget(*c, ramp, false),
+                None => {
+                    // A new band fades in from a pass-through.
+                    let mut slot = Slot::snapped(IDENTITY);
+                    slot.retarget(*c, ramp, false);
+                    self.slots.push(slot);
+                }
+            }
+        }
+        for slot in self.slots.iter_mut().skip(designed.len()) {
+            slot.retarget(IDENTITY, ramp, true);
+        }
         Ok(())
     }
 
@@ -219,6 +323,9 @@ impl ParametricEq {
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        if !self.primed {
+            self.mix = if enabled { 1.0 } else { 0.0 };
+        }
     }
 
     pub fn enabled(&self) -> bool {
@@ -230,46 +337,83 @@ impl ParametricEq {
     pub fn set_sample_rate(&mut self, sample_rate: u32) {
         if sample_rate != self.sample_rate {
             self.sample_rate = sample_rate;
-            self.redesign();
+            let designed = self.design_all(&self.bands);
+            self.slots = designed.into_iter().map(Slot::snapped).collect();
+            self.primed = false;
+            self.mix = if self.enabled { 1.0 } else { 0.0 };
         }
     }
 
-    fn redesign(&mut self) {
-        self.coeffs = self
-            .bands
-            .iter()
-            .map(|b| design_band(b, self.sample_rate))
-            .collect();
-        self.states.clear();
-    }
-
     fn ensure_states(&mut self, channels: usize) {
-        if self.states.len() != self.coeffs.len()
-            || self.states.first().map(|s| s.len()) != Some(channels)
-        {
-            self.states = self
-                .coeffs
-                .iter()
-                .map(|_| vec![BiquadState::default(); channels])
-                .collect();
+        for slot in &mut self.slots {
+            if slot.states.len() != channels {
+                slot.states = vec![BiquadState::default(); channels];
+            }
         }
     }
 
     /// Process interleaved samples in place. Bit-transparent no-op unless
-    /// enabled with at least one band.
+    /// enabled with at least one band (or still fading out).
     pub fn process(&mut self, samples: &mut [f32], channels: usize) {
-        if !self.enabled || self.coeffs.is_empty() || channels == 0 {
+        if channels == 0 {
+            return;
+        }
+        let target_mix = if self.enabled { 1.0 } else { 0.0 };
+        if self.slots.is_empty() || (self.mix == 0.0 && target_mix == 0.0) {
+            self.mix = target_mix;
             return;
         }
         debug_assert_eq!(samples.len() % channels, 0);
         self.ensure_states(channels);
-        for (coeff, states) in self.coeffs.iter().zip(self.states.iter_mut()) {
-            for frame in samples.chunks_exact_mut(channels) {
-                for (smp, st) in frame.iter_mut().zip(states.iter_mut()) {
-                    *smp = biquad_step(coeff, st, *smp);
-                }
+        if self.mix == 0.0 {
+            // Coming back from bypass: stale state would ring, start clean.
+            for slot in &mut self.slots {
+                slot.states.iter_mut().for_each(|s| *s = BiquadState::default());
             }
         }
+        self.primed = true;
+
+        let steady = self.mix == target_mix && self.slots.iter().all(|s| s.remaining == 0);
+        if steady && target_mix == 1.0 {
+            // Fast path: nothing is changing.
+            for slot in self.slots.iter_mut() {
+                let c = slot.cur;
+                for frame in samples.chunks_exact_mut(channels) {
+                    for (smp, st) in frame.iter_mut().zip(slot.states.iter_mut()) {
+                        *smp = biquad_step(&c, st, *smp);
+                    }
+                }
+            }
+            return;
+        }
+
+        let mix_step = 1.0 / self.ramp_frames() as f32;
+        let mut wet = vec![0.0f32; channels];
+        for frame in samples.chunks_exact_mut(channels) {
+            if self.mix != target_mix {
+                self.mix = if target_mix > self.mix {
+                    (self.mix + mix_step).min(target_mix)
+                } else {
+                    (self.mix - mix_step).max(target_mix)
+                };
+            }
+            for slot in &mut self.slots {
+                slot.advance();
+            }
+            for (ch, w) in wet.iter_mut().enumerate() {
+                let mut v = frame[ch];
+                for slot in &mut self.slots {
+                    v = biquad_step(&slot.cur, &mut slot.states[ch], v);
+                }
+                *w = v;
+            }
+            let m = self.mix;
+            for (smp, w) in frame.iter_mut().zip(wet.iter()) {
+                *smp = if m >= 1.0 { *w } else { *smp + (*w - *smp) * m };
+            }
+        }
+        // Bands that finished fading to a pass-through are done.
+        self.slots.retain(|s| !(s.removing && s.remaining == 0));
     }
 }
 
@@ -709,6 +853,117 @@ mod tests {
         assert!(a.iter().all(|s| s.is_finite() && s.abs() < 4.0));
         assert_eq!(a, b, "an out-of-range frequency behaves exactly like the cap");
         assert_eq!(usable_freq(1000.0, rate), 1000.0, "in-range bands are untouched");
+    }
+
+    fn peak_band(gain_db: f32) -> EqBand {
+        EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db, q: 1.0 }
+    }
+
+    /// Largest jump between neighbouring samples of a channel.
+    fn max_step(interleaved: &[f32], channels: usize) -> f32 {
+        interleaved
+            .iter()
+            .step_by(channels)
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn live_band_changes_glide_instead_of_clicking() {
+        // A low shelf on a bass tone: resetting the filter state or jumping
+        // the coefficients here throws the waveform by a large fraction of
+        // its amplitude, while the tone itself moves only ~0.01 per sample.
+        let rate = 44100;
+        let shelf = |gain_db| EqBand { band_type: EqBandType::LowShelf, freq: 150.0, gain_db, q: 0.7 };
+        let mut eq = ParametricEq::new(rate);
+        eq.set_bands(vec![shelf(2.0)]).unwrap();
+        let tone = stereo(&sine(60.0, rate as usize * 2, rate, 0.3));
+        let split = (rate as usize / 2 + 184) * 2; // near a waveform peak
+        let (first, second) = tone.split_at(split);
+        let mut a = first.to_vec();
+        eq.process(&mut a, 2); // audio is flowing now
+        eq.set_bands(vec![shelf(12.0)]).unwrap(); // drag: +2 dB -> +12 dB
+        let mut b = second.to_vec();
+        eq.process(&mut b, 2);
+        // Measure across the seam, where the change happened.
+        let all = [a.clone(), b.clone()].concat();
+        let step = max_step(&all[2000..], 2);
+        assert!(step < 0.02, "no click while the band changes, biggest step {step}");
+        // ...and it lands where a filter that was +12 dB all along would.
+        let mut reference = ParametricEq::new(rate);
+        reference.set_bands(vec![shelf(12.0)]).unwrap();
+        let mut steady = tone.clone();
+        reference.process(&mut steady, 2);
+        let tail = rms_steady(&b, b.len() - 4410 * 2);
+        let want = rms_steady(&steady, steady.len() - 4410 * 2);
+        assert!((tail - want).abs() / want < 0.02, "settles at +12 dB: {tail} vs {want}");
+    }
+
+    #[test]
+    fn adding_and_removing_bands_live_fades_without_a_click() {
+        let rate = 44100;
+        let mut eq = ParametricEq::new(rate);
+        let tone = stereo(&sine(1000.0, rate as usize * 2, rate, 0.3));
+        let chunk = tone.len() / 4;
+        let mut out = tone[..chunk].to_vec();
+        eq.process(&mut out, 2); // flat, flowing
+        eq.set_bands(vec![peak_band(6.0)]).unwrap(); // add
+        let mut added = tone[chunk..chunk * 2].to_vec();
+        eq.process(&mut added, 2);
+        assert!(max_step(&[out.clone(), added.clone()].concat(), 2) < 0.1, "adding a band is smooth");
+        assert!(rms_steady(&added, added.len() - 4410) > 0.3 * 1.8 * 0.70, "the added band is audible");
+        eq.set_bands(vec![]).unwrap(); // remove
+        let mut removed = tone[chunk * 2..chunk * 3].to_vec();
+        let src = removed.clone();
+        eq.process(&mut removed, 2);
+        assert!(max_step(&[added.clone(), removed.clone()].concat(), 2) < 0.1, "removing a band is smooth");
+        let n = removed.len() - 4410;
+        let err = removed[n..].iter().zip(&src[n..]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(err < 1e-3, "back to the untouched signal, error {err}");
+        let mut again = tone[chunk * 3..].to_vec();
+        let src = again.clone();
+        eq.process(&mut again, 2);
+        assert_eq!(again, src, "an empty chain is bit-transparent again");
+    }
+
+    #[test]
+    fn toggling_the_eq_live_fades_and_then_is_bit_transparent() {
+        let rate = 44100;
+        let mut eq = ParametricEq::new(rate);
+        eq.set_bands(vec![peak_band(12.0)]).unwrap();
+        let tone = stereo(&sine(1000.0, rate as usize * 2, rate, 0.3));
+        let chunk = tone.len() / 4;
+        let mut warm = tone[..chunk].to_vec();
+        eq.process(&mut warm, 2);
+        eq.set_enabled(false);
+        let mut fade = tone[chunk..chunk * 2].to_vec();
+        eq.process(&mut fade, 2);
+        assert!(max_step(&[warm.clone(), fade.clone()].concat(), 2) < 0.2, "switching off is smooth");
+        let n = fade.len() - 2000;
+        assert_eq!(&fade[n..], &tone[chunk..chunk * 2][n..], "faded all the way to the dry signal");
+        let mut off = tone[chunk * 2..chunk * 3].to_vec();
+        let src = off.clone();
+        eq.process(&mut off, 2);
+        assert_eq!(off, src, "bit-transparent once faded out");
+        // Switching back on fades in, without ringing from stale state.
+        eq.set_enabled(true);
+        let mut on = tone[chunk * 3..].to_vec();
+        eq.process(&mut on, 2);
+        assert!(max_step(&[off.clone(), on.clone()].concat(), 2) < 0.2, "switching on is smooth");
+    }
+
+    #[test]
+    fn changes_before_any_audio_apply_at_once() {
+        // A new track (or rate) has nothing playing, so there is nothing to fade.
+        let mut eq = ParametricEq::new(44100);
+        eq.set_bands(vec![peak_band(12.0)]).unwrap();
+        eq.set_enabled(false);
+        let input = stereo(&sine(1000.0, 2048, 44100, 0.3));
+        let mut out = input.clone();
+        eq.process(&mut out, 2);
+        assert_eq!(out, input, "disabled before the first sample: untouched from sample one");
     }
 
     #[test]

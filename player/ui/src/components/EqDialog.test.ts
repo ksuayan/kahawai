@@ -241,3 +241,27 @@ describe("EQ point severity colours", () => {
     expect(nodes()[0].getAttribute("class")).toContain("fill-faint");
   });
 });
+
+describe("EQ live preview note", () => {
+  const note = () => document.body.querySelector('[data-testid="eq-live-note"]');
+
+  it("says changes play live, and that OK keeps and Cancel reverts", async () => {
+    await boot();
+    expect(note()!.textContent).toContain("Changes play live");
+    expect(note()!.textContent).toContain("OK keeps them; Cancel reverts");
+  });
+
+  it("says nothing will be heard while EQ is off", async () => {
+    const { dsp } = await boot();
+    dsp.eqEnabled = false;
+    await settle();
+    expect(note()!.textContent).toContain("EQ is off");
+    expect(note()!.textContent).not.toContain("Changes play live");
+  });
+
+  it("is replaced by the not-supported message on exclusive streams", async () => {
+    await boot("dop-exclusive");
+    expect(note()).toBeNull();
+    expect(document.body.querySelector('[data-testid="eq-unsupported"]')).not.toBeNull();
+  });
+});

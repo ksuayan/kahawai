@@ -67,7 +67,8 @@ DSP happens on the real-time audio thread.
 | Maths | RBJ cookbook coefficients, normalized (a0 = 1); Direct Form II transposed, one state pair per band per channel |
 | Precision | audio is f32; filter coefficients and state are f64 (at 176/192 kHz a low-frequency band needs coefficients within about 1e-3 of 1.0, which f32 handles poorly) |
 | Order | bands are applied in list order (a cascade; order does not change the total response, only intermediate levels) |
-| Bypass | disabled, or zero bands: `process` returns without touching the buffer (bit-transparent) |
+| Bypass | once faded out, or with zero bands, `process` returns without touching the buffer (bit-transparent) |
+| Live edits | while audio is flowing, changed bands glide to their new coefficients over about 15 ms with the filter state kept; new bands fade in from a pass-through, removed bands fade out, and turning the EQ on or off cross-fades wet/dry. Before any audio has passed (a new track or rate) changes apply at once |
 | Validation | `validate_bands` rejects out-of-range values; the Tauri command validates first so the UI gets an error before anything reaches the engine |
 | Rate | designed at the rate the sink receives (after any resampling) and redesigned when it changes (state is cleared) |
 
@@ -128,21 +129,22 @@ These are properties of the current implementation, not bugs in the docs.
    the device forced a different rate. See
    `eq_is_tuned_to_the_device_rate_when_the_stream_is_resampled` in
    engine_tests.rs.)
-2. **No smoothing on live edits.** `set_bands` redesigns all filters and
-   clears their state. Dragging a node can produce small clicks. A fix is
-   per-band coefficient interpolation over a few milliseconds, or keeping
-   state when only gain or frequency changes.
+2. **Coefficient smoothing is linear.** Live edits glide coefficients
+   linearly over about 15 ms, which is click-free in practice for the
+   settings the UI allows. Extremely fast, extreme sweeps of a very
+   narrow, high-gain band could in principle be less well-behaved than
+   smoothing the parameters themselves (frequency, gain, Q) and
+   redesigning per block.
 3. **No headroom management.** There is no automatic pre-gain or limiter;
    the dialog only warns.
    Boosting bands on loud material can exceed 0 dBFS in f32 and clip at
    the device. Loudness normalization applies gain (capped at +12 dB), which
    adds to the risk.
-4. **Bypass is a hard switch.** Toggling EQ on or off is not crossfaded.
-5. **Stereo-linked only.** Every channel gets the same filters; there is no
+4. **Stereo-linked only.** Every channel gets the same filters; there is no
    per-channel or mid/side EQ.
-6. **PCM path only, by design.** Bit-perfect and DoP cannot carry EQ
+5. **PCM path only, by design.** Bit-perfect and DoP cannot carry EQ
    without giving up their point. The UI says so; the engine enforces it.
-7. **Presets are not synced.** User presets are stored in the webview's
+6. **Presets are not synced.** User presets are stored in the webview's
    localStorage, so they are per machine and are lost if app data is
    cleared. Engine-level presets (in `engine-settings.json`) would be more
    durable.
@@ -313,9 +315,10 @@ precisely to deliver the samples unchanged, and some DACs (for example MQA
 decoders) depend on it. The engine never runs EQ, loudness or volume on
 those paths.
 
-**Do I hear a click when I drag a point?**
-Possibly, a faint one. Each edit redesigns the filters and resets their
-internal state. Smoothing the transition is on the list (limitation 4.2).
+**Do I hear a click when I drag a point, add a band or switch EQ on and off?**
+No. While audio is playing, edits fade in over about 15 ms with the filter
+state preserved, and switching the EQ on or off cross-fades. Edits made
+before a track starts apply at once, since there is nothing to fade.
 
 **Can boosting the EQ cause distortion?**
 Yes. There is no automatic pre-gain or limiter, so boosting bands on loud
