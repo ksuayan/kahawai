@@ -28,6 +28,7 @@ use kahawai_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::bitperfect::{f32_to_i24_le, BitPerfect};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
 use crate::dsp::{
@@ -232,6 +233,9 @@ struct PcmStream {
     base_frames: u64,
     /// Passthrough seek: decode-and-drop this many frames before writing.
     skip_frames: u64,
+    /// Exclusive bit-perfect output: samples go to the sink untouched as
+    /// packed 24-bit, bypassing EQ, loudness, volume and resampling.
+    bit_perfect: bool,
 }
 
 /// One open `?format=dop` response. DoP bytes flow to the sink untouched —
@@ -359,6 +363,8 @@ pub struct Player {
     /// Client DSD preference (Settings → DSD handling); consulted by
     /// [`resolve_format`] when no explicit override applies.
     dsd_story: DsdStory,
+    /// When to use the exclusive, untouched PCM path (see `bitperfect`).
+    bit_perfect: BitPerfect,
     track_formats: HashMap<i64, StreamFormat>,
     volume: f32,
     active: Option<ActiveStream>,
@@ -390,6 +396,7 @@ impl Player {
             status: PlayerStatus::Stopped,
             global_format: None,
             dsd_story: DsdStory::default(),
+            bit_perfect: BitPerfect::default(),
             track_formats: HashMap::new(),
             volume: 1.0,
             active: None,
@@ -475,6 +482,32 @@ impl Player {
     pub fn set_shuffle(&mut self, on: bool) {
         self.queue.set_shuffle(on);
         self.persist_queue();
+    }
+
+    /// Choose when to play through the exclusive bit-perfect path. A track
+    /// that is loaded is re-opened at its current position so the change
+    /// applies immediately (paused stays paused).
+    pub fn set_bit_perfect(&mut self, mode: BitPerfect) {
+        if mode == self.bit_perfect {
+            return;
+        }
+        self.bit_perfect = mode;
+        let live = self.active.is_some()
+            && matches!(self.status, PlayerStatus::Playing | PlayerStatus::Paused);
+        if live {
+            let pos = self.position_ms();
+            self.seek_ms(pos);
+        }
+    }
+
+    /// Would this track play through the bit-perfect path, judging by the
+    /// preference and what the file is (the device is checked once the
+    /// stream's real sample rate is known)?
+    fn wants_bit_perfect(&self, track: &Track, fmt: StreamFormat) -> bool {
+        use kahawai_core::format::AudioFormat as F;
+        fmt == StreamFormat::Passthrough
+            && self.bit_perfect.applies_to(track.mqa)
+            && !matches!(track.format, F::Dsf | F::Dff | F::SacdIso | F::Unknown)
     }
 
     pub fn set_dsd_story(&mut self, story: DsdStory) {
@@ -799,13 +832,21 @@ impl Player {
 
     fn open_pcm(&mut self, track: &Track, seek: Option<u64>, fmt: StreamFormat) {
         debug_assert_ne!(fmt, StreamFormat::Dop);
-        let next_id = self.queue.peek_next().map(|t| t.id);
+        let want_bp = self.wants_bit_perfect(track, fmt);
+        // Bit-perfect plays one track per stream: the exclusive device is
+        // opened at each file's own rate, so the server must not chain the
+        // next track (whose rate may differ) into this response.
+        let next_id = if want_bp {
+            None
+        } else {
+            self.queue.peek_next().map(|t| t.id)
+        };
 
         // Loudness pre-scan (v1): one extra deterministic stream per
         // first-play of a track; the gain is cached by (track, format).
         // Cost: double LAN bandwidth + a second server transcode for
         // uncached tracks. DoP never reaches this path.
-        let loudness_gain_db = if self.loudness.enabled() {
+        let loudness_gain_db = if self.loudness.enabled() && !want_bp {
             let track_id = track.id;
             let transport = &*self.transport;
             self.loudness
@@ -856,27 +897,80 @@ impl Player {
             }
         }
 
-        // Open the sink before the resample decision: C2's cpal sink
-        // negotiates the device rate in open(), so the query below sees
-        // the real rate (native when the device takes it).
-        if self.sink.open(track).is_err() {
-            self.fail("audio sink failed to open");
-            return;
+        // Bit-perfect: open the exclusive device at the file's own rate when
+        // the device can do exactly that; otherwise fall back to the shared
+        // path (and say why) so playback never fails over this preference.
+        let mut bit_perfect = false;
+        if want_bp {
+            self.sink.select_output_path(OutputPath::PcmExclusive);
+            let rate_ok = self.sink.exclusive_pcm_rate(spec.sample_rate) == Some(spec.sample_rate);
+            if !rate_ok {
+                tracing::warn!(
+                    track_id = track.id,
+                    rate = spec.sample_rate,
+                    "bit-perfect: output device cannot take this rate exclusively; using shared output"
+                );
+            } else if spec.channels == 0 || spec.channels > 8 {
+                tracing::warn!(
+                    track_id = track.id,
+                    "bit-perfect: unsupported channel count; using shared output"
+                );
+            } else {
+                match self
+                    .sink
+                    .open_exclusive_pcm(spec.sample_rate, spec.channels as u16)
+                {
+                    Ok(()) => bit_perfect = true,
+                    Err(e) => tracing::warn!(
+                        track_id = track.id,
+                        error = %e,
+                        "bit-perfect: could not open the exclusive device; using shared output"
+                    ),
+                }
+            }
+            if !bit_perfect {
+                self.sink.select_output_path(OutputPath::Pcm);
+            }
         }
-        let (resampler, sink_rate) = match self.sink.preferred_sample_rate() {
-            Some(r) if r != spec.sample_rate => (
-                Some(CubicResampler::new(
-                    spec.channels as usize,
-                    spec.sample_rate,
-                    r,
-                )),
-                r,
-            ),
-            _ => (None, spec.sample_rate),
+        self.output_path = if bit_perfect {
+            OutputPath::PcmExclusive
+        } else {
+            OutputPath::Pcm
         };
-        if self.sink.play().is_err() {
-            self.fail("audio sink failed to start");
-            return;
+
+        let sink_rate;
+        let resampler;
+        if bit_perfect {
+            // Untouched: native rate, no resampler.
+            sink_rate = spec.sample_rate;
+            resampler = None;
+            if self.sink.play().is_err() {
+                self.fail("audio sink failed to start");
+                return;
+            }
+        } else {
+            // Open the sink before the resample decision: C2's cpal sink
+            // negotiates the device rate in open(), so the query below sees
+            // the real rate (native when the device takes it).
+            if self.sink.open(track).is_err() {
+                self.fail("audio sink failed to open");
+                return;
+            }
+            (resampler, sink_rate) = match self.sink.preferred_sample_rate() {
+                Some(r) if r != spec.sample_rate => (
+                    Some(CubicResampler::new(
+                        spec.channels as usize,
+                        spec.sample_rate,
+                        r,
+                    )),
+                    r,
+                ),
+                _ => (None, spec.sample_rate),
+            };
+            if self.sink.play().is_err() {
+                self.fail("audio sink failed to start");
+                return;
+            }
         }
 
         // DSP follows the stream rate.
@@ -908,6 +1002,7 @@ impl Player {
             pumped_frames: 0,
             base_frames,
             skip_frames,
+            bit_perfect,
         }));
         self.status = PlayerStatus::Playing;
     }
@@ -984,6 +1079,23 @@ impl Player {
         }
         if frames.is_empty() {
             return; // still skipping; no position advance
+        }
+
+        // Bit-perfect: straight to the exclusive device as packed 24-bit.
+        // No EQ, loudness gain, volume or resampling touches the samples.
+        if active.bit_perfect {
+            let mut bytes = Vec::with_capacity(frames.len() * 3);
+            f32_to_i24_le(frames, &mut bytes);
+            let written = (frames.len() / channels) as u64;
+            if self.sink.write_dop(&bytes).is_err() {
+                self.fail("audio sink write failed");
+                return;
+            }
+            if let Some(ActiveStream::Pcm(a)) = self.active.as_mut() {
+                a.pumped_frames += written;
+                a.advance_display();
+            }
+            return;
         }
 
         // Resample only when the sink demanded another rate.
@@ -1202,6 +1314,8 @@ pub enum EngineCommand {
     SetVolume(f32),
     /// Output device by name; `None` = system default.
     SetOutputDevice(Option<String>),
+    /// When to use exclusive bit-perfect PCM output.
+    SetBitPerfect(BitPerfect),
     /// Replace the parametric EQ bands (validated; rejected wholesale if
     /// any band is invalid). PCM only.
     SetEqBands(Vec<EqBand>),
@@ -1235,6 +1349,9 @@ struct EngineSettings {
     /// falls back to the default at open time.
     #[serde(default)]
     output_device: Option<String>,
+    /// Exclusive bit-perfect output preference (default off).
+    #[serde(default)]
+    bit_perfect: BitPerfect,
 }
 
 /// Queue state persisted to `queue.json` next to the engine settings file
@@ -1278,6 +1395,7 @@ impl EngineSettings {
                 dsd_story: DsdStory::default(),
                 global_format: None,
                 output_device: None,
+                bit_perfect: BitPerfect::default(),
             })
     }
 
@@ -1301,6 +1419,7 @@ pub struct EngineController {
     server_url: Arc<RwLock<String>>,
     dsd_story: Arc<RwLock<DsdStory>>,
     output_device: Arc<RwLock<Option<String>>>,
+    bit_perfect: Arc<RwLock<BitPerfect>>,
     global_format: Arc<RwLock<Option<StreamFormat>>>,
     settings_path: PathBuf,
     _thread: JoinHandle<()>,
@@ -1332,6 +1451,8 @@ impl EngineController {
             settings.output_device.clone(),
         ));
         *ctrl.output_device.write().expect("device lock") = settings.output_device.clone();
+        ctrl.send(EngineCommand::SetBitPerfect(settings.bit_perfect));
+        *ctrl.bit_perfect.write().expect("bit-perfect lock") = settings.bit_perfect;
         *ctrl.global_format.write().expect("format lock") = settings.global_format;
         // Restore the persisted queue, if any. Repeat/shuffle ride along in
         // the queue file so the restore is exact (shuffle order is
@@ -1376,6 +1497,7 @@ impl EngineController {
             server_url,
             dsd_story: Arc::new(RwLock::new(DsdStory::default())),
             output_device: Arc::new(RwLock::new(None)),
+            bit_perfect: Arc::new(RwLock::new(BitPerfect::default())),
             global_format: Arc::new(RwLock::new(None)),
             settings_path,
             _thread: thread,
@@ -1437,6 +1559,20 @@ impl EngineController {
         settings.output_device = name.clone();
         settings.save(&self.settings_path);
         self.send(EngineCommand::SetOutputDevice(name));
+    }
+
+    /// Choose when to use exclusive bit-perfect output. Persisted; applies
+    /// immediately to a track that is playing.
+    pub fn set_bit_perfect(&self, mode: BitPerfect) {
+        *self.bit_perfect.write().expect("bit-perfect lock") = mode;
+        let mut settings = EngineSettings::load(&self.settings_path);
+        settings.bit_perfect = mode;
+        settings.save(&self.settings_path);
+        self.send(EngineCommand::SetBitPerfect(mode));
+    }
+
+    pub fn bit_perfect(&self) -> BitPerfect {
+        *self.bit_perfect.read().expect("bit-perfect lock")
     }
 
     /// The chosen output device (`None` = system default).
@@ -1607,6 +1743,7 @@ fn snapshot_key(
     bool,
     u32,
     u64,
+    OutputPath,
 ) {
     // Volume changes must reach the UI even while paused/stopped, and a
     // seek while paused moves the (otherwise static) playhead. While
@@ -1624,6 +1761,9 @@ fn snapshot_key(
         s.shuffle,
         s.volume.to_bits(),
         idle_position,
+        // The badge/volume behaviour depends on it, and switching the
+        // bit-perfect mode while paused must still reach the UI.
+        s.output_path,
     )
 }
 
@@ -1647,6 +1787,7 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
         EngineCommand::RestoreQueue(t, i) => player.restore_queue(t, i),
         EngineCommand::SetVolume(v) => player.set_volume(v),
         EngineCommand::SetOutputDevice(d) => player.set_output_device(d),
+        EngineCommand::SetBitPerfect(m) => player.set_bit_perfect(m),
         EngineCommand::SetEqBands(bands) => {
             if let Err(e) = player.set_eq_bands(bands) {
                 tracing::warn!("rejected EQ bands: {e}");
@@ -1685,6 +1826,19 @@ mod key_tests {
             };
             assert_ne!(snapshot_key(&a), snapshot_key(&b), "{status:?}");
         }
+    }
+
+    #[test]
+    fn output_path_change_changes_the_key() {
+        let a = PlayerSnapshot {
+            output_path: OutputPath::Pcm,
+            ..snap()
+        };
+        let b = PlayerSnapshot {
+            output_path: OutputPath::PcmExclusive,
+            ..snap()
+        };
+        assert_ne!(snapshot_key(&a), snapshot_key(&b));
     }
 
     #[test]

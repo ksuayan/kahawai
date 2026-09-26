@@ -99,6 +99,10 @@ export const usePlayerStore = defineStore("player", () => {
   const activeFormat = computed(() => raw.value?.format ?? null);
   const outputPath = computed(() => raw.value?.output_path ?? "pcm-shared");
   const isDopExclusive = computed(() => outputPath.value === "dop-exclusive");
+  /** Exclusive PCM: the file's own samples, untouched (MQA DACs, audiophile mode). */
+  const isBitPerfect = computed(() => outputPath.value === "pcm-exclusive");
+  /** Either exclusive path: EQ, loudness and software volume are bypassed. */
+  const isExclusive = computed(() => isDopExclusive.value || isBitPerfect.value);
   const volume = computed(() => raw.value?.volume ?? 1);
   const error = computed(() => raw.value?.error ?? null);
   const repeat = computed<RepeatMode>(() => raw.value?.repeat ?? "off");
@@ -188,6 +192,8 @@ export const usePlayerStore = defineStore("player", () => {
     activeFormat,
     outputPath,
     isDopExclusive,
+    isBitPerfect,
+    isExclusive,
     volume,
     error,
     repeat,

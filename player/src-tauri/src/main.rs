@@ -20,8 +20,8 @@ use kahawai_player_audio::{
     CpalSink, SinkRouter,
 };
 use kahawai_player_core::{
-    fetch_artwork, validate_bands, ArtworkCache, DsdStory, DspSettings, EngineController, EqBand,
-    OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, RepeatMode,
+    fetch_artwork, validate_bands, ArtworkCache, BitPerfect, DsdStory, DspSettings,
+    EngineController, EqBand, OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, RepeatMode,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -152,6 +152,7 @@ fn output_path_str(p: OutputPath) -> &'static str {
     match p {
         OutputPath::Pcm => "pcm-shared",
         OutputPath::Dop => "dop-exclusive",
+        OutputPath::PcmExclusive => "pcm-exclusive",
     }
 }
 
@@ -371,6 +372,16 @@ struct PlaybackPrefsDto {
     /// "native" | "convert".
     dsd_story: &'static str,
     global_format: Option<&'static str>,
+    /// "off" | "mqa" | "all" — exclusive bit-perfect output.
+    bit_perfect: &'static str,
+}
+
+fn bit_perfect_str(m: BitPerfect) -> &'static str {
+    match m {
+        BitPerfect::Off => "off",
+        BitPerfect::Mqa => "mqa",
+        BitPerfect::All => "all",
+    }
 }
 
 /// Persisted playback preferences (DSD story + global format override).
@@ -384,12 +395,29 @@ fn get_playback_prefs(state: State<'_, AppState>) -> PlaybackPrefsDto {
             DsdStory::Convert => "convert",
         },
         global_format: fmt.map(format_str),
+        bit_perfect: bit_perfect_str(state.engine.bit_perfect()),
     }
 }
 
 /// DSD handling preference: "native" (request DoP when nothing overrides)
 /// or "convert" (DSD → PCM, the pre-C3 default). Persisted to the engine
 /// settings file.
+/// Choose when to play through the exclusive bit-perfect path
+/// ("off" | "mqa" | "all"). Persisted; a playing track moves over at its
+/// current position. No `emit_state` (see `seek_ms`): the playback thread
+/// emits the resulting state, including the new output path.
+#[tauri::command]
+fn set_bit_perfect(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    let m = match mode.as_str() {
+        "off" => BitPerfect::Off,
+        "mqa" => BitPerfect::Mqa,
+        "all" => BitPerfect::All,
+        _ => return Err(format!("unknown bit-perfect mode: {mode}")),
+    };
+    state.engine.set_bit_perfect(m);
+    Ok(())
+}
+
 #[tauri::command]
 fn set_dsd_story(app: AppHandle, state: State<'_, AppState>, story: String) -> Result<(), String> {
     let s = match story.as_str() {
@@ -591,6 +619,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            set_bit_perfect,
             get_server_url,
             artwork_cache_stats,
             clear_artwork_cache,

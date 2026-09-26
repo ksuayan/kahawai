@@ -210,3 +210,24 @@ describe("per-track format overrides", () => {
     expect(p.formatOverride(2)).toBe("flac");
   });
 });
+
+describe("output path", () => {
+  it.each([
+    ["pcm-shared", false, false, false],
+    ["dop-exclusive", true, false, true],
+    ["pcm-exclusive", false, true, true],
+  ] as const)("%s -> dop=%s bitPerfect=%s exclusive=%s", async (path, dop, bp, excl) => {
+    const p = await ready(makeState({ status: "playing", output_path: path }));
+    expect(p.isDopExclusive).toBe(dop);
+    expect(p.isBitPerfect).toBe(bp);
+    expect(p.isExclusive).toBe(excl);
+  });
+
+  it("follows the engine when the path changes (bit-perfect switched on mid-track)", async () => {
+    const p = await ready(makeState({ status: "playing", output_path: "pcm-shared" }));
+    expect(p.isBitPerfect).toBe(false);
+    tauri.emit("player-state", makeState({ status: "playing", output_path: "pcm-exclusive" }));
+    expect(p.isBitPerfect).toBe(true);
+    expect(p.isExclusive).toBe(true);
+  });
+});

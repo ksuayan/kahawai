@@ -71,6 +71,14 @@ export interface Page<T> {
 
 export type PlayerStatus = "stopped" | "loading" | "playing" | "paused";
 
+/** Which audio path the engine is using (drives badges and whether DSP/volume apply). */
+export type OutputPathName = "pcm-shared" | "dop-exclusive" | "pcm-exclusive";
+
+/** When to play through the exclusive, untouched bit-perfect path. */
+export type BitPerfectMode = "off" | "mqa" | "all";
+
+export const BIT_PERFECT_MODES: BitPerfectMode[] = ["off", "mqa", "all"];
+
 export interface PlayerState {
   status: PlayerStatus;
   track: Track | null;
@@ -81,7 +89,7 @@ export interface PlayerState {
   format: string | null;
   chain: string | null;
   /** "pcm-shared" (DSP chain active) or "dop-exclusive" (bit-perfect). */
-  output_path: "pcm-shared" | "dop-exclusive";
+  output_path: OutputPathName;
   volume: number;
   error: string | null;
   /** Queue repeat mode. */
@@ -239,6 +247,7 @@ export type DsdStory = "native" | "convert";
 export interface PlaybackPrefs {
   dsd_story: DsdStory;
   global_format: StreamFormat | null;
+  bit_perfect?: BitPerfectMode;
 }
 
 /** Result of `POST /api/playlists/import`. */

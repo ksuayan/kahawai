@@ -23,6 +23,29 @@ scripts/
 (platform-independent playback engine), and `crates/kahawai-player-audio` (real
 OS audio sinks) live in the workspace root.
 
+## Bit-perfect output and MQA
+
+Settings → **Bit-perfect output** (Off / MQA files only / All tracks; macOS).
+When it applies to a track, the engine sends the decoded samples to the
+exclusive (hog-mode) device **untouched**: no EQ, loudness gain, software
+volume or resampling, at the file's own sample rate, as packed 24-bit
+(`bitperfect.rs`; the float→24-bit conversion is exact). That is what a DAC
+that decodes MQA needs to see the MQA signal, and what "bit-perfect" means
+generally.
+
+- It only applies to a track streamed as-is (an explicit FLAC/Opus/MP3
+  choice is a different signal). If the device can't take the file's exact
+  sample rate, or the device is busy, that track plays through the normal
+  shared path instead of failing.
+- Tracks play one at a time (the server is not asked to chain the next
+  track, since its rate may differ), so there is a brief gap between tracks.
+- Volume is the DAC's: the volume slider dims and says so.
+- The catalog marks MQA files (`MQAENCODER` tag; "MQA · 48k" badge). MQA
+  itself is not decoded in software: it is proprietary. An MQA file plays as
+  ordinary FLAC when bit-perfect is off.
+- Underruns in this mode are true silence (a DoP-style silence pattern would
+  be a burst of noise on a PCM stream).
+
 ## UI stack and tests (`player/ui`)
 
 Vue 3 + Pinia + strict TypeScript, styled with **Tailwind CSS v4** (design

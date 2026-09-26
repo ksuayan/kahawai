@@ -15,8 +15,9 @@ pub enum SinkState {
 }
 
 /// Which audio path is active. PCM is the shared-mode device path with the
-/// DSP chain (EQ → loudness → volume); DoP is the exclusive hog-mode path
-/// that bypasses all PCM DSP, bit-perfect.
+/// DSP chain (EQ → loudness → volume). DoP and exclusive PCM both use the
+/// exclusive hog-mode device and bypass all PCM DSP, bit-perfect: DoP carries
+/// DSD, `PcmExclusive` carries ordinary PCM untouched (see `bitperfect`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum OutputPath {
     #[default]
@@ -24,6 +25,15 @@ pub enum OutputPath {
     Pcm,
     #[serde(rename = "dop-exclusive")]
     Dop,
+    #[serde(rename = "pcm-exclusive")]
+    PcmExclusive,
+}
+
+impl OutputPath {
+    /// Both exclusive paths run on the same hog-mode device.
+    pub fn is_exclusive(self) -> bool {
+        matches!(self, OutputPath::Dop | OutputPath::PcmExclusive)
+    }
 }
 
 /// Decoded PCM the player hands to the sink. Interleaved f32, one `frames`
@@ -91,6 +101,25 @@ pub trait AudioSink: Send {
     /// choice ignore this. A name that is no longer connected falls back to
     /// the system default rather than failing playback.
     fn set_output_device(&mut self, _name: Option<&str>) {}
+
+    /// The exact rate the sink can output *exclusively* for ordinary PCM
+    /// (bit-perfect mode), or `None` when it cannot — the engine then falls
+    /// back to shared-mode output. Capability query only: no device changes.
+    fn exclusive_pcm_rate(&self, _rate_hz: u32) -> Option<u32> {
+        None
+    }
+
+    /// Open the exclusive device for untouched PCM at `rate_hz` /
+    /// `channels`. Samples are then pushed with [`write_dop`]
+    /// (packed little-endian 24-bit frames); the device is released by
+    /// `stop` (or the next `open*`).
+    ///
+    /// [`write_dop`]: AudioSink::write_dop
+    fn open_exclusive_pcm(&mut self, _rate_hz: u32, _channels: u16) -> Result<(), MusicError> {
+        Err(MusicError::BadRequest(
+            "exclusive PCM output not supported by this sink".into(),
+        ))
+    }
 
     /// PCM frames (per channel, at the sink's output rate) accepted by
     /// `write` but not yet played. The engine subtracts this from the
@@ -190,6 +219,18 @@ pub struct VecSink {
     pub drains: u32,
     /// Last device chosen via `set_output_device` (`None` = default).
     pub device: Option<String>,
+    /// Sample rates this sink pretends to output exclusively (bit-perfect).
+    pub exclusive_rates: Vec<u32>,
+    /// `(rate, channels)` of the currently open exclusive PCM stream.
+    pub exclusive_open: Option<(u32, u16)>,
+    /// Every packed 24-bit byte pushed through `write_dop`.
+    pub exclusive_bytes: Vec<u8>,
+    /// Output path last selected by the engine.
+    pub selected_path: Option<OutputPath>,
+    /// Number of times `open` (the shared path) was called.
+    pub shared_opens: u32,
+    /// Make `open_exclusive_pcm` fail (device refused / busy).
+    pub fail_exclusive_open: bool,
 }
 
 impl VecSink {
@@ -207,6 +248,7 @@ impl AudioSink for VecSink {
     fn open(&mut self, track: &Track) -> Result<(), MusicError> {
         let _ = track;
         self.state = SinkState::Stopped;
+        self.shared_opens += 1;
         Ok(())
     }
 
@@ -256,6 +298,31 @@ impl AudioSink for VecSink {
         self.device = name.map(str::to_owned);
     }
 
+    fn exclusive_pcm_rate(&self, rate_hz: u32) -> Option<u32> {
+        self.exclusive_rates.contains(&rate_hz).then_some(rate_hz)
+    }
+
+    fn open_exclusive_pcm(&mut self, rate_hz: u32, channels: u16) -> Result<(), MusicError> {
+        if self.fail_exclusive_open {
+            return Err(MusicError::Audio("device busy".into()));
+        }
+        self.exclusive_open = Some((rate_hz, channels));
+        self.state = SinkState::Stopped;
+        Ok(())
+    }
+
+    fn write_dop(&mut self, bytes: &[u8]) -> Result<(), MusicError> {
+        if self.exclusive_open.is_none() {
+            return Err(MusicError::Audio("exclusive stream not open".into()));
+        }
+        self.exclusive_bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn select_output_path(&mut self, path: OutputPath) {
+        self.selected_path = Some(path);
+    }
+
     fn drain(&mut self) {
         self.drains += 1;
     }
@@ -289,7 +356,7 @@ impl SinkRouter {
     fn active_sink(&mut self) -> &mut dyn AudioSink {
         match self.active {
             OutputPath::Pcm => &mut *self.pcm,
-            OutputPath::Dop => match self.dop.as_mut() {
+            OutputPath::Dop | OutputPath::PcmExclusive => match self.dop.as_mut() {
                 Some(s) => &mut **s,
                 None => &mut *self.pcm,
             },
@@ -331,7 +398,7 @@ impl AudioSink for SinkRouter {
     fn state(&self) -> SinkState {
         match self.active {
             OutputPath::Pcm => self.pcm.state(),
-            OutputPath::Dop => self
+            OutputPath::Dop | OutputPath::PcmExclusive => self
                 .dop
                 .as_ref()
                 .map(|d| d.state())
@@ -342,14 +409,17 @@ impl AudioSink for SinkRouter {
     fn latency_ms(&self) -> u64 {
         match self.active {
             OutputPath::Pcm => self.pcm.latency_ms(),
-            OutputPath::Dop => self.dop.as_ref().map(|d| d.latency_ms()).unwrap_or(0),
+            OutputPath::Dop | OutputPath::PcmExclusive => {
+                self.dop.as_ref().map(|d| d.latency_ms()).unwrap_or(0)
+            }
         }
     }
 
     fn preferred_sample_rate(&self) -> Option<u32> {
         match self.active {
             OutputPath::Pcm => self.pcm.preferred_sample_rate(),
-            OutputPath::Dop => None, // DoP rate is negotiated by the DoP sink itself
+            // The exclusive sink negotiates its own rate.
+            OutputPath::Dop | OutputPath::PcmExclusive => None,
         }
     }
 
@@ -364,9 +434,9 @@ impl AudioSink for SinkRouter {
     }
 
     fn select_output_path(&mut self, path: OutputPath) {
-        // Never select a DoP path that doesn't exist.
+        // Never select an exclusive path that doesn't exist.
         self.active = match path {
-            OutputPath::Dop if self.dop.is_none() => OutputPath::Pcm,
+            OutputPath::Dop | OutputPath::PcmExclusive if self.dop.is_none() => OutputPath::Pcm,
             p => p,
         };
     }
@@ -374,7 +444,20 @@ impl AudioSink for SinkRouter {
     fn write_dop(&mut self, bytes: &[u8]) -> Result<(), MusicError> {
         match self.dop.as_mut() {
             Some(d) => d.write_dop(bytes),
-            None => Err(MusicError::BadRequest("no DoP sink installed".into())),
+            None => Err(MusicError::BadRequest("no exclusive sink installed".into())),
+        }
+    }
+
+    fn exclusive_pcm_rate(&self, rate_hz: u32) -> Option<u32> {
+        self.dop
+            .as_ref()
+            .and_then(|d| d.exclusive_pcm_rate(rate_hz))
+    }
+
+    fn open_exclusive_pcm(&mut self, rate_hz: u32, channels: u16) -> Result<(), MusicError> {
+        match self.dop.as_mut() {
+            Some(d) => d.open_exclusive_pcm(rate_hz, channels),
+            None => Err(MusicError::BadRequest("no exclusive sink installed".into())),
         }
     }
 
@@ -390,14 +473,16 @@ impl AudioSink for SinkRouter {
     fn buffered_frames(&self) -> u64 {
         match self.active {
             OutputPath::Pcm => self.pcm.buffered_frames(),
-            OutputPath::Dop => 0,
+            OutputPath::Dop | OutputPath::PcmExclusive => {
+                self.dop.as_ref().map(|d| d.buffered_frames()).unwrap_or(0)
+            }
         }
     }
 
     fn drain(&mut self) {
         match self.active {
             OutputPath::Pcm => self.pcm.drain(),
-            OutputPath::Dop => {
+            OutputPath::Dop | OutputPath::PcmExclusive => {
                 if let Some(d) = self.dop.as_mut() {
                     d.drain();
                 }
@@ -408,7 +493,9 @@ impl AudioSink for SinkRouter {
     fn underrun_count(&self) -> u64 {
         match self.active {
             OutputPath::Pcm => self.pcm.underrun_count(),
-            OutputPath::Dop => self.dop.as_ref().map(|d| d.underrun_count()).unwrap_or(0),
+            OutputPath::Dop | OutputPath::PcmExclusive => {
+                self.dop.as_ref().map(|d| d.underrun_count()).unwrap_or(0)
+            }
         }
     }
 }
@@ -563,5 +650,159 @@ mod tests {
         router.select_output_path(OutputPath::Dop);
         assert_eq!(router.active_path(), OutputPath::Pcm);
         assert!(router.write_dop(&[1]).is_err());
+    }
+
+    // -- router: the two exclusive paths share one device ------------------
+
+    /// Records what the router forwards, observable after the router owns it.
+    #[derive(Default)]
+    struct Log {
+        ops: Vec<String>,
+        exclusive_rates: Vec<u32>,
+        buffered: u64,
+    }
+
+    #[derive(Clone, Default)]
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Log>>, &'static str);
+
+    impl Recorder {
+        fn ops(&self) -> Vec<String> {
+            self.0.lock().unwrap().ops.clone()
+        }
+        fn log(&self, op: &str) {
+            self.0.lock().unwrap().ops.push(format!("{}:{op}", self.1));
+        }
+    }
+
+    impl AudioSink for Recorder {
+        fn open(&mut self, _t: &Track) -> Result<(), MusicError> {
+            self.log("open");
+            Ok(())
+        }
+        fn write(&mut self, _c: PcmChunk) -> Result<(), MusicError> {
+            self.log("write");
+            Ok(())
+        }
+        fn play(&mut self) -> Result<(), MusicError> {
+            self.log("play");
+            Ok(())
+        }
+        fn pause(&mut self) -> Result<(), MusicError> {
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), MusicError> {
+            Ok(())
+        }
+        fn state(&self) -> SinkState {
+            SinkState::Stopped
+        }
+        fn supports_dop(&self) -> bool {
+            self.1 == "excl"
+        }
+        fn exclusive_pcm_rate(&self, r: u32) -> Option<u32> {
+            self.0
+                .lock()
+                .unwrap()
+                .exclusive_rates
+                .contains(&r)
+                .then_some(r)
+        }
+        fn open_exclusive_pcm(&mut self, r: u32, c: u16) -> Result<(), MusicError> {
+            self.log(&format!("open_exclusive_pcm({r},{c})"));
+            Ok(())
+        }
+        fn write_dop(&mut self, b: &[u8]) -> Result<(), MusicError> {
+            self.log(&format!("write_dop({})", b.len()));
+            Ok(())
+        }
+        fn buffered_frames(&self) -> u64 {
+            self.0.lock().unwrap().buffered
+        }
+        fn drain(&mut self) {
+            self.log("drain");
+        }
+    }
+
+    fn router() -> (SinkRouter, Recorder, Recorder) {
+        let pcm = Recorder(Default::default(), "pcm");
+        let excl = Recorder(Default::default(), "excl");
+        excl.0.lock().unwrap().exclusive_rates = vec![44100, 96000];
+        excl.0.lock().unwrap().buffered = 1234;
+        let r = SinkRouter::new(Box::new(pcm.clone()), Some(Box::new(excl.clone())));
+        (r, pcm, excl)
+    }
+
+    #[test]
+    fn exclusive_pcm_is_routed_to_the_exclusive_sink_not_the_shared_one() {
+        let (mut r, pcm, excl) = router();
+        r.select_output_path(OutputPath::PcmExclusive);
+        assert_eq!(r.active_path(), OutputPath::PcmExclusive);
+        assert_eq!(r.exclusive_pcm_rate(96000), Some(96000));
+        assert_eq!(r.exclusive_pcm_rate(48000), None);
+        r.open_exclusive_pcm(96000, 2).unwrap();
+        r.play().unwrap();
+        r.write_dop(&[0u8; 12]).unwrap();
+        r.drain();
+        assert_eq!(
+            excl.ops(),
+            vec![
+                "excl:open_exclusive_pcm(96000,2)",
+                "excl:play",
+                "excl:write_dop(12)",
+                "excl:drain"
+            ]
+        );
+        assert!(pcm.ops().is_empty(), "the shared sink was not touched");
+    }
+
+    #[test]
+    fn the_exclusive_buffer_is_what_position_uses_on_both_exclusive_paths() {
+        let (mut r, _p, _e) = router();
+        r.select_output_path(OutputPath::Pcm);
+        assert_eq!(r.buffered_frames(), 0);
+        for path in [OutputPath::Dop, OutputPath::PcmExclusive] {
+            r.select_output_path(path);
+            assert_eq!(r.buffered_frames(), 1234, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn without_an_exclusive_sink_the_exclusive_paths_are_refused() {
+        let pcm = Recorder(Default::default(), "pcm");
+        let mut r = SinkRouter::new(Box::new(pcm.clone()), None);
+        r.select_output_path(OutputPath::PcmExclusive);
+        assert_eq!(
+            r.active_path(),
+            OutputPath::Pcm,
+            "falls back to the shared path"
+        );
+        assert_eq!(r.exclusive_pcm_rate(44100), None);
+        assert!(r.open_exclusive_pcm(44100, 2).is_err());
+        assert!(r.write_dop(&[0; 6]).is_err());
+    }
+
+    #[test]
+    fn sinks_that_do_not_opt_in_refuse_exclusive_pcm() {
+        let mut n = NullSink::new();
+        assert_eq!(n.exclusive_pcm_rate(44100), None);
+        assert!(n.open_exclusive_pcm(44100, 2).is_err());
+    }
+
+    #[test]
+    fn output_path_wire_names_and_helpers() {
+        assert_eq!(
+            serde_json::to_string(&OutputPath::Pcm).unwrap(),
+            "\"pcm-shared\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OutputPath::Dop).unwrap(),
+            "\"dop-exclusive\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OutputPath::PcmExclusive).unwrap(),
+            "\"pcm-exclusive\""
+        );
+        assert!(!OutputPath::Pcm.is_exclusive());
+        assert!(OutputPath::Dop.is_exclusive() && OutputPath::PcmExclusive.is_exclusive());
     }
 }

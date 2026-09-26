@@ -6,6 +6,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  BitPerfectMode,
   DsdStory,
   DopStatus,
   DspSettings,
@@ -150,6 +151,11 @@ export async function queueInsertNextStrict(tracks: Track[]): Promise<void> {
 
 export async function getPlaybackPrefs(): Promise<PlaybackPrefs | undefined> {
   return cmd<PlaybackPrefs>("get_playback_prefs");
+}
+
+/** Exclusive bit-perfect output: "off" | "mqa" | "all". */
+export async function setBitPerfect(mode: BitPerfectMode): Promise<void> {
+  await cmd("set_bit_perfect", { mode });
 }
 
 export async function setDsdStory(story: DsdStory): Promise<void> {

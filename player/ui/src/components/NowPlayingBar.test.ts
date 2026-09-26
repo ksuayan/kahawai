@@ -68,6 +68,16 @@ describe("NowPlayingBar", () => {
     expect(pcm.text()).not.toContain("Exclusive DoP");
   });
 
+  it("shows a Bit-perfect badge only on the exclusive PCM path", async () => {
+    const bp = await boot(makeState({ status: "playing", output_path: "pcm-exclusive" }));
+    expect(bp.get('[data-testid="bit-perfect-badge"]').text()).toBe("Bit-perfect");
+    expect(bp.text()).not.toContain("Exclusive DoP");
+    for (const path of ["pcm-shared", "dop-exclusive"] as const) {
+      const w = await boot(makeState({ status: "playing", output_path: path }));
+      expect(w.find('[data-testid="bit-perfect-badge"]').exists()).toBe(false);
+    }
+  });
+
   it("surfaces an engine error as an alert", async () => {
     const w = await boot(makeState({ status: "stopped", error: "decode failed: boom" }));
     expect(w.get('[role="alert"]').text()).toContain("decode failed: boom");

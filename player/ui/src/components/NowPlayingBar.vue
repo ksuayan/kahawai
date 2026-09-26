@@ -74,6 +74,15 @@ function goNowPlaying(): void {
         >
           Exclusive DoP
         </UiBadge>
+        <UiBadge
+          v-if="player.isBitPerfect"
+          variant="ok"
+          class="ml-1"
+          data-testid="bit-perfect-badge"
+          title="Bit-perfect: the file's samples go to the DAC untouched, at their own sample rate. EQ, loudness and volume are bypassed."
+        >
+          Bit-perfect
+        </UiBadge>
       </button>
 
       <!-- center: transport + seek -->

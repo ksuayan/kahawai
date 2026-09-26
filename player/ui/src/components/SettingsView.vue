@@ -11,6 +11,7 @@ import { useSettingsStore } from "../stores/settings";
 import {
   EQ_BAND_TYPES,
   STREAM_FORMATS,
+  type BitPerfectMode,
   type DsdStory,
   type EqBandType,
   type StreamFormat,
@@ -85,6 +86,12 @@ function formatLabel(f: StreamFormat): string {
 const formatOptions: UiSelectOption[] = [
   { value: null, label: "Auto (recommended)" },
   ...STREAM_FORMATS.map((f) => ({ value: f, label: formatLabel(f) })),
+];
+
+const bitPerfectOptions: UiSelectOption[] = [
+  { value: "off", label: "Off (shared output; EQ and volume work)" },
+  { value: "mqa", label: "MQA files only" },
+  { value: "all", label: "All tracks" },
 ];
 
 const dsdOptions: UiSelectOption[] = [
@@ -321,6 +328,28 @@ const dopRates = computed(() =>
         </template>
         <template v-else>Exclusive DoP output is macOS-only.</template>
       </UiHint>
+    </SettingsSection>
+
+    <SettingsSection title="Bit-perfect output">
+      <template v-if="dsp.dop?.exclusive_available">
+        <UiHint>
+          Sends a file's samples to your DAC <strong class="font-semibold text-fg">untouched</strong>, at the file's own
+          sample rate, with exclusive control of the device. EQ, loudness, volume and format conversion are bypassed.
+          This is what a DAC that decodes <strong class="font-semibold text-fg">MQA</strong> needs to see the MQA signal.
+        </UiHint>
+        <UiSelect
+          aria-label="Bit-perfect output"
+          :model-value="settings.bitPerfect"
+          :options="bitPerfectOptions"
+          @update:model-value="(v) => settings.saveBitPerfect((v ?? 'off') as BitPerfectMode)"
+        />
+        <UiHint v-if="settings.bitPerfect !== 'off'" spaced data-testid="bit-perfect-notes">
+          Use your DAC's own volume control. Other apps can't play through the device while a track is playing, and
+          tracks play one at a time, with a brief gap between them. If the device can't take a file's sample rate, that
+          track plays normally instead.
+        </UiHint>
+      </template>
+      <UiHint v-else>Bit-perfect output is macOS-only.</UiHint>
     </SettingsSection>
 
     <SettingsSection title="Parametric EQ">

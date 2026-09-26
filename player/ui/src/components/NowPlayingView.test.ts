@@ -82,6 +82,22 @@ describe("NowPlayingView", () => {
       expect(w.text()).toContain("Exclusive DoP");
     });
 
+    it("bit-perfect: names the path, omits DSP, and shows the badge", async () => {
+      const w = await boot(
+        makeState({ status: "playing", format: "passthrough", output_path: "pcm-exclusive", track: makeTrack({ format: "flac", bit_depth: 24, sample_rate: 48000, mqa: true, original_sample_rate: 48000 }) }),
+        () => {
+          useDspStore().eqEnabled = true;
+          useDspStore().rows = [{ band_type: "peaking", freq: 1000, gain_db: 3, q: 1, enabled: true }];
+          useDspStore().loudnessEnabled = true;
+        },
+      );
+      expect(w.text()).toContain("→ PASSTHROUGH → Bit-perfect · exclusive");
+      expect(w.text()).not.toContain("EQ 1 bands");
+      expect(w.text()).not.toContain("Loudness");
+      expect(w.get('[data-testid="bit-perfect-badge"]').text()).toBe("Bit-perfect");
+      expect(w.get('[data-testid="mqa-badge"]').text()).toBe("MQA · 48k");
+    });
+
     it("shows AUTO when no format has been chosen", async () => {
       const w = await boot(makeState({ status: "playing", format: null }));
       expect(w.text()).toContain("→ AUTO →");

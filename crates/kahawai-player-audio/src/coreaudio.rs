@@ -306,8 +306,40 @@ struct RenderState {
     cons: HeapCons<u8>,
     underruns: Arc<AtomicU64>,
     channels: u16,
-    /// Marker for the next underrun-silence frame.
+    /// Marker for the next underrun-silence frame (DoP only).
     marker: u8,
+    /// What an underrun sounds like: DoP needs valid marker frames, plain
+    /// PCM needs true zeros (DoP silence bytes would be a loud burst).
+    silence: Silence,
+}
+
+/// The kind of stream the exclusive device carries, i.e. what "silence" is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Silence {
+    /// DSD-over-PCM: DSD silence payload plus alternating marker bytes.
+    Dop,
+    /// Ordinary PCM: all-zero samples.
+    Pcm,
+}
+
+/// Fill one underrun frame (`channels` packed 24-bit samples) and advance
+/// the DoP marker when that is the stream type. Real-time safe.
+fn fill_underrun_frame(dst: &mut [u8], channels: u16, silence: Silence, marker: &mut u8) {
+    match silence {
+        Silence::Pcm => dst.fill(0),
+        Silence::Dop => {
+            for ch in 0..channels as usize {
+                dst[ch * 3] = DSD_SILENCE;
+                dst[ch * 3 + 1] = DSD_SILENCE;
+                dst[ch * 3 + 2] = *marker;
+            }
+            *marker = if *marker == MARKER_EVEN {
+                MARKER_ODD
+            } else {
+                MARKER_EVEN
+            };
+        }
+    }
 }
 
 unsafe extern "C" fn dop_io_proc(
@@ -346,19 +378,11 @@ fn render_into(state: &mut RenderState, bytes: &mut [u8]) {
         if state.cons.pop_slice(dst) == frame_bytes {
             continue;
         }
-        // Underrun: synthesize one DoP silence frame. The marker keeps
-        // alternating so the DAC never loses frame sync.
+        // Underrun: one frame of the stream's own kind of silence (DoP
+        // keeps its markers alternating so the DAC never loses sync; PCM
+        // gets zeros).
         state.underruns.fetch_add(1, Ordering::Relaxed);
-        for ch in 0..state.channels as usize {
-            dst[ch * 3] = DSD_SILENCE;
-            dst[ch * 3 + 1] = DSD_SILENCE;
-            dst[ch * 3 + 2] = state.marker;
-        }
-        state.marker = if state.marker == MARKER_EVEN {
-            MARKER_ODD
-        } else {
-            MARKER_EVEN
-        };
+        fill_underrun_frame(dst, state.channels, state.silence, &mut state.marker);
     }
 }
 
@@ -626,25 +650,23 @@ impl Drop for CoreAudioDopSink {
     }
 }
 
-impl AudioSink for CoreAudioDopSink {
-    fn open(&mut self, track: &Track) -> Result<(), MusicError> {
-        self.release();
-        let dsd_rate = track
-            .sample_rate
-            .ok_or_else(|| MusicError::Audio("DoP needs a known DSD rate".into()))?;
-        let rate = dop_pcm_rate(dsd_rate)
-            .ok_or_else(|| MusicError::Audio(format!("not a DSD rate: {dsd_rate}")))?;
-        let channels = track.channels.unwrap_or(2).clamp(1, 8) as u16;
-
+impl CoreAudioDopSink {
+    /// Acquire the device at `rate` / `channels` and create the IO proc.
+    /// Shared by the DoP path (`open`) and exclusive PCM (`open_exclusive_pcm`).
+    fn open_at(&mut self, rate: u32, channels: u16, silence: Silence) -> Result<(), MusicError> {
         self.acquire(rate, channels)?;
 
-        let cap = (2 * rate as usize * channels as usize * 3).min(RING_CAP_MAX);
+        // DoP buffers two seconds; PCM one (position is corrected by the
+        // buffered amount, so latency is bookkeeping, not drift).
+        let seconds = if silence == Silence::Dop { 2 } else { 1 };
+        let cap = (seconds * rate as usize * channels as usize * 3).min(RING_CAP_MAX);
         let (prod, cons) = HeapRb::<u8>::new(cap).split();
         let render_state = Box::new(RenderState {
             cons,
             underruns: self.underruns.clone(),
             channels,
             marker: MARKER_EVEN,
+            silence,
         });
         let raw = Box::into_raw(render_state);
         let mut proc_id: AudioDeviceIOProcID = None;
@@ -671,6 +693,63 @@ impl AudioSink for CoreAudioDopSink {
         self.producer = Some(prod);
         self.state = SinkState::Stopped;
         Ok(())
+    }
+}
+
+impl AudioSink for CoreAudioDopSink {
+    fn open(&mut self, track: &Track) -> Result<(), MusicError> {
+        self.release();
+        let dsd_rate = track
+            .sample_rate
+            .ok_or_else(|| MusicError::Audio("DoP needs a known DSD rate".into()))?;
+        let rate = dop_pcm_rate(dsd_rate)
+            .ok_or_else(|| MusicError::Audio(format!("not a DSD rate: {dsd_rate}")))?;
+        let channels = track.channels.unwrap_or(2).clamp(1, 8) as u16;
+        self.open_at(rate, channels, Silence::Dop)
+    }
+
+    fn exclusive_pcm_rate(&self, rate_hz: u32) -> Option<u32> {
+        // Capability query only: never changes device state.
+        let device = resolve_device(self.device_name.as_deref()).ok()?;
+        let avail = available_sample_rates(device).ok()?;
+        avail
+            .iter()
+            .any(|a| (*a - rate_hz as f64).abs() < 1.0)
+            .then_some(rate_hz)
+    }
+
+    fn open_exclusive_pcm(&mut self, rate_hz: u32, channels: u16) -> Result<(), MusicError> {
+        self.release();
+        if self.exclusive_pcm_rate(rate_hz).is_none() {
+            return Err(MusicError::Audio(format!(
+                "output device does not offer {rate_hz} Hz"
+            )));
+        }
+        self.open_at(rate_hz, channels.clamp(1, 8), Silence::Pcm)
+    }
+
+    fn buffered_frames(&self) -> u64 {
+        match (&self.producer, self.channels) {
+            (Some(p), ch) if ch > 0 => (p.occupied_len() / (ch as usize * 3)) as u64,
+            _ => 0,
+        }
+    }
+
+    fn drain(&mut self) {
+        // Only a running device empties its ring.
+        if self.state != SinkState::Playing {
+            return;
+        }
+        let Some(p) = self.producer.as_ref() else {
+            return;
+        };
+        let frame_bytes = (self.channels as usize * 3).max(1);
+        let rate = u64::from(self.active_rate.max(1));
+        let queued_ms = (p.occupied_len() / frame_bytes) as u64 * 1000 / rate;
+        let deadline = Instant::now() + Duration::from_millis(queued_ms + 500);
+        while p.occupied_len() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn write(&mut self, _chunk: PcmChunk) -> Result<(), MusicError> {
@@ -813,5 +892,218 @@ mod device_tests {
             let _ = supported_dop_rates(Some(&d.name));
         }
         let _ = supported_dop_rates(Some("nope"));
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use ringbuf::traits::{Consumer, Producer};
+
+    fn state(silence: Silence, channels: u16, ring: usize) -> (RenderState, ringbuf::HeapProd<u8>) {
+        let (prod, cons) = HeapRb::<u8>::new(ring).split();
+        (
+            RenderState {
+                cons,
+                underruns: Arc::new(AtomicU64::new(0)),
+                channels,
+                marker: MARKER_EVEN,
+                silence,
+            },
+            prod,
+        )
+    }
+
+    #[test]
+    fn pcm_underruns_are_true_silence_not_dop_bytes() {
+        let mut marker = MARKER_EVEN;
+        let mut frame = [0xFFu8; 6];
+        fill_underrun_frame(&mut frame, 2, Silence::Pcm, &mut marker);
+        assert_eq!(
+            frame, [0u8; 6],
+            "a DoP pattern here would be a loud burst on a PCM stream"
+        );
+        assert_eq!(marker, MARKER_EVEN, "PCM does not touch the DoP marker");
+    }
+
+    #[test]
+    fn dop_underruns_keep_valid_alternating_markers() {
+        let mut marker = MARKER_EVEN;
+        let mut a = [0u8; 6];
+        let mut b = [0u8; 6];
+        fill_underrun_frame(&mut a, 2, Silence::Dop, &mut marker);
+        fill_underrun_frame(&mut b, 2, Silence::Dop, &mut marker);
+        assert_eq!(
+            a,
+            [
+                DSD_SILENCE,
+                DSD_SILENCE,
+                MARKER_EVEN,
+                DSD_SILENCE,
+                DSD_SILENCE,
+                MARKER_EVEN
+            ]
+        );
+        assert_eq!(
+            b,
+            [
+                DSD_SILENCE,
+                DSD_SILENCE,
+                MARKER_ODD,
+                DSD_SILENCE,
+                DSD_SILENCE,
+                MARKER_ODD
+            ]
+        );
+    }
+
+    #[test]
+    fn pcm_frames_reach_the_device_byte_for_byte() {
+        let (mut st, mut prod) = state(Silence::Pcm, 2, 4096);
+        let src: Vec<u8> = (0..24u8)
+            .map(|i| i.wrapping_mul(37).wrapping_add(11))
+            .collect(); // 4 stereo frames
+        assert_eq!(prod.push_slice(&src), 24);
+        let mut out = vec![0xEEu8; 24];
+        render_into(&mut st, &mut out);
+        assert_eq!(out, src, "no scaling, no marker stamping, no reordering");
+        assert_eq!(st.underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_short_pcm_ring_is_completed_with_zeros_and_counted() {
+        let (mut st, mut prod) = state(Silence::Pcm, 2, 4096);
+        let src = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]; // 2 frames
+        prod.push_slice(&src);
+        let mut out = vec![0xEEu8; 24]; // 4 frames requested
+        render_into(&mut st, &mut out);
+        assert_eq!(&out[..12], &src);
+        assert_eq!(&out[12..], &[0u8; 12], "underrun frames are silent");
+        assert_eq!(
+            st.underruns.load(Ordering::Relaxed),
+            2,
+            "one per missing frame"
+        );
+    }
+
+    #[test]
+    fn dop_rendering_is_unchanged_by_the_pcm_mode() {
+        let (mut st, mut prod) = state(Silence::Dop, 2, 4096);
+        prod.push_slice(&[0x11, 0x22, MARKER_EVEN, 0x33, 0x44, MARKER_EVEN]);
+        let mut out = vec![0u8; 12];
+        render_into(&mut st, &mut out);
+        assert_eq!(
+            &out[..6],
+            &[0x11, 0x22, MARKER_EVEN, 0x33, 0x44, MARKER_EVEN]
+        );
+        assert_eq!(
+            &out[6..],
+            &[
+                DSD_SILENCE,
+                DSD_SILENCE,
+                MARKER_EVEN,
+                DSD_SILENCE,
+                DSD_SILENCE,
+                MARKER_EVEN
+            ]
+        );
+    }
+
+    #[test]
+    fn a_partial_trailing_frame_is_never_split() {
+        let (mut st, mut prod) = state(Silence::Pcm, 2, 64);
+        prod.push_slice(&[9u8; 6]);
+        let mut out = vec![0xEEu8; 8]; // one whole frame + 2 stray bytes
+        render_into(&mut st, &mut out);
+        assert_eq!(&out[..6], &[9u8; 6]);
+        assert_eq!(
+            &out[6..],
+            &[0xEE, 0xEE],
+            "bytes beyond a whole frame are left alone"
+        );
+    }
+
+    // -- buffered-frame accounting and drain ---------------------------------
+
+    fn open_ring(
+        channels: u16,
+        rate: u32,
+        bytes: usize,
+    ) -> (CoreAudioDopSink, ringbuf::HeapCons<u8>) {
+        let mut sink = CoreAudioDopSink::new();
+        let (mut prod, cons) = HeapRb::<u8>::new(1 << 20).split();
+        prod.push_slice(&vec![0u8; bytes]);
+        sink.producer = Some(prod);
+        sink.channels = channels;
+        sink.active_rate = rate;
+        (sink, cons)
+    }
+
+    #[test]
+    fn buffered_frames_counts_whole_24_bit_frames_and_is_zero_when_closed() {
+        let closed = CoreAudioDopSink::new();
+        assert_eq!(closed.buffered_frames(), 0);
+        let (sink, _cons) = open_ring(2, 96_000, 6 * 1000);
+        assert_eq!(sink.buffered_frames(), 1000, "6 bytes per stereo frame");
+        let (six, _c) = open_ring(6, 96_000, 18 * 50);
+        assert_eq!(six.buffered_frames(), 50);
+    }
+
+    #[test]
+    fn drain_waits_for_the_device_to_empty_the_ring_then_returns() {
+        let (mut sink, mut cons) = open_ring(2, 44_100, 6 * 2000);
+        sink.state = SinkState::Playing;
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            let mut buf = vec![0u8; 6 * 2000];
+            cons.pop_slice(&mut buf); // the device catches up
+        });
+        let start = Instant::now();
+        sink.drain();
+        assert_eq!(
+            sink.buffered_frames(),
+            0,
+            "everything queued was played out"
+        );
+        assert!(
+            start.elapsed() >= Duration::from_millis(40),
+            "it actually waited"
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn drain_gives_up_after_its_bound_when_the_device_never_drains() {
+        let (mut sink, _cons) = open_ring(2, 44_100, 6 * 10); // 10 frames, nobody consuming
+        sink.state = SinkState::Playing;
+        let start = Instant::now();
+        sink.drain();
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "bounded: queued time + 500 ms slack"
+        );
+        assert_eq!(sink.buffered_frames(), 10);
+    }
+
+    #[test]
+    fn drain_does_not_wait_on_a_paused_or_closed_sink() {
+        let (mut sink, _cons) = open_ring(2, 44_100, 6 * 1000);
+        sink.state = SinkState::Paused;
+        let start = Instant::now();
+        sink.drain();
+        assert!(start.elapsed() < Duration::from_millis(50));
+        let mut closed = CoreAudioDopSink::new();
+        closed.drain();
+    }
+
+    #[test]
+    fn exclusive_pcm_is_refused_for_a_rate_no_device_offers() {
+        let mut sink = CoreAudioDopSink::new();
+        // No real device offers 1 Hz: the capability query says no, and opening
+        // fails cleanly without touching hog mode or any device state.
+        assert_eq!(sink.exclusive_pcm_rate(1), None);
+        assert!(sink.open_exclusive_pcm(1, 2).is_err());
+        assert_eq!(sink.state(), SinkState::Stopped);
     }
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { usePlayerStore } from "../stores/player";
 import UiSlider from "../ui/UiSlider.vue";
 
@@ -20,6 +20,14 @@ watch(
   },
 );
 
+const volumeTitle = computed(() =>
+  player.isBitPerfect
+    ? "Bit-perfect output sends the samples untouched: use your DAC's volume control"
+    : player.isDopExclusive
+      ? "Volume is ignored on exclusive DoP output"
+      : "Volume",
+);
+
 function onUpdate(v: number): void {
   touchedAt = Date.now();
   value.value = v;
@@ -34,8 +42,8 @@ function onUpdate(v: number): void {
     :min="0"
     :max="100"
     :step="1"
-    :class="player.isDopExclusive && 'opacity-40'"
-    :title="player.isDopExclusive ? 'Volume is ignored on exclusive DoP output' : 'Volume'"
+    :class="player.isExclusive && 'opacity-40'"
+    :title="volumeTitle"
     @update:model-value="onUpdate"
   />
 </template>

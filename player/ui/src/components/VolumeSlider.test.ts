@@ -73,4 +73,15 @@ describe("VolumeSlider", () => {
     const normal = await boot(0.5);
     expect(normal.classes()).not.toContain("opacity-40");
   });
+
+  it("is dimmed on bit-perfect output and points the user at the DAC's own volume", async () => {
+    const w = await boot(0.5, { output_path: "pcm-exclusive" });
+    expect(w.classes()).toContain("opacity-40");
+    expect(w.attributes("title")).toMatch(/DAC's volume/);
+    const dop = await boot(0.5, { output_path: "dop-exclusive" });
+    expect(dop.attributes("title")).toMatch(/ignored on exclusive DoP/);
+    const shared = await boot(0.5, { output_path: "pcm-shared" });
+    expect(shared.classes()).not.toContain("opacity-40");
+    expect(shared.attributes("title")).toBe("Volume");
+  });
 });

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use kahawai_core::{api::StreamFormat, format::AudioFormat, MusicError, Track};
 use kahawai_player_core::{
-    resolve_format, valid_formats, AudioSink, EngineController, EqBand, EqBandType, OutputPath,
-    PcmChunk, Player, PlayerStatus, StreamInfo, StreamOptions, Transport, VecSink,
+    resolve_format, valid_formats, AudioSink, BitPerfect, EngineController, EqBand, EqBandType,
+    OutputPath, PcmChunk, Player, PlayerStatus, StreamInfo, StreamOptions, Transport, VecSink,
 };
 
 // ---------------------------------------------------------------------------
@@ -126,6 +126,18 @@ impl AudioSink for SharedSink {
     }
     fn drain(&mut self) {
         self.0.lock().unwrap().drain()
+    }
+    fn exclusive_pcm_rate(&self, rate_hz: u32) -> Option<u32> {
+        self.0.lock().unwrap().exclusive_pcm_rate(rate_hz)
+    }
+    fn open_exclusive_pcm(&mut self, rate_hz: u32, channels: u16) -> Result<(), MusicError> {
+        self.0.lock().unwrap().open_exclusive_pcm(rate_hz, channels)
+    }
+    fn write_dop(&mut self, bytes: &[u8]) -> Result<(), MusicError> {
+        self.0.lock().unwrap().write_dop(bytes)
+    }
+    fn select_output_path(&mut self, path: OutputPath) {
+        self.0.lock().unwrap().select_output_path(path)
     }
 }
 
@@ -1372,4 +1384,345 @@ fn dsd_story_pref_round_trips_through_settings_file() {
     assert_eq!(story2, DsdStory::Native);
     assert_eq!(fmt2, Some(kahawai_core::api::StreamFormat::Opus));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Bit-perfect exclusive PCM output (MQA DACs / audiophile mode)
+// ---------------------------------------------------------------------------
+
+/// A player whose exclusive sink accepts the fixtures' 44.1 kHz.
+fn bp_harness(mode: BitPerfect, exclusive_rates: &[u32]) -> Harness {
+    let mut h = Harness::new(None);
+    h.sink.0.lock().unwrap().exclusive_rates = exclusive_rates.to_vec();
+    h.player.set_bit_perfect(mode);
+    h
+}
+
+fn mqa_track(id: i64, ms: u64) -> Track {
+    Track {
+        mqa: true,
+        original_sample_rate: Some(96000),
+        ..track(id, AudioFormat::Wav, ms)
+    }
+}
+
+fn exclusive_bytes(h: &Harness) -> Vec<u8> {
+    h.sink.0.lock().unwrap().exclusive_bytes.clone()
+}
+
+/// Sign-extended packed 24-bit little-endian samples.
+fn i24s(bytes: &[u8]) -> Vec<i32> {
+    bytes
+        .chunks_exact(3)
+        .map(|b| (i32::from_le_bytes([b[0], b[1], b[2], 0]) << 8) >> 8)
+        .collect()
+}
+
+fn path_of(h: &Harness) -> OutputPath {
+    h.sink.0.lock().unwrap().selected_path.unwrap_or_default()
+}
+
+#[test]
+fn mqa_mode_plays_mqa_tracks_on_the_exclusive_path_with_exact_samples() {
+    let mut h = bp_harness(BitPerfect::Mqa, &[RATE]);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player.play_queue(vec![mqa_track(1, 100)], 0);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
+    h.pump_until_done(100);
+
+    {
+        let sink = h.sink.0.lock().unwrap();
+        assert_eq!(
+            sink.exclusive_open,
+            Some((RATE, CHANNELS as u16)),
+            "opened at the file's own rate"
+        );
+        assert_eq!(sink.shared_opens, 0, "the shared path was never touched");
+        assert!(
+            sink.samples.is_empty(),
+            "no float PCM went to the shared sink"
+        );
+    }
+    // Packed 24-bit stereo: 3 bytes per sample, and every value is exactly
+    // the source's 16-bit sample in the top of the word.
+    let got = i24s(&exclusive_bytes(&h));
+    assert_eq!(got.len(), 4410 * CHANNELS);
+    for frame in [0usize, 1, 7, 100, 2205, 4409] {
+        let want = i32::from(expected_i16(440.0, frame)) * 256;
+        assert_eq!(got[frame * 2], want, "left, frame {frame}");
+        assert_eq!(got[frame * 2 + 1], want, "right, frame {frame}");
+    }
+}
+
+#[test]
+fn mqa_mode_leaves_ordinary_tracks_on_shared_output() {
+    let mut h = bp_harness(BitPerfect::Mqa, &[RATE]);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    h.pump_until_done(100);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
+    let sink = h.sink.0.lock().unwrap();
+    assert_eq!(sink.exclusive_open, None);
+    assert!(sink.exclusive_bytes.is_empty());
+    assert_eq!(sink.shared_opens, 1);
+}
+
+#[test]
+fn all_mode_uses_the_exclusive_path_for_every_track() {
+    let mut h = bp_harness(BitPerfect::All, &[RATE]);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    h.pump_until_done(100);
+    assert!(h.sink.0.lock().unwrap().exclusive_open.is_some());
+    assert_eq!(h.sink.0.lock().unwrap().shared_opens, 0);
+}
+
+#[test]
+fn off_mode_never_goes_exclusive_even_for_mqa() {
+    let mut h = bp_harness(BitPerfect::Off, &[RATE]);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player.play_queue(vec![mqa_track(1, 100)], 0);
+    h.pump_until_done(100);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
+    assert_eq!(h.sink.0.lock().unwrap().exclusive_open, None);
+}
+
+#[test]
+fn bit_perfect_ignores_volume_eq_and_loudness() {
+    let plain = {
+        let mut h = bp_harness(BitPerfect::All, &[RATE]);
+        h.stub.add(1, &[(440.0, 8820)]);
+        h.player
+            .play_queue(vec![track(1, AudioFormat::Wav, 200)], 0);
+        h.pump_until_done(200);
+        exclusive_bytes(&h)
+    };
+    let mut h = bp_harness(BitPerfect::All, &[RATE]);
+    h.player.set_volume(0.25);
+    h.player
+        .set_eq_bands(vec![EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 440.0,
+            gain_db: 12.0,
+            q: 1.0,
+        }])
+        .expect("valid band");
+    h.player.set_eq_enabled(true);
+    h.player.set_loudness_enabled(true);
+    h.stub.add(1, &[(440.0, 8820)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 200)], 0);
+    h.pump_until_done(200);
+    assert_eq!(
+        exclusive_bytes(&h),
+        plain,
+        "identical bytes with every DSP stage switched on"
+    );
+    assert_eq!(
+        h.stub.opened.lock().unwrap().len(),
+        1,
+        "no loudness pre-scan stream is requested in bit-perfect mode"
+    );
+}
+
+#[test]
+fn falls_back_to_shared_output_when_the_device_cannot_take_the_rate() {
+    for rates in [vec![], vec![96000u32]] {
+        let mut h = bp_harness(BitPerfect::All, &rates);
+        h.stub.add(1, &[(440.0, 4410)]);
+        h.player.play_queue(vec![mqa_track(1, 100)], 0);
+        h.pump_until_done(100);
+        assert_eq!(
+            h.player.snapshot().output_path,
+            OutputPath::Pcm,
+            "rates {rates:?}"
+        );
+        assert_eq!(path_of(&h), OutputPath::Pcm);
+        let sink = h.sink.0.lock().unwrap();
+        assert_eq!(sink.exclusive_open, None);
+        assert_eq!(sink.shared_opens, 1);
+        assert!(
+            !sink.samples.is_empty(),
+            "still plays, through the shared path"
+        );
+    }
+}
+
+#[test]
+fn falls_back_to_shared_output_when_the_exclusive_device_is_busy() {
+    let mut h = bp_harness(BitPerfect::All, &[RATE]);
+    h.sink.0.lock().unwrap().fail_exclusive_open = true;
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player.play_queue(vec![mqa_track(1, 100)], 0);
+    h.pump_until_done(100);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
+    assert_eq!(h.player.snapshot().error, None, "playback did not fail");
+    assert!(!h.sink.0.lock().unwrap().samples.is_empty());
+}
+
+#[test]
+fn a_forced_transcode_is_not_bit_perfect() {
+    // The file's own bits are what bit-perfect means: a server transcode is a
+    // different signal, so an explicit format choice keeps the shared path.
+    let mut h = bp_harness(BitPerfect::All, &[RATE]);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player.set_track_format(1, Some(StreamFormat::Flac));
+    h.player.play_queue(vec![mqa_track(1, 100)], 0);
+    h.pump_until_done(100);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
+    assert_eq!(h.sink.0.lock().unwrap().exclusive_open, None);
+}
+
+#[test]
+fn bit_perfect_plays_one_track_per_stream_and_never_chains_the_next() {
+    let mut h = bp_harness(BitPerfect::All, &[RATE]);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.stub.add(2, &[(660.0, 4410)]);
+    h.player.play_queue(
+        vec![
+            track(1, AudioFormat::Wav, 100),
+            track(2, AudioFormat::Wav, 100),
+        ],
+        0,
+    );
+    h.pump_until_done(200);
+    {
+        let opened = h.stub.opened.lock().unwrap();
+        assert_eq!(opened.len(), 2, "one request per track");
+        assert!(
+            opened.iter().all(|(_, o)| o.next.is_none()),
+            "no ?next= in bit-perfect mode"
+        );
+    }
+    // Both tracks reached the exclusive device, back to back.
+    assert_eq!(i24s(&exclusive_bytes(&h)).len(), 2 * 4410 * CHANNELS);
+
+    // Contrast: the shared path does ask the server to chain.
+    let mut shared = Harness::new(None);
+    shared.stub.add(1, &[(440.0, 4410)]);
+    shared.stub.add(2, &[(660.0, 4410)]);
+    shared.player.play_queue(
+        vec![
+            track(1, AudioFormat::Wav, 100),
+            track(2, AudioFormat::Wav, 100),
+        ],
+        0,
+    );
+    assert_eq!(shared.stub.opened.lock().unwrap()[0].1.next, Some(2));
+}
+
+#[test]
+fn seeking_in_bit_perfect_resumes_at_the_target_sample() {
+    let mut h = bp_harness(BitPerfect::All, &[RATE]);
+    h.stub.add(1, &[(440.0, 88200)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 2000)], 0);
+    for _ in 0..5 {
+        h.player.pump();
+    }
+    let before = exclusive_bytes(&h).len();
+    h.player.seek_ms(1000);
+    assert_eq!(h.player.snapshot().position_ms, 1000);
+    h.pump_until_done(200);
+    let all = i24s(&exclusive_bytes(&h));
+    let first_after_seek = before / 3;
+    let want = i32::from(expected_i16(440.0, 44100)) * 256;
+    assert_eq!(
+        all[first_after_seek], want,
+        "first sample after the seek is sample #44100"
+    );
+    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
+}
+
+#[test]
+fn position_tracks_the_exclusive_device_buffer() {
+    let mut h = bp_harness(BitPerfect::All, &[RATE]);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    for _ in 0..30 {
+        h.player.pump();
+    }
+    let written = h.player.snapshot().position_ms;
+    assert!(written > 1000);
+    h.sink.0.lock().unwrap().buffered = (RATE / 2) as u64; // half a second still queued
+    assert_eq!(h.player.snapshot().position_ms, written - 500);
+}
+
+#[test]
+fn changing_the_preference_mid_track_moves_to_the_new_path_at_the_same_position() {
+    let mut h = bp_harness(BitPerfect::Off, &[RATE]);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player.play_queue(vec![mqa_track(1, 4000)], 0);
+    for _ in 0..15 {
+        h.player.pump();
+    }
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
+    let pos = h.player.snapshot().position_ms;
+
+    h.player.set_bit_perfect(BitPerfect::Mqa);
+    let snap = h.player.snapshot();
+    assert_eq!(snap.output_path, OutputPath::PcmExclusive);
+    assert!(
+        snap.position_ms.abs_diff(pos) <= 2,
+        "{pos} -> {}",
+        snap.position_ms
+    );
+    assert_eq!(snap.status, PlayerStatus::Playing);
+
+    h.player.set_bit_perfect(BitPerfect::Off);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
+    // Setting the same value again is a no-op (no re-open).
+    let opens = h.stub.opened.lock().unwrap().len();
+    h.player.set_bit_perfect(BitPerfect::Off);
+    assert_eq!(h.stub.opened.lock().unwrap().len(), opens);
+}
+
+#[test]
+fn a_paused_track_stays_paused_when_the_preference_changes() {
+    let mut h = bp_harness(BitPerfect::Off, &[RATE]);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player.play_queue(vec![mqa_track(1, 4000)], 0);
+    for _ in 0..5 {
+        h.player.pump();
+    }
+    h.player.pause();
+    h.player.set_bit_perfect(BitPerfect::All);
+    assert_eq!(h.player.status(), PlayerStatus::Paused);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
+}
+
+#[test]
+fn a_write_failure_on_the_exclusive_device_stops_playback_with_an_error() {
+    let mut h = bp_harness(BitPerfect::All, &[RATE]);
+    h.stub.add(1, &[(440.0, 44100)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.sink.0.lock().unwrap().exclusive_open = None; // device vanished
+    h.player.pump();
+    assert_eq!(h.player.status(), PlayerStatus::Stopped);
+    assert!(h.player.snapshot().error.is_some());
+}
+
+#[test]
+fn the_preference_persists_across_controllers() {
+    let dir = std::env::temp_dir().join(format!("kahawai-bp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("engine-settings.json");
+    {
+        let c = EngineController::new(Box::new(VecSink::new()), path.clone());
+        assert_eq!(c.bit_perfect(), BitPerfect::Off, "off by default");
+        c.set_bit_perfect(BitPerfect::Mqa);
+        assert_eq!(c.bit_perfect(), BitPerfect::Mqa);
+    }
+    let c = EngineController::new(Box::new(VecSink::new()), path.clone());
+    assert_eq!(c.bit_perfect(), BitPerfect::Mqa);
+    c.set_bit_perfect(BitPerfect::All);
+    assert_eq!(
+        EngineController::new(Box::new(VecSink::new()), path).bit_perfect(),
+        BitPerfect::All
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

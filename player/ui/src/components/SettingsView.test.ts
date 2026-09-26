@@ -149,6 +149,70 @@ describe("Settings: playback preferences", () => {
   });
 });
 
+describe("Settings: bit-perfect output", () => {
+  const section = (w: Awaited<ReturnType<typeof mountSettings>>) => w.findAll("section").find((x) => x.find("h3").text() === "Bit-perfect output")!;
+
+  it("explains what it does in plain words, including the MQA use", async () => {
+    const w = await mountSettings();
+    const t = section(w).text();
+    expect(t).toContain("untouched");
+    expect(t).toContain("file's own");
+    expect(t).toContain("MQA");
+    expect(t).toContain("EQ, loudness, volume and format conversion are bypassed");
+  });
+
+  it("is off by default and offers Off / MQA files only / All tracks", async () => {
+    const w = await mountSettings();
+    expect(select(w, "Bit-perfect output").textContent).toContain("Off");
+    await openSelect(select(w, "Bit-perfect output"));
+    expect(optionLabels()).toEqual(["Off (shared output; EQ and volume work)", "MQA files only", "All tracks"]);
+  });
+
+  it("saves the chosen mode through the core", async () => {
+    const w = await mountSettings();
+    await openSelect(select(w, "Bit-perfect output"));
+    pick(options()[1]);
+    await settle();
+    expect(tauri.callsTo("set_bit_perfect")).toEqual([{ mode: "mqa" }]);
+    expect(useSettingsStore().bitPerfect).toBe("mqa");
+    expect(select(w, "Bit-perfect output").textContent).toContain("MQA files only");
+
+    await openSelect(select(w, "Bit-perfect output"));
+    pick(options()[2]);
+    await settle();
+    expect(tauri.callsTo("set_bit_perfect").at(-1)).toEqual({ mode: "all" });
+  });
+
+  it("warns about the trade-offs only while it is on", async () => {
+    const w = await mountSettings();
+    expect(w.find('[data-testid="bit-perfect-notes"]').exists()).toBe(false);
+    useSettingsStore().bitPerfect = "mqa";
+    await settle();
+    const notes = w.get('[data-testid="bit-perfect-notes"]').text();
+    expect(notes).toContain("DAC's own volume control");
+    expect(notes).toContain("Other apps can't play");
+    expect(notes).toContain("one at a time");
+    expect(notes).toContain("plays normally instead");
+    useSettingsStore().bitPerfect = "off";
+    await settle();
+    expect(w.find('[data-testid="bit-perfect-notes"]').exists()).toBe(false);
+  });
+
+  it("says it is macOS-only where the exclusive path does not exist", async () => {
+    tauri
+      .on("get_dsp_settings", { eq_bands: [], eq_enabled: true, loudness_enabled: false, loudness_target: -14 })
+      .on("get_output_devices", devices)
+      .on("get_output_device", null)
+      .on("dop_status", { supported_rates: [], exclusive_available: false });
+    const { wrapper } = mountApp(SettingsView);
+    await useDspStore().init();
+    await settle();
+    const sec = wrapper.findAll("section").find((x) => x.find("h3").text() === "Bit-perfect output")!;
+    expect(sec.text()).toContain("macOS-only");
+    expect(sec.find('[role="combobox"]').exists()).toBe(false);
+  });
+});
+
 describe("Settings: server URL", () => {
   it("saves the URL, checks the connection and reloads the library", async () => {
     const calls = mockFetch({

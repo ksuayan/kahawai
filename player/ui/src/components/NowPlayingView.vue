@@ -32,9 +32,13 @@ const audioPath = computed(() => {
   if (!t) return "Nothing playing";
   const src = formatBadge(t);
   const stream = player.activeFormat ? player.activeFormat.toUpperCase() : "AUTO";
-  const out = player.isDopExclusive ? "Exclusive DoP · bit-perfect" : "PCM shared";
+  const out = player.isDopExclusive
+    ? "Exclusive DoP · bit-perfect"
+    : player.isBitPerfect
+      ? "Bit-perfect · exclusive"
+      : "PCM shared";
   const dspBits: string[] = [];
-  if (!player.isDopExclusive) {
+  if (!player.isExclusive) {
     if (dsp.eqEnabled && dsp.activeBands.length > 0) dspBits.push(`EQ ${dsp.activeBands.length} bands`);
     if (dsp.loudnessEnabled) dspBits.push(`Loudness ${dsp.loudnessTarget} LUFS`);
   }
@@ -73,6 +77,14 @@ function goEq(): void {
           <UiBadge>{{ formatBadge(track) }}</UiBadge>
           <UiBadge v-if="track.mqa" variant="accent" :title="mqaTitle(track)" data-testid="mqa-badge">{{ mqaLabel(track) }}</UiBadge>
           <UiBadge variant="accent" :title="`Audio chain: ${player.chain ?? '—'}`">{{ audioPath }}</UiBadge>
+          <UiBadge
+            v-if="player.isBitPerfect"
+            variant="ok"
+            data-testid="bit-perfect-badge"
+            title="Bit-perfect: the file's samples go to the DAC untouched, at their own sample rate. EQ, loudness and volume are bypassed."
+          >
+            Bit-perfect
+          </UiBadge>
           <UiBadge
             v-if="player.isDopExclusive"
             variant="ok"

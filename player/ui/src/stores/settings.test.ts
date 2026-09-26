@@ -49,4 +49,29 @@ describe("settings store", () => {
     expect(tauri.callsTo("set_dsd_story")).toEqual([{ story: "native" }]);
     expect(tauri.callsTo("set_format").length).toBe(2);
   });
+
+  it("bit-perfect defaults to off, restores the saved mode, and saves changes through the core", async () => {
+    const off = useSettingsStore();
+    await off.init();
+    expect(off.bitPerfect).toBe("off");
+
+    setActivePinia(createPinia());
+    tauri.on("get_playback_prefs", { dsd_story: "convert", global_format: null, bit_perfect: "mqa" });
+    const s = useSettingsStore();
+    await s.init();
+    expect(s.bitPerfect).toBe("mqa");
+
+    await s.saveBitPerfect("all");
+    expect(s.bitPerfect).toBe("all");
+    expect(tauri.callsTo("set_bit_perfect")).toEqual([{ mode: "all" }]);
+    await s.saveBitPerfect("off");
+    expect(tauri.callsTo("set_bit_perfect").at(-1)).toEqual({ mode: "off" });
+  });
+
+  it("an older core without the setting leaves it off", async () => {
+    tauri.on("get_playback_prefs", { dsd_story: "native", global_format: "flac" });
+    const s = useSettingsStore();
+    await s.init();
+    expect(s.bitPerfect).toBe("off");
+  });
 });

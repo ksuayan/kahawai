@@ -1,8 +1,15 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { setBaseUrl } from "../api";
-import { getPlaybackPrefs, getServerUrl, setDsdStory, setFormat, setServerUrl } from "../tauri";
-import type { DsdStory, StreamFormat } from "../types";
+import {
+  getPlaybackPrefs,
+  getServerUrl,
+  setBitPerfect,
+  setDsdStory,
+  setFormat,
+  setServerUrl,
+} from "../tauri";
+import type { BitPerfectMode, DsdStory, StreamFormat } from "../types";
 
 export const DEFAULT_SERVER_URL = "http://localhost:8080";
 
@@ -11,6 +18,8 @@ export const useSettingsStore = defineStore("settings", () => {
   const globalFormat = ref<StreamFormat | null>(null);
   /** DSD handling: "native" (DoP when nothing overrides) or "convert". */
   const dsdStory = ref<DsdStory>("convert");
+  /** Exclusive bit-perfect output: off (default) | mqa (MQA files only) | all. */
+  const bitPerfect = ref<BitPerfectMode>("off");
   const loaded = ref(false);
 
   /** On boot: server URL + persisted playback prefs from the Rust core. */
@@ -24,6 +33,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (prefs) {
       dsdStory.value = prefs.dsd_story;
       globalFormat.value = prefs.global_format;
+      bitPerfect.value = prefs.bit_perfect ?? "off";
     }
     loaded.value = true;
   }
@@ -46,5 +56,21 @@ export const useSettingsStore = defineStore("settings", () => {
     await setDsdStory(story);
   }
 
-  return { serverUrl, globalFormat, dsdStory, loaded, init, saveServerUrl, saveGlobalFormat, saveDsdStory };
+  async function saveBitPerfect(mode: BitPerfectMode): Promise<void> {
+    bitPerfect.value = mode;
+    await setBitPerfect(mode);
+  }
+
+  return {
+    serverUrl,
+    globalFormat,
+    dsdStory,
+    bitPerfect,
+    loaded,
+    init,
+    saveServerUrl,
+    saveGlobalFormat,
+    saveDsdStory,
+    saveBitPerfect,
+  };
 });
