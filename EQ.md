@@ -263,8 +263,7 @@ Either way we would need to:
 ### A suggested path
 
 1. **Refactor**: extract the `DspStage` trait; make the built-in EQ one
-   stage; add coefficient smoothing (4.2). No behaviour change beyond the
-   fix.
+   stage. No behaviour change.
 2. **Spike**: an `AudioUnitStage` for one Apple built-in (`AUNBandEQ`),
    using approach 1, with a hard-coded parameter set, to measure latency,
    CPU, and how well chunk-at-a-time rendering works.
