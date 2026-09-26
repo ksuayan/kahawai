@@ -134,9 +134,8 @@ const scanning = ref(false);
 async function onScan(): Promise<void> {
   scanning.value = true;
   try {
+    // The jobs store reloads the library when the scan finishes.
     await jobs.startScan();
-    // A finished scan changes the catalog: reload browse data.
-    // (Poll for completion is overkill; the user sees the toast.)
   } finally {
     scanning.value = false;
   }

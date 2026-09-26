@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTrack, mockFetch } from "../test/fixtures";
 import { useJobsStore } from "./jobs";
+import { useLibraryStore } from "./library";
 import { useToastsStore } from "./toasts";
 
 const job = (over: Record<string, unknown> = {}) => ({
@@ -52,6 +53,29 @@ describe("jobs store: polling", () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(toasts.toasts).toHaveLength(1); // updated in place, not duplicated
     expect(toasts.toasts[0].progress).toBe(0.65);
+  });
+
+  it("reloads the library when a scan finishes, but not for other jobs or a still-running scan", async () => {
+    const feed = jobsFeed([job()]);
+    const jobs = useJobsStore();
+    const load = vi.spyOn(useLibraryStore(), "loadAll").mockResolvedValue();
+    jobs.init();
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(load).not.toHaveBeenCalled();
+    feed.set([job({ status: "done", progress: 1 })]);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(load).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(load).toHaveBeenCalledTimes(1);
+
+    const other = jobsFeed([job({ id: "job-2", kind: "extract_iso" })]);
+    const jobs2 = useJobsStore();
+    jobs2.init();
+    await flushPromises();
+    other.set([job({ id: "job-2", kind: "extract_iso", status: "done", progress: 1 })]);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(load).toHaveBeenCalledTimes(1);
   });
 
   it("swaps the progress toast for a success toast when the job finishes, then stops polling", async () => {

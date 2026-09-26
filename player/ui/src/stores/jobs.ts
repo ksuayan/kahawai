@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { ApiError, createJob, fetchJobs, triggerScan } from "../api";
 import { isJobActive, trackTitle, type JobInfo, type JobStatus, type Track } from "../types";
+import { useLibraryStore } from "./library";
 import { useToastsStore } from "./toasts";
 
 function jobTitle(j: JobInfo, verb: "started" | "running" | "finished" | "failed"): string {
@@ -24,6 +25,7 @@ export const useJobsStore = defineStore("jobs", () => {
   const lastError = ref<string | null>(null);
 
   const toasts = useToastsStore();
+  const library = useLibraryStore();
   const seen = new Map<string, SeenJob>();
 
   let timer: number | undefined;
@@ -82,6 +84,8 @@ export const useJobsStore = defineStore("jobs", () => {
         if (prev.toastId != null) toasts.dismiss(prev.toastId);
         toasts.push("success", jobTitle(j, "finished"), { detail: j.message });
         prev.toastId = null;
+        // A finished scan changed the catalog: reload albums and artists.
+        if (j.kind === "scan") void library.loadAll();
       } else if (j.status === "failed") {
         if (prev.toastId != null) toasts.dismiss(prev.toastId);
         // The server's message is the honest failure reason — verbatim.
