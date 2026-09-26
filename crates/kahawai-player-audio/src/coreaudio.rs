@@ -362,9 +362,99 @@ fn render_into(state: &mut RenderState, bytes: &mut [u8]) {
     }
 }
 
-/// DoP rates the default output device reports as available nominal rates.
-pub fn supported_dop_rates() -> Result<Vec<u32>, MusicError> {
-    let device = default_output_device()?;
+/// Every audio device the HAL knows about.
+fn all_devices() -> Result<Vec<AudioObjectID>, MusicError> {
+    let addr = prop_addr(kAudioHardwarePropertyDevices);
+    let mut size: u32 = 0;
+    os(
+        unsafe {
+            AudioObjectGetPropertyDataSize(
+                kAudioObjectSystemObject,
+                &addr,
+                0,
+                ptr::null(),
+                &mut size,
+            )
+        },
+        "get device list size",
+    )?;
+    let mut ids = vec![0 as AudioObjectID; size as usize / std::mem::size_of::<AudioObjectID>()];
+    let mut size2 = size;
+    os(
+        unsafe {
+            AudioObjectGetPropertyData(
+                kAudioObjectSystemObject,
+                &addr,
+                0,
+                ptr::null(),
+                &mut size2,
+                ids.as_mut_ptr() as *mut c_void,
+            )
+        },
+        "get device list",
+    )?;
+    ids.truncate(size2 as usize / std::mem::size_of::<AudioObjectID>());
+    Ok(ids)
+}
+
+/// Device name as cpal reports it (`kAudioDevicePropertyDeviceNameCFString`),
+/// so the name the UI picked from cpal's list matches here.
+fn device_name(device: AudioObjectID) -> Option<String> {
+    let addr = prop_addr(kAudioDevicePropertyDeviceNameCFString);
+    let mut cf: CFStringRef = ptr::null();
+    let mut size = std::mem::size_of::<CFStringRef>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device,
+            &addr,
+            0,
+            ptr::null(),
+            &mut size,
+            &mut cf as *mut CFStringRef as *mut c_void,
+        )
+    };
+    if status != NO_ERR || cf.is_null() {
+        return None;
+    }
+    let out = unsafe {
+        let len = CFStringGetLength(cf);
+        let cap = CFStringGetMaximumSizeForEncoding(len, kCFStringEncodingUTF8) + 1;
+        let mut buf = vec![0u8; cap as usize];
+        let ok = CFStringGetCString(cf, buf.as_mut_ptr() as *mut _, cap, kCFStringEncodingUTF8);
+        (ok != 0).then(|| {
+            std::ffi::CStr::from_ptr(buf.as_ptr() as *const _)
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    unsafe { CFRelease(cf as CFTypeRef) };
+    out
+}
+
+/// First output-capable device with this name.
+fn find_output_device(name: &str) -> Option<AudioObjectID> {
+    all_devices().ok()?.into_iter().find(|&d| {
+        device_name(d).as_deref() == Some(name)
+            && output_streams(d).map(|s| !s.is_empty()).unwrap_or(false)
+    })
+}
+
+/// The chosen device, or the system default when none is chosen or it is
+/// not connected any more (same fallback as the PCM sink).
+fn resolve_device(name: Option<&str>) -> Result<AudioObjectID, MusicError> {
+    if let Some(n) = name {
+        match find_output_device(n) {
+            Some(d) => return Ok(d),
+            None => tracing::warn!(device = %n, "output device not found; using system default"),
+        }
+    }
+    default_output_device()
+}
+
+/// DoP rates the given output device (`None` = system default) reports as
+/// available nominal rates.
+pub fn supported_dop_rates(device_name: Option<&str>) -> Result<Vec<u32>, MusicError> {
+    let device = resolve_device(device_name)?;
     let avail = available_sample_rates(device)?;
     Ok(DOP_RATES
         .into_iter()
@@ -374,6 +464,8 @@ pub fn supported_dop_rates() -> Result<Vec<u32>, MusicError> {
 
 pub struct CoreAudioDopSink {
     device: AudioObjectID,
+    /// Chosen output device by name; `None` = the system default.
+    device_name: Option<String>,
     io_proc: Option<AudioDeviceIOProcID>,
     /// Owned render state handed to the IO proc; null when no proc.
     /// Only dereferenced by the render thread (or freed here after the
@@ -398,6 +490,7 @@ impl CoreAudioDopSink {
     pub fn new() -> Self {
         Self {
             device: 0,
+            device_name: None,
             io_proc: None,
             render_state: ptr::null_mut(),
             producer: None,
@@ -441,7 +534,7 @@ impl CoreAudioDopSink {
     /// Acquire hog mode, switch to `rate`, force 24-bit stream formats.
     /// Every step is verified by readback; any failure unwinds.
     fn acquire(&mut self, rate: u32, channels: u16) -> Result<(), MusicError> {
-        let device = default_output_device()?;
+        let device = resolve_device(self.device_name.as_deref())?;
         self.saved_rate = get_nominal_rate(device)?;
 
         // 1. Hog mode: exclusive access.
@@ -647,7 +740,7 @@ impl AudioSink for CoreAudioDopSink {
     fn dop_output_rate(&self, dsd_rate_hz: u32) -> Option<u32> {
         // Capability query only: never changes device state.
         let rate = dop_pcm_rate(dsd_rate_hz)?;
-        let device = default_output_device().ok()?;
+        let device = resolve_device(self.device_name.as_deref()).ok()?;
         let avail = available_sample_rates(device).ok()?;
         avail
             .iter()
@@ -659,7 +752,66 @@ impl AudioSink for CoreAudioDopSink {
         // This sink *is* the DoP path.
     }
 
+    fn set_output_device(&mut self, name: Option<&str>) {
+        let name = name.map(str::to_owned);
+        if name != self.device_name {
+            // Give the old device back (hog mode off, nominal rate restored)
+            // before switching; the next open() acquires the new one.
+            self.release();
+            self.device_name = name;
+        }
+    }
+
     fn underrun_count(&self) -> u64 {
         self.underruns.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+
+    /// The names the UI offers come from cpal; the DoP sink must resolve
+    /// the same names to HAL devices (or the DAC choice would silently
+    /// fall back to the default). Runs against whatever devices this
+    /// machine has; trivially passes with none.
+    #[test]
+    fn every_cpal_output_device_resolves_by_name() {
+        let devices = crate::list_output_devices();
+        eprintln!(
+            "checking {} output device(s): {:?}",
+            devices.len(),
+            devices.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+        for d in devices {
+            let id = find_output_device(&d.name);
+            assert!(
+                id.is_some(),
+                "no HAL device found for cpal name {:?}",
+                d.name
+            );
+            assert_eq!(device_name(id.unwrap()).as_deref(), Some(d.name.as_str()));
+        }
+    }
+
+    #[test]
+    fn unknown_device_falls_back_to_default_and_missing_name_is_none() {
+        assert!(find_output_device("definitely not a real device \u{1F50A}").is_none());
+        if let Ok(default) = default_output_device() {
+            assert_eq!(
+                resolve_device(Some("definitely not a real device")).unwrap(),
+                default
+            );
+            assert_eq!(resolve_device(None).unwrap(), default);
+        }
+    }
+
+    #[test]
+    fn dop_rates_query_accepts_a_named_device() {
+        // Must not panic/err for any listed device or an unknown name.
+        for d in crate::list_output_devices() {
+            let _ = supported_dop_rates(Some(&d.name));
+        }
+        let _ = supported_dop_rates(Some("nope"));
     }
 }

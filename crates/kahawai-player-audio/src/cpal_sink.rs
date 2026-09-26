@@ -39,6 +39,8 @@ const WRITE_DEADLINE: Duration = Duration::from_secs(2);
 
 pub struct CpalSink {
     host: cpal::Host,
+    /// Chosen output device by name; `None` = the system default.
+    device_name: Option<String>,
     stream: Option<cpal::Stream>,
     producer: Option<ringbuf::HeapProd<f32>>,
     stream_rate: Option<u32>,
@@ -52,6 +54,7 @@ impl CpalSink {
     pub fn new() -> Self {
         Self {
             host: cpal::default_host(),
+            device_name: None,
             stream: None,
             producer: None,
             stream_rate: None,
@@ -60,6 +63,27 @@ impl CpalSink {
             stream_error: Arc::new(AtomicBool::new(false)),
             state: SinkState::Stopped,
         }
+    }
+
+    /// The chosen device, or the system default when none is chosen or the
+    /// chosen one is not connected any more (unplugged DAC, sleeping
+    /// Bluetooth speaker): playback keeps working rather than failing.
+    fn pick_device(&self) -> Result<cpal::Device, MusicError> {
+        if let Some(want) = &self.device_name {
+            let found =
+                self.host.output_devices().ok().and_then(|mut it| {
+                    it.find(|d| d.name().ok().as_deref() == Some(want.as_str()))
+                });
+            match found {
+                Some(d) => return Ok(d),
+                None => {
+                    tracing::warn!(device = %want, "output device not found; using system default")
+                }
+            }
+        }
+        self.host
+            .default_output_device()
+            .ok_or_else(|| MusicError::Audio("no default output device".into()))
     }
 
     fn close_stream(&mut self) {
@@ -86,10 +110,7 @@ impl Default for CpalSink {
 impl AudioSink for CpalSink {
     fn open(&mut self, track: &Track) -> Result<(), MusicError> {
         self.close_stream();
-        let device = self
-            .host
-            .default_output_device()
-            .ok_or_else(|| MusicError::Audio("no default output device".into()))?;
+        let device = self.pick_device()?;
 
         let channels = track.channels.unwrap_or(2).clamp(1, 8) as u16;
         let want_rate = track.sample_rate.unwrap_or(44_100);
@@ -227,6 +248,17 @@ impl AudioSink for CpalSink {
         // This sink *is* the PCM path; the router only sends PCM here.
     }
 
+    fn set_output_device(&mut self, name: Option<&str>) {
+        let name = name.map(str::to_owned);
+        if name != self.device_name {
+            self.device_name = name;
+            // Release the old device now; the next open() builds the
+            // stream on the new one.
+            self.close_stream();
+            self.state = SinkState::Stopped;
+        }
+    }
+
     fn buffered_frames(&self) -> u64 {
         match (&self.producer, self.channels) {
             (Some(p), ch) if ch > 0 => (p.occupied_len() / ch as usize) as u64,
@@ -284,4 +316,45 @@ pub fn list_output_devices() -> Vec<DeviceInfo> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+
+    fn name_of(d: &cpal::Device) -> Option<String> {
+        d.name().ok()
+    }
+
+    /// Picking by name must land on exactly that device (names may carry
+    /// trailing spaces / non-ASCII), and an unknown or unplugged name must
+    /// fall back to the system default instead of failing playback.
+    #[test]
+    fn pick_device_honours_the_name_and_falls_back() {
+        let mut sink = CpalSink::new();
+        for d in list_output_devices() {
+            sink.set_output_device(Some(&d.name));
+            let got = sink.pick_device().expect("named device is pickable");
+            assert_eq!(name_of(&got).as_deref(), Some(d.name.as_str()));
+        }
+
+        sink.set_output_device(Some("definitely not a connected device"));
+        let fallback = sink.pick_device();
+        let default = cpal::default_host().default_output_device();
+        assert_eq!(
+            fallback.ok().and_then(|d| name_of(&d)),
+            default.and_then(|d| name_of(&d))
+        );
+
+        sink.set_output_device(None);
+        assert!(sink.device_name.is_none());
+    }
+
+    #[test]
+    fn changing_device_releases_the_open_stream() {
+        let mut sink = CpalSink::new();
+        sink.set_output_device(Some("A"));
+        assert_eq!(sink.device_name.as_deref(), Some("A"));
+        assert!(sink.stream.is_none() && sink.producer.is_none());
+    }
 }

@@ -611,6 +611,19 @@ impl Player {
         self.volume = v.clamp(0.0, 1.0);
     }
 
+    /// Route output to a named device (`None` = system default). If a
+    /// track is loaded the stream is re-opened on the new device at the
+    /// current audible position, keeping paused/playing as it was.
+    pub fn set_output_device(&mut self, name: Option<String>) {
+        self.sink.set_output_device(name.as_deref());
+        let live = self.active.is_some()
+            && matches!(self.status, PlayerStatus::Playing | PlayerStatus::Paused);
+        if live {
+            let pos = self.position_ms();
+            self.seek_ms(pos);
+        }
+    }
+
     // -- v1 DSP (PCM only; DoP bypasses all of it) --
 
     pub fn set_eq_bands(&mut self, bands: Vec<EqBand>) -> Result<(), MusicError> {
@@ -1187,6 +1200,8 @@ pub enum EngineCommand {
     RestoreQueue(Vec<Track>, usize),
     /// PCM only; has no effect on DoP (bit-perfect hog mode).
     SetVolume(f32),
+    /// Output device by name; `None` = system default.
+    SetOutputDevice(Option<String>),
     /// Replace the parametric EQ bands (validated; rejected wholesale if
     /// any band is invalid). PCM only.
     SetEqBands(Vec<EqBand>),
@@ -1215,6 +1230,11 @@ struct EngineSettings {
     /// S13 preference survives restarts.
     #[serde(default)]
     global_format: Option<StreamFormat>,
+    /// Chosen output device name (`None` = system default). Names are the
+    /// only identity cpal/CoreAudio give us; a device that is unplugged
+    /// falls back to the default at open time.
+    #[serde(default)]
+    output_device: Option<String>,
 }
 
 /// Queue state persisted to `queue.json` next to the engine settings file
@@ -1257,6 +1277,7 @@ impl EngineSettings {
                 dsp: DspSettings::default(),
                 dsd_story: DsdStory::default(),
                 global_format: None,
+                output_device: None,
             })
     }
 
@@ -1279,6 +1300,7 @@ pub struct EngineController {
     events: Arc<Mutex<Vec<PlayerEvent>>>,
     server_url: Arc<RwLock<String>>,
     dsd_story: Arc<RwLock<DsdStory>>,
+    output_device: Arc<RwLock<Option<String>>>,
     global_format: Arc<RwLock<Option<StreamFormat>>>,
     settings_path: PathBuf,
     _thread: JoinHandle<()>,
@@ -1305,6 +1327,11 @@ impl EngineController {
         ctrl.send(EngineCommand::SetDsdStory(settings.dsd_story));
         ctrl.send(EngineCommand::SetGlobalFormat(settings.global_format));
         *ctrl.dsd_story.write().expect("dsd lock") = settings.dsd_story;
+        // Output device (before any playback opens the sink).
+        ctrl.send(EngineCommand::SetOutputDevice(
+            settings.output_device.clone(),
+        ));
+        *ctrl.output_device.write().expect("device lock") = settings.output_device.clone();
         *ctrl.global_format.write().expect("format lock") = settings.global_format;
         // Restore the persisted queue, if any. Repeat/shuffle ride along in
         // the queue file so the restore is exact (shuffle order is
@@ -1348,6 +1375,7 @@ impl EngineController {
             events,
             server_url,
             dsd_story: Arc::new(RwLock::new(DsdStory::default())),
+            output_device: Arc::new(RwLock::new(None)),
             global_format: Arc::new(RwLock::new(None)),
             settings_path,
             _thread: thread,
@@ -1398,6 +1426,22 @@ impl EngineController {
         settings.dsd_story = story;
         settings.save(&self.settings_path);
         self.send(EngineCommand::SetDsdStory(story));
+    }
+
+    /// Choose the output device by name (`None` = system default).
+    /// Persisted; applies immediately (a playing track moves over at its
+    /// current position).
+    pub fn set_output_device(&self, name: Option<String>) {
+        *self.output_device.write().expect("device lock") = name.clone();
+        let mut settings = EngineSettings::load(&self.settings_path);
+        settings.output_device = name.clone();
+        settings.save(&self.settings_path);
+        self.send(EngineCommand::SetOutputDevice(name));
+    }
+
+    /// The chosen output device (`None` = system default).
+    pub fn output_device(&self) -> Option<String> {
+        self.output_device.read().expect("device lock").clone()
     }
 
     pub fn set_repeat(&self, mode: RepeatMode) {
@@ -1602,6 +1646,7 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
         EngineCommand::InsertTracksNext(t) => player.insert_tracks_next(t),
         EngineCommand::RestoreQueue(t, i) => player.restore_queue(t, i),
         EngineCommand::SetVolume(v) => player.set_volume(v),
+        EngineCommand::SetOutputDevice(d) => player.set_output_device(d),
         EngineCommand::SetEqBands(bands) => {
             if let Err(e) = player.set_eq_bands(bands) {
                 tracing::warn!("rejected EQ bands: {e}");

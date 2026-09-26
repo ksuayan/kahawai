@@ -85,6 +85,13 @@ pub trait AudioSink: Send {
         ))
     }
 
+    /// Choose the output device by name (`None` = the system default).
+    /// Takes effect on the next `open`; a sink that holds a device (open
+    /// stream, exclusive hog) must release it here. Sinks without a device
+    /// choice ignore this. A name that is no longer connected falls back to
+    /// the system default rather than failing playback.
+    fn set_output_device(&mut self, _name: Option<&str>) {}
+
     /// PCM frames (per channel, at the sink's output rate) accepted by
     /// `write` but not yet played. The engine subtracts this from the
     /// frames it has written so the displayed position tracks what is
@@ -181,6 +188,8 @@ pub struct VecSink {
     pub buffered: u64,
     /// How many times the engine called `drain()` (natural end of stream).
     pub drains: u32,
+    /// Last device chosen via `set_output_device` (`None` = default).
+    pub device: Option<String>,
 }
 
 impl VecSink {
@@ -241,6 +250,10 @@ impl AudioSink for VecSink {
 
     fn buffered_frames(&self) -> u64 {
         self.buffered
+    }
+
+    fn set_output_device(&mut self, name: Option<&str>) {
+        self.device = name.map(str::to_owned);
     }
 
     fn drain(&mut self) {
@@ -362,6 +375,15 @@ impl AudioSink for SinkRouter {
         match self.dop.as_mut() {
             Some(d) => d.write_dop(bytes),
             None => Err(MusicError::BadRequest("no DoP sink installed".into())),
+        }
+    }
+
+    fn set_output_device(&mut self, name: Option<&str>) {
+        // One choice for both paths: DSD/DoP must land on the device the
+        // user picked, not silently on the system default.
+        self.pcm.set_output_device(name);
+        if let Some(d) = self.dop.as_mut() {
+            d.set_output_device(name);
         }
     }
 

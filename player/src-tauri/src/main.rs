@@ -412,8 +412,8 @@ struct DeviceDto {
     is_default: bool,
 }
 
-/// Shared-mode output devices (informational; the engine uses the default).
-/// Infallible: enumeration failures yield an empty list.
+/// Output devices the user can choose from (names are exact: cpal offers
+/// no other identity). Infallible: enumeration failures yield an empty list.
 #[tauri::command]
 fn get_output_devices() -> Vec<DeviceDto> {
     audio_list_output_devices()
@@ -423,6 +423,20 @@ fn get_output_devices() -> Vec<DeviceDto> {
             is_default: d.is_default,
         })
         .collect()
+}
+
+/// The chosen output device (`None` = follow the system default).
+#[tauri::command]
+fn get_output_device(state: State<'_, AppState>) -> Option<String> {
+    state.engine.output_device()
+}
+
+/// Choose the output device (`None` = system default). Persisted; a playing
+/// track moves over at its current position. No `emit_state` (see
+/// `seek_ms`): the playback thread emits the resulting state.
+#[tauri::command]
+fn set_output_device(state: State<'_, AppState>, name: Option<String>) {
+    state.engine.set_output_device(name);
 }
 
 /// Replace the parametric EQ bands (≤ 8; validated before anything is
@@ -493,8 +507,8 @@ struct DopStatusDto {
 }
 
 #[tauri::command]
-fn dop_status() -> DopStatusDto {
-    let rates = dop_capable_rates();
+fn dop_status(state: State<'_, AppState>) -> DopStatusDto {
+    let rates = dop_capable_rates(state.engine.output_device().as_deref());
     DopStatusDto {
         exclusive_available: cfg!(target_os = "macos"),
         supported_rates: rates,
@@ -602,6 +616,8 @@ fn main() {
             get_playback_prefs,
             set_dsd_story,
             get_output_devices,
+            get_output_device,
+            set_output_device,
             set_eq_bands,
             set_eq_enabled,
             set_loudness_target,

@@ -57,6 +57,13 @@ async function save(): Promise<void> {
   }
 }
 
+const defaultDeviceName = computed(() => dsp.devices.find((d) => d.is_default)?.name ?? "");
+
+function onOutputDevice(e: Event): void {
+  const v = (e.target as HTMLSelectElement).value; // exact: never trim
+  void dsp.chooseOutputDevice(v === "" ? null : v);
+}
+
 async function onFormatChange(e: Event): Promise<void> {
   const v = (e.target as HTMLSelectElement).value;
   await settings.saveGlobalFormat(v === "" ? null : (v as StreamFormat));
@@ -270,19 +277,30 @@ const dopRates = computed(() =>
     <section>
       <h3>Audio output</h3>
       <p class="hint">
-        PCM plays through the default device in shared mode. There is no
-        output-device selector in v1 — the engine always uses the system
-        default (rebuilding the audio sink around a chosen device would
-        require tearing down the playback pipeline; documented limitation).
-        On macOS, DSD tracks can use exclusive hog-mode DoP output instead —
-        bit-perfect, bypassing the EQ, loudness, and volume below.
+        Choose the speaker or DAC to play through. Changing it while music is
+        playing moves the track over and continues from the same position.
+        DSD played through exclusive DoP uses the same device.
       </p>
-      <ul v-if="dsp.devices.length" class="dev-list">
-        <li v-for="d in dsp.devices" :key="d.name">
-          {{ d.name }}<span v-if="d.is_default" class="badge">default</span>
-        </li>
-      </ul>
-      <p v-else class="hint">No output devices reported.</p>
+      <div class="row">
+        <select class="dev-select" :value="dsp.outputDevice ?? ''" @change="onOutputDevice">
+          <option value="">System default{{ defaultDeviceName ? ` (${defaultDeviceName})` : "" }}</option>
+          <option v-if="dsp.outputDeviceMissing" :value="dsp.outputDevice ?? ''">
+            {{ dsp.outputDevice }} — not connected
+          </option>
+          <option v-for="d in dsp.devices" :key="d.name" :value="d.name">{{ d.name }}</option>
+        </select>
+        <button class="icon-btn" title="Rescan output devices" @click="dsp.refreshDevices()">⟳</button>
+      </div>
+      <p v-if="dsp.outputDeviceMissing" class="hint warn">
+        “{{ dsp.outputDevice }}” is not connected, so the system default is being used.
+        It is selected again automatically when it reappears (press ⟳ to rescan).
+      </p>
+      <p v-if="!dsp.devices.length" class="hint">No output devices reported.</p>
+      <p class="hint">
+        PCM plays in shared mode. On macOS, DSD tracks can use exclusive
+        hog-mode DoP output instead — bit-perfect, bypassing the EQ, loudness,
+        and volume below.
+      </p>
       <p class="hint">
         <template v-if="dsp.dop?.exclusive_available">
           Exclusive DoP is available on this Mac.
@@ -435,20 +453,13 @@ h3 {
   color: var(--danger);
 }
 
-.dev-list {
-  list-style: none;
-  padding: 0;
-  margin: 0 0 8px;
-  font-size: 13px;
+.dev-select {
+  flex: 1;
+  min-width: 0;
 }
 
-.dev-list li {
-  padding: 4px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.dev-list .badge {
-  margin-left: 8px;
+.hint.warn {
+  color: #ff9d97;
 }
 
 .check {

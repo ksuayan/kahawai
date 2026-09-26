@@ -3,7 +3,9 @@ import { computed, ref } from "vue";
 import {
   dopStatus,
   getDspSettings,
+  getOutputDevice,
   getOutputDevices,
+  setOutputDevice,
   setEqBands,
   setEqEnabled,
   setLoudnessEnabled,
@@ -43,6 +45,8 @@ export const useDspStore = defineStore("dsp", () => {
   const loudnessEnabled = ref(false);
   const loudnessTarget = ref(-14);
   const devices = ref<OutputDevice[]>([]);
+  /** Chosen output device (exact name); null = follow the system default. */
+  const outputDevice = ref<string | null>(null);
   const dop = ref<DopStatus | null>(null);
   const loaded = ref(false);
   const rowError = ref<string | null>(null);
@@ -67,13 +71,19 @@ export const useDspStore = defineStore("dsp", () => {
 
   /** On boot: engine settings first, then overlay the UI row model. */
   async function init(): Promise<void> {
-    const [s, devs, d] = await Promise.all([getDspSettings(), getOutputDevices(), dopStatus()]);
+    const [s, devs, d, chosen] = await Promise.all([
+      getDspSettings(),
+      getOutputDevices(),
+      dopStatus(),
+      getOutputDevice(),
+    ]);
     const dsp = s ?? DEFAULT_DSP_SETTINGS;
     eqEnabled.value = dsp.eq_enabled;
     loudnessEnabled.value = dsp.loudness_enabled;
     loudnessTarget.value = dsp.loudness_target;
     devices.value = devs ?? [];
     dop.value = d ?? null;
+    outputDevice.value = chosen;
 
     let restored: EqBandRow[] | null = null;
     try {
@@ -92,6 +102,27 @@ export const useDspStore = defineStore("dsp", () => {
     }
     loaded.value = true;
   }
+
+  /** Re-scan devices (hot-plugged DACs) and the DoP rates of the chosen one. */
+  async function refreshDevices(): Promise<void> {
+    const [devs, d] = await Promise.all([getOutputDevices(), dopStatus()]);
+    devices.value = devs ?? [];
+    dop.value = d ?? null;
+  }
+
+  /** Route playback to a device (null = system default). A playing track
+   *  moves over at its current position. Names are passed through exactly
+   *  (some contain trailing spaces or non-ASCII). */
+  async function chooseOutputDevice(name: string | null): Promise<void> {
+    outputDevice.value = name;
+    await setOutputDevice(name);
+    dop.value = (await dopStatus()) ?? dop.value;
+  }
+
+  /** The chosen device is not in the current device list (unplugged). */
+  const outputDeviceMissing = computed(
+    () => outputDevice.value !== null && !devices.value.some((d) => d.name === outputDevice.value),
+  );
 
   function addBand(): void {
     if (!canAddBand.value) return;
@@ -153,12 +184,16 @@ export const useDspStore = defineStore("dsp", () => {
     loudnessEnabled,
     loudnessTarget,
     devices,
+    outputDevice,
+    outputDeviceMissing,
     dop,
     loaded,
     rowError,
     activeBands,
     canAddBand,
     init,
+    refreshDevices,
+    chooseOutputDevice,
     addBand,
     removeBand,
     toggleRow,

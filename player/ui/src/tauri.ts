@@ -162,6 +162,15 @@ export async function getOutputDevices(): Promise<OutputDevice[] | undefined> {
   return cmd<OutputDevice[]>("get_output_devices");
 }
 
+/** The chosen output device by exact name; null = follow the system default. */
+export async function getOutputDevice(): Promise<string | null> {
+  return (await cmd<string | null>("get_output_device")) ?? null;
+}
+
+export async function setOutputDevice(name: string | null): Promise<void> {
+  await cmd("set_output_device", { name });
+}
+
 export async function setEqBands(bands: EqBand[]): Promise<void> {
   await cmd("set_eq_bands", { bands });
 }

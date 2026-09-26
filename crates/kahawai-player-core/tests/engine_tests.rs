@@ -119,6 +119,9 @@ impl AudioSink for SharedSink {
     fn buffered_frames(&self) -> u64 {
         self.0.lock().unwrap().buffered_frames()
     }
+    fn set_output_device(&mut self, name: Option<&str>) {
+        self.0.lock().unwrap().set_output_device(name)
+    }
     fn drain(&mut self) {
         self.0.lock().unwrap().drain()
     }
@@ -626,6 +629,84 @@ fn natural_end_of_stream_drains_the_sink_before_moving_on() {
     // One drain per stream end: the tail of each track is played out
     // before the next open()/stop() discards the device buffer.
     assert_eq!(h.sink.0.lock().unwrap().drains, 2);
+}
+
+#[test]
+fn switching_output_device_reopens_at_the_current_position() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    for _ in 0..15 {
+        h.player.pump();
+    }
+    let before = h.player.snapshot().position_ms;
+    let opens = h.stub.opened.lock().unwrap().len();
+
+    h.player.set_output_device(Some("Studio DAC".into()));
+
+    assert_eq!(
+        h.sink.0.lock().unwrap().device.as_deref(),
+        Some("Studio DAC")
+    );
+    assert_eq!(
+        h.stub.opened.lock().unwrap().len(),
+        opens + 1,
+        "stream re-opened for the new device"
+    );
+    let after = h.player.snapshot();
+    assert_eq!(after.status, PlayerStatus::Playing);
+    // ms -> frames -> ms truncates by a millisecond at most.
+    assert!(
+        after.position_ms.abs_diff(before) <= 2,
+        "resumes where it was: {before} -> {}",
+        after.position_ms
+    );
+
+    // Back to the system default.
+    h.player.set_output_device(None);
+    assert_eq!(h.sink.0.lock().unwrap().device, None);
+}
+
+#[test]
+fn switching_device_while_paused_stays_paused_and_idle_is_a_no_reopen() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    // Nothing loaded: just records the choice, opens nothing.
+    h.player.set_output_device(Some("Speakers".into()));
+    assert_eq!(h.stub.opened.lock().unwrap().len(), 0);
+
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    for _ in 0..10 {
+        h.player.pump();
+    }
+    h.player.pause();
+    h.player.set_output_device(Some("Headphones".into()));
+    assert_eq!(h.player.status(), PlayerStatus::Paused);
+    assert_eq!(
+        h.sink.0.lock().unwrap().device.as_deref(),
+        Some("Headphones")
+    );
+}
+
+#[test]
+fn output_device_choice_persists_across_controllers() {
+    let dir = std::env::temp_dir().join(format!("kahawai-dev-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("engine-settings.json");
+    {
+        let c = EngineController::new(Box::new(VecSink::new()), path.clone());
+        assert_eq!(c.output_device(), None);
+        c.set_output_device(Some("Studio DAC".into()));
+        assert_eq!(c.output_device().as_deref(), Some("Studio DAC"));
+    }
+    let c = EngineController::new(Box::new(VecSink::new()), path.clone());
+    assert_eq!(c.output_device().as_deref(), Some("Studio DAC"));
+    c.set_output_device(None);
+    let c2 = EngineController::new(Box::new(VecSink::new()), path);
+    assert_eq!(c2.output_device(), None);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

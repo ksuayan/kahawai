@@ -24,16 +24,18 @@ pub use coreaudio::{supported_dop_rates, CoreAudioDopSink};
 #[cfg(not(target_os = "macos"))]
 pub use stub_dop::StubDopSink;
 
-/// DoP PCM rates the default output device can take right now.
+/// DoP PCM rates the chosen output device (`None` = system default) can
+/// take right now.
 /// macOS: queried from the device's available nominal rates.
 /// Elsewhere: empty (no exclusive DoP path on this OS).
-pub fn dop_capable_rates() -> Vec<u32> {
+pub fn dop_capable_rates(device: Option<&str>) -> Vec<u32> {
     #[cfg(target_os = "macos")]
     {
-        supported_dop_rates().unwrap_or_default()
+        supported_dop_rates(device).unwrap_or_default()
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = device;
         Vec::new()
     }
 }
@@ -59,7 +61,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn non_macos_has_no_dop_path() {
-        assert!(dop_capable_rates().is_empty());
+        assert!(dop_capable_rates(None).is_empty());
         assert!(!exclusive_dop_sink().supports_dop());
     }
 
