@@ -18,7 +18,10 @@ pub mod resample;
 pub mod sink;
 pub mod transport;
 
-pub use analog::{oversample_factor, AnalogFlavour, AnalogSettings, AnalogStage};
+pub use analog::{
+    anti_alias_plan, koren_plate_current, oversample_factor, triode_table, AnalogFlavour,
+    AnalogSettings, AnalogStage, AntiAlias, TubeTable,
+};
 pub use artwork::{fetch_from_server as fetch_artwork, ArtworkCache, CachedArt};
 pub use bitperfect::{f32_to_i24_le, BitPerfect};
 pub use decode::{DecodedSpec, StreamDecoder};

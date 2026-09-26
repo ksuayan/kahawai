@@ -1,8 +1,10 @@
 # Analog emulation: tube and transistor "euphonics"
 
 Research summary and an itemized plan for adding tube and transistor
-character to the PCM playback chain. Branch: `analog-poc`. Status: **Phase 0 (research) and Phase 1 (working stage in the engine,
-no UI yet) done.** Findings are in section 10, Phase 1 results in section 11.
+character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 2 done** (research, a working stage in the engine,
+the triode curve derived from Koren's model, and antiderivative
+antialiasing); **no UI yet**. Findings: section 10; Phase 1 results: 11;
+Phase 2 results: 12.
 
 Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md)
 (DSP effects section), [EQ.md](EQ.md) (pipeline and the `DspStage` idea).
@@ -210,13 +212,13 @@ with something we can listen to and a green test suite.
 | 1.5 | Wire into `pump_pcm` after the EQ; PCM shared path only; DoP and bit-perfect bypass | Done |
 | 1.6 | Engine command, settings persistence | Done (no UI, no snapshot field) |
 
-### Phase 2: derive curves from tube models (M)
+### Phase 2: derive curves from tube models (M) *(done, see section 12)*
 
-| # | Item | Notes / acceptance |
+| # | Item | Status |
 |---|---|---|
-| 2.1 | Offline tool (a Rust test or example) that evaluates the Koren triode equations and produces a normalized transfer curve for a chosen tube and load line | Curve plot and a stored table per flavour |
-| 2.2 | Replace the hand-made curves with table lookups (interpolated) for the tube flavours | THD profile within tolerance of the targets (0.2) |
-| 2.3 | Add ADAA for the table curves (or a smooth closed-form fit with a known antiderivative) so the oversampling factor can drop | Aliasing and CPU comparison recorded |
+| 2.1 | Evaluate the Koren triode equations and produce a normalized transfer curve for a chosen tube and load line | Done, at runtime rather than as a stored table (built in about 20 ms on first use; tested against the model) |
+| 2.2 | Replace the hand-made curve with a table lookup for the tube flavour | Done; harmonic profile matches the prototype targets (test) |
+| 2.3 | Add ADAA for the table curve so the oversampling factor can drop | Done; measured. ADAA is nearly free and clearly helps, but the factor was kept because oversampling is cheap enough (section 12.3) |
 
 ### Phase 3: dynamics and transformer colour (M)
 
@@ -510,11 +512,11 @@ Tauri command: `set_analog`. **There is no UI yet (that is Phase 4).**
   (drive 0.4, input level 0.2: 2nd −21 dB, 3rd −45 dB relative to the tone).
 - **Solid state** is a symmetric `tanh(g x) / g`: no even harmonics (better
   than −70 dB in the test), a soft odd-harmonic edge that grows with level.
-- **Warm triode is still an approximation.** A first attempt with a fixed
-  bias of 0.4 lost the even-harmonic dominance as soon as it was driven
-  (2nd about equal to 3rd), which is why the bias now scales with drive.
-  Phase 2 replaces this curve with the one derived from the Koren tube
-  model.
+- **Warm triode in Phase 1 was an approximation** (an asymmetric tanh whose
+  bias scales with drive, because a fixed bias lost the even-harmonic
+  dominance when driven). **Phase 2 replaced it with the curve derived from
+  the Koren tube model** (section 12); the description above is kept as
+  history. The solid-state curve is unchanged.
 
 ### 11.3 Tests (all pass)
 
@@ -569,11 +571,122 @@ bit-perfect output.
 ### 11.6 Known limits and what is next
 
 - No UI, so no live A/B in the app yet (Phase 4).
-- The warm-triode curve is a placeholder for the Koren-derived one (Phase 2).
-- No ADAA yet (Phase 2), and no sag or transformer colour (Phase 3).
+- (Phase 2 since added the Koren-derived curve and ADAA.) Still no sag or
+  transformer colour (Phase 3).
 - No clip protection: with the output trim up or hot material and high
   drive, the result can exceed 0 dBFS. The gain-match reference is a
   −12 dBFS RMS sine, so loud music will not be perfectly level-matched.
 - Switching the stage on from bypass shifts the un-delayed input to a
   32-frame delayed path during the 15 ms fade; that is inaudible in
   practice but is a small comb-filter moment.
+
+---
+
+## 12. Phase 2 results
+
+Code: the tube model, table and ADAA in
+[analog.rs](crates/kahawai-player-core/src/analog.rs). Measurements come from
+`cargo test --release -p kahawai-player-core --lib measure_anti_alias_plans
+-- --ignored --nocapture` (aliasing) and
+[phase1_cost.rs](research/analog-spike/src/bin/phase1_cost.rs) (CPU, output in
+[PHASE1_COST.txt](research/analog-spike/PHASE1_COST.txt)).
+
+### 12.1 The triode curve
+
+- **Model:** Koren's triode equations with his 12AX7 parameters (mu 100,
+  Ex 1.4, Kg1 1060, Kp 600, Kvb 300), in a stage with 300 V supply, 100 kΩ
+  plate load and a fixed −1.5 V bias. The plate voltage is solved on the load
+  line for each grid voltage.
+- **Grid conduction:** when the grid swings positive it conducts (about
+  2 kΩ against a 10 kΩ source), which squashes that half of the wave. This is
+  a smooth (0.05 V knee) approximation, not a circuit simulation. It is what
+  makes the positive side clip and the negative side (cut-off) roll off, so
+  the two halves compress differently.
+- **Curve:** inverted so polarity is kept, zero at zero, unit slope at zero
+  (so a quiet signal passes unchanged), tabulated at 4096 points over ±4 with
+  linear interpolation. Input scale: 1.5 V of grid swing per unit.
+- **Antiderivative:** the integral of the interpolated curve is computed
+  exactly (piecewise quadratic), so first-order ADAA is exact for the table.
+  The solid-state curve uses tanh with the analytic antiderivative `ln cosh`.
+- **Cost of building it:** 20 ms on first use (release build), once per
+  process, on the first enable. Not stored; if that ever matters, generate it
+  at build time.
+- **Zero drive** is no longer perfectly linear, because the tube is
+  inherently lopsided (2nd harmonic about −48 dB at an input of 0.05). It is
+  very clean, not bit-clean; only the stage being off is bit-transparent.
+
+### 12.2 Harmonic profile (2.2)
+
+At zero drive the stage reproduces the prototype from section 10.2: 2nd
+harmonic between −35 and −30 dB at an input of 0.3 (prototype −32.5), the 3rd
+below −52 dB (prototype −60), the 2nd rising about 1 dB per dB of input, and
+the even harmonics still dominating the odd ones at full swing. These are
+tested. They match because the curve is the same model; they are still
+**provisional targets** (no published measurements yet, section 10.6).
+
+### 12.3 Aliasing and cost: ADAA versus oversampling (2.3)
+
+Level of everything audible that is not a harmonic of the tone, relative to
+the tone. Hard test tone: drive 0.53, input 0.8, 9.5 kHz (effective curve
+input 2.4, deep into clipping). Lower is better.
+
+| Curve, rate | 1x | 1x + ADAA | 2x | 2x + ADAA | 4x | 4x + ADAA |
+|---|---|---|---|---|---|---|
+| Triode, 44.1 kHz | −14 | −25 | −35 | −53 | −49 | **−71** |
+| Triode, 96 kHz | −38 | −56 | −50 | **−74** | −66 | −95 |
+| Solid state, 44.1 kHz | −14 | −24 | −47 | −70 | −90 | −106 |
+| Solid state, 96 kHz | −47 | −71 | −101 | −123 | −122 | −121 |
+
+At a typical setting (drive 0.4, input 0.3, 5 kHz) every combination is
+already below −89 dB for the triode (1x without ADAA at 44.1 kHz gives −89;
+everything else is at or below −96), so the differences above only appear when
+the curve is driven very hard.
+
+What it shows:
+
+- **ADAA helps a lot for almost no CPU** (about 0.1 percentage point for the
+  triode, a bit more for tanh, which needs an exp and a log).
+- **2x + ADAA beats 4x without ADAA** at 44.1 kHz for the triode (−53 versus
+  −49) at half the cost, and it is far better than 2x alone.
+- **The triode curve aliases more than tanh**, because its cut-off and grid
+  conduction corners are sharper. That is why it needs more protection than
+  the solid-state curve.
+
+CPU per second of stereo audio, one core (release build):
+
+| | 1x | 1x + ADAA | 2x | 2x + ADAA | 4x | 4x + ADAA |
+|---|---|---|---|---|---|---|
+| Triode, 44.1 kHz | 0.2% | 0.2% | 1.7% | 1.7% | 3.3% | 3.4% |
+| Triode, 96 kHz | 0.4% | 0.5% | 3.6% | 4.0% | 7.0% | 7.3% |
+| Triode, 192 kHz | 0.8% | 1.0% | 7.9% | 7.9% | 14.3% | 14.8% |
+| Solid state, 44.1 kHz | 0.2% | 0.3% | 1.9% | 2.1% | 3.5% | 4.0% |
+| Solid state, 96 kHz | 0.4% | 0.6% | 4.0% | 4.5% | 8.5% | 10.1% |
+
+**Decision:** ADAA is now on at every rate. The oversampling factor is
+**not** reduced, because at these costs the extra quality is cheap: **4x +
+ADAA up to 50 kHz** (triode −71 dB on the hard tone), **2x + ADAA up to
+100 kHz** (−74 dB), **1x + ADAA above** (about −56 dB at 96 kHz for 1x, and
+better still at 192 kHz; measured to −70 dB or better in the test). If CPU ever becomes a concern, dropping to
+2x + ADAA at 44.1 kHz (−53 dB on the hard tone, 1.7% of a core) or 1x + ADAA at 96 kHz
+(−56 dB, 0.5%) is the fallback. The plan lives in `anti_alias_plan`.
+
+### 12.4 What changed in behaviour
+
+- The warm-triode flavour sounds different from Phase 1: the curve now comes
+  from the tube model, with a real cut-off and grid-conduction corner.
+- ADAA adds half a sample of delay to the wet path (about 2.6 µs at
+  192 kHz); not compensated.
+- Tests added or changed (all pass): Koren current sanity, the table (unit
+  slope, monotonic, asymmetric, agrees with the model), antiderivative
+  consistency, ADAA equivalence for slow signals and constants, the harmonic
+  profile, and tighter aliasing thresholds (better than −65 dB at 44.1 and
+  48 kHz, and −70 dB at 96 and 192 kHz).
+
+### 12.5 Still open
+
+- Compare the triode curve with datasheet plate curves and tune the swing,
+  bias and load (the current current-level check is loose: 0.7 to 1.6 mA
+  against a datasheet-scale 1.2 mA).
+- Whether it sounds right by ear; only measured so far.
+- Push-pull and hard-transistor flavours (Phase 3 and later), sag and
+  transformer colour (Phase 3), UI (Phase 4).

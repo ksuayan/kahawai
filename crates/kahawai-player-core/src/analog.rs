@@ -1,17 +1,21 @@
 //! Analog character: an optional tube or transistor "warmth" stage for the
-//! shared PCM path. (Plan: Analog-Emulation.md, Phase 1.)
+//! shared PCM path. (Plan: Analog-Emulation.md, Phases 1 and 2.)
 //!
 //! Signal flow per channel, all in place on interleaved f32:
 //!
 //! ```text
-//! x -> drive -> [oversample -> asymmetric/symmetric tanh -> decimate]
+//! x -> drive -> [oversample -> curve (with ADAA) -> decimate]
 //!        -> DC blocker -> output trim & gain match ─┐
 //! x -> latency-matched delay ─────────────────────── mix -> out
 //! ```
 //!
-//! It models *character* (level-dependent harmonics and soft knee), not a
+//! The warm-triode curve is computed from Koren's triode equations (a 12AX7
+//! stage with a resistive load); the solid-state curve is a symmetric tanh.
+//! It models *character* (level-dependent harmonics and a soft knee), not a
 //! specific circuit. Pure Rust, no platform imports. PCM only: the DoP and
 //! bit-perfect paths never call it.
+
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +25,7 @@ use crate::dsp::DspStage;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalogFlavour {
-    /// Asymmetric soft curve: mostly 2nd harmonic (even), like a triode stage.
+    /// A 12AX7 triode stage (Koren model): mostly 2nd harmonic (even).
     #[default]
     WarmTriode,
     /// Symmetric soft curve: odd harmonics only, like a transistor stage.
@@ -69,70 +73,217 @@ impl AnalogSettings {
 }
 
 // ---------------------------------------------------------------------------
-// The curves
+// The tube model (Koren)
 // ---------------------------------------------------------------------------
 
-/// Largest bias of the asymmetric curve (at full drive). The bias grows with
-/// the square root of drive: zero drive is a clean, linear pass-through, a
-/// little drive is already lopsided (even harmonics dominate), and pushing
-/// harder saturates it without losing that balance (see the harmonic table in
-/// Analog-Emulation.md).
-const TRIODE_BIAS_MAX: f32 = 0.8;
+/// Koren's 12AX7 parameters (normankoren.com, "Improved vacuum tube models
+/// for SPICE simulations"): mu, Ex, Kg1, Kp, Kvb.
+const MU: f64 = 100.0;
+const EX: f64 = 1.4;
+const KG1: f64 = 1060.0;
+const KP: f64 = 600.0;
+const KVB: f64 = 300.0;
+
+/// The stage around the tube: supply and plate load, and the grid bias the
+/// cathode resistor would set.
+const B_PLUS: f64 = 300.0;
+const R_LOAD: f64 = 100_000.0;
+const V_BIAS: f64 = -1.5;
+/// Grid volts per unit of curve input.
+const GRID_SWING: f64 = 1.5;
+/// Positive-grid behaviour: the grid conducts (about 2 kΩ) against the
+/// driving source (10 kΩ), so a positive grid swing is squashed hard.
+const GRID_K: f64 = 2_000.0 / (2_000.0 + 10_000.0);
+/// Softness of the grid-conduction corner, in volts.
+const GRID_KNEE: f64 = 0.05;
+
+/// Plate current (amps) of the Koren triode model.
+pub fn koren_plate_current(vgk: f64, vpk: f64) -> f64 {
+    let z = KP * (1.0 / MU + vgk / (KVB + vpk * vpk).sqrt());
+    let softplus = if z > 30.0 { z } else { (1.0 + z.exp()).ln() };
+    let e1 = vpk / KP * softplus;
+    if e1 <= 0.0 { 0.0 } else { 2.0 * e1.powf(EX) / KG1 }
+}
+
+/// Plate voltage for a grid voltage, on the resistive load line
+/// `vp = B+ - Ip(vg, vp) * RL` (bisection: the current falls as vp rises).
+pub fn triode_plate_voltage(vgk: f64) -> f64 {
+    let (mut lo, mut hi) = (0.0f64, B_PLUS);
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if mid - (B_PLUS - koren_plate_current(vgk, mid) * R_LOAD) > 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Grid voltage for a curve input `u`: the bias plus the swing, with the
+/// positive half squashed by grid conduction.
+fn grid_voltage(u: f64) -> f64 {
+    let v = V_BIAS + GRID_SWING * u;
+    let sp = GRID_KNEE * (1.0 + (v / GRID_KNEE).min(40.0).exp()).ln();
+    let sp = if v / GRID_KNEE > 40.0 { v } else { sp };
+    v - (1.0 - GRID_K) * sp
+}
+
+/// The triode stage as a curve `f(u)`: input polarity kept, zero at zero,
+/// unit slope at zero. Tabulated once, with its antiderivative, so the
+/// audio path is a lookup (and first-order antiderivative antialiasing
+/// is exact for the interpolated curve).
+pub struct TubeTable {
+    lo: f64,
+    step: f64,
+    f: Vec<f64>,
+    /// `anti[i]` = integral of the interpolated curve from `lo` to node i.
+    anti: Vec<f64>,
+}
+
+const TABLE_RANGE: f64 = 4.0; // curve input beyond +-4 is held at the end value
+const TABLE_POINTS: usize = 4096;
+
+impl TubeTable {
+    fn build() -> Self {
+        let step = 2.0 * TABLE_RANGE / TABLE_POINTS as f64;
+        let lo = -TABLE_RANGE;
+        // Inverted (plate voltage falls as the grid rises) so polarity is kept.
+        let raw: Vec<f64> = (0..=TABLE_POINTS)
+            .map(|i| -triode_plate_voltage(grid_voltage(lo + i as f64 * step)))
+            .collect();
+        let mid = TABLE_POINTS / 2;
+        let slope = (raw[mid + 1] - raw[mid - 1]) / (2.0 * step);
+        let f: Vec<f64> = raw.iter().map(|v| (v - raw[mid]) / slope).collect();
+        let mut anti = vec![0.0; f.len()];
+        for i in 1..f.len() {
+            anti[i] = anti[i - 1] + 0.5 * step * (f[i - 1] + f[i]);
+        }
+        Self { lo, step, f, anti }
+    }
+
+    /// The curve at `u`.
+    pub fn eval(&self, u: f64) -> f64 {
+        let p = (u - self.lo) / self.step;
+        let last = (self.f.len() - 1) as f64;
+        if p <= 0.0 {
+            return self.f[0];
+        }
+        if p >= last {
+            return self.f[self.f.len() - 1];
+        }
+        let i = p as usize;
+        let fr = p - i as f64;
+        self.f[i] * (1.0 - fr) + self.f[i + 1] * fr
+    }
+
+    /// The integral of the curve up to `u` (held flat beyond the table).
+    pub fn antiderivative(&self, u: f64) -> f64 {
+        let p = (u - self.lo) / self.step;
+        let last = (self.f.len() - 1) as f64;
+        if p <= 0.0 {
+            return self.f[0] * (u - self.lo);
+        }
+        if p >= last {
+            return self.anti[self.f.len() - 1] + self.f[self.f.len() - 1] * (u - (self.lo + last * self.step));
+        }
+        let i = p as usize;
+        let t = (u - (self.lo + i as f64 * self.step)) / 1.0;
+        let f0 = self.f[i];
+        let slope = (self.f[i + 1] - f0) / self.step;
+        self.anti[i] + f0 * t + 0.5 * slope * t * t
+    }
+}
+
+/// The shared 12AX7 table (built on first use).
+pub fn triode_table() -> &'static TubeTable {
+    static TABLE: OnceLock<TubeTable> = OnceLock::new();
+    TABLE.get_or_init(TubeTable::build)
+}
+
+// ---------------------------------------------------------------------------
+// The curves
+// ---------------------------------------------------------------------------
 
 /// Input gain for a drive setting: 1x at 0, 8x at 1 (squared for a gentle start).
 fn drive_gain(drive: f32) -> f32 {
     1.0 + 7.0 * drive * drive
 }
 
-/// A curve with its per-sample constants worked out once per frame.
-#[derive(Clone, Copy)]
-struct Curve {
-    flavour: AnalogFlavour,
-    g: f32,
-    bias: f32,
-    tanh_bias: f32,
-    norm: f32,
+/// `ln cosh x`, stable for large |x|.
+fn ln_cosh(x: f64) -> f64 {
+    let a = x.abs();
+    a + (1.0 + (-2.0 * a).exp()).ln() - std::f64::consts::LN_2
 }
 
-impl Curve {
-    fn new(flavour: AnalogFlavour, g: f32) -> Self {
-        // Invert `drive_gain` to scale the bias with drive.
-        let drive = ((g - 1.0) / 7.0).max(0.0).sqrt();
-        let bias = if flavour == AnalogFlavour::WarmTriode { TRIODE_BIAS_MAX * drive.sqrt() } else { 0.0 };
-        let tanh_bias = bias.tanh();
-        // Unity small-signal gain: a quiet signal passes unchanged and
-        // drive only adds character as the level rises.
-        let norm = match flavour {
-            AnalogFlavour::WarmTriode => 1.0 / (g * (1.0 - tanh_bias * tanh_bias)),
-            AnalogFlavour::SolidState => 1.0 / g,
+/// A curve of the drive-scaled input `u`, with unit slope at zero, and its
+/// antiderivative (for ADAA).
+#[derive(Clone, Copy)]
+struct Shaper {
+    table: Option<&'static TubeTable>,
+}
+
+impl Shaper {
+    fn new(flavour: AnalogFlavour) -> Self {
+        let table = match flavour {
+            AnalogFlavour::WarmTriode => Some(triode_table()),
+            AnalogFlavour::SolidState => None,
         };
-        Self { flavour, g, bias, tanh_bias, norm }
+        Self { table }
     }
 
     #[inline]
-    fn apply(&self, x: f32) -> f32 {
-        match self.flavour {
-            AnalogFlavour::WarmTriode => ((self.g * x + self.bias).tanh() - self.tanh_bias) * self.norm,
-            AnalogFlavour::SolidState => (self.g * x).tanh() * self.norm,
+    fn f(&self, u: f64) -> f64 {
+        match self.table {
+            Some(t) => t.eval(u),
+            None => u.tanh(),
         }
+    }
+
+    #[inline]
+    fn anti(&self, u: f64) -> f64 {
+        match self.table {
+            Some(t) => t.antiderivative(u),
+            None => ln_cosh(u),
+        }
+    }
+
+    /// The curve, alias-protected by first-order antiderivative
+    /// antialiasing when `adaa` is set (state: previous input and its
+    /// antiderivative).
+    #[inline]
+    fn apply(&self, adaa: bool, st: &mut (f64, f64), u: f32) -> f32 {
+        let u = u as f64;
+        if !adaa {
+            return self.f(u) as f32;
+        }
+        let a = self.anti(u);
+        let du = u - st.0;
+        let y = if du.abs() < 1e-6 { self.f(0.5 * (u + st.0)) } else { (a - st.1) / du };
+        *st = (u, a);
+        y as f32
+    }
+
+    /// Initial ADAA state (input 0).
+    fn rest(&self) -> (f64, f64) {
+        (0.0, self.anti(0.0))
     }
 }
 
 /// Gain that makes the processed level match the dry level for a -12 dBFS
 /// RMS sine: what "auto gain match" applies.
-fn gain_match(flavour: AnalogFlavour, g: f32) -> f32 {
+fn gain_match(shaper: Shaper, g: f32) -> f32 {
     const N: usize = 2048;
-    let amp = 0.354_f32; // -12 dBFS RMS
+    let amp = 0.354_f64; // -12 dBFS RMS
     let mut sum_in = 0.0f64;
-    let curve = Curve::new(flavour, g);
-    let mut ys = [0.0f32; N];
+    let mut ys = [0.0f64; N];
     for (i, y) in ys.iter_mut().enumerate() {
-        let x = amp * (2.0 * std::f32::consts::PI * (i as f32) / 64.0).sin();
-        sum_in += (x as f64) * (x as f64);
-        *y = curve.apply(x);
+        let x = amp * (2.0 * std::f64::consts::PI * (i as f64) / 64.0).sin();
+        sum_in += x * x;
+        *y = shaper.f(g as f64 * x) / g as f64;
     }
-    let mean = ys.iter().map(|&v| v as f64).sum::<f64>() / N as f64; // DC is removed downstream
-    let sum_out: f64 = ys.iter().map(|&v| (v as f64 - mean).powi(2)).sum();
+    let mean = ys.iter().sum::<f64>() / N as f64; // DC is removed downstream
+    let sum_out: f64 = ys.iter().map(|&v| (v - mean).powi(2)).sum();
     if sum_out <= 1e-12 {
         return 1.0;
     }
@@ -140,21 +291,34 @@ fn gain_match(flavour: AnalogFlavour, g: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Oversampling filter
+// Anti-aliasing plan and the oversampling filter
 // ---------------------------------------------------------------------------
 
 /// FIR taps per polyphase branch. Latency is `TAPS_PER_PHASE` base-rate frames.
 const TAPS_PER_PHASE: usize = 32;
 
-/// Oversampling factor for a sample rate: enough to keep aliasing out of the
-/// audible band (measured in research/analog-spike), and none where the
-/// source already has headroom.
-pub fn oversample_factor(sample_rate: u32) -> usize {
+/// How aliasing is kept out of the audible band for a sample rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AntiAlias {
+    /// Oversampling factor (1 = none).
+    pub factor: usize,
+    /// First-order antiderivative antialiasing on the curve.
+    pub adaa: bool,
+}
+
+/// The plan for a sample rate, chosen from the measurements in
+/// Analog-Emulation.md (section 12).
+pub fn anti_alias_plan(sample_rate: u32) -> AntiAlias {
     match sample_rate {
-        0..=50_000 => 4,
-        50_001..=100_000 => 2,
-        _ => 1,
+        0..=50_000 => AntiAlias { factor: 4, adaa: true },
+        50_001..=100_000 => AntiAlias { factor: 2, adaa: true },
+        _ => AntiAlias { factor: 1, adaa: true },
     }
+}
+
+/// Oversampling factor for a sample rate.
+pub fn oversample_factor(sample_rate: u32) -> usize {
+    anti_alias_plan(sample_rate).factor
 }
 
 /// Kaiser-windowed low-pass, unity DC gain, cutoff as a fraction of the high rate.
@@ -218,24 +382,28 @@ struct Chan {
     dry: Ring,
     dc_x1: f32,
     dc_y1: f32,
+    /// ADAA memory: previous curve input and its antiderivative.
+    adaa: (f64, f64),
 }
 
 impl Chan {
-    fn new(taps_phase: usize, taps_total: usize, latency: usize) -> Self {
+    fn new(taps_phase: usize, taps_total: usize, latency: usize, shaper: &Shaper) -> Self {
         Self {
             xin: Ring::new(taps_phase),
             yhr: Ring::new(taps_total),
             dry: Ring::new(latency.max(1)),
             dc_x1: 0.0,
             dc_y1: 0.0,
+            adaa: shaper.rest(),
         }
     }
-    fn clear(&mut self) {
+    fn clear(&mut self, shaper: &Shaper) {
         self.xin.clear();
         self.yhr.clear();
         self.dry.clear();
         self.dc_x1 = 0.0;
         self.dc_y1 = 0.0;
+        self.adaa = shaper.rest();
     }
 }
 
@@ -248,6 +416,8 @@ const RAMP_SECONDS: f32 = 0.015;
 
 pub struct AnalogStage {
     settings: AnalogSettings,
+    plan: AntiAlias,
+    shaper: Shaper,
     /// The curve in use. A flavour change waits for a fade-out (see `pending`).
     active: AnalogFlavour,
     pending: Option<AnalogFlavour>,
@@ -268,8 +438,15 @@ pub struct AnalogStage {
 
 impl AnalogStage {
     pub fn new(sample_rate: u32) -> Self {
+        Self::with_plan(sample_rate, anti_alias_plan(sample_rate))
+    }
+
+    /// A stage with an explicit anti-aliasing plan (for measurements).
+    pub fn with_plan(sample_rate: u32, plan: AntiAlias) -> Self {
         let mut s = Self {
             settings: AnalogSettings::default(),
+            plan,
+            shaper: Shaper::new(AnalogFlavour::default()),
             active: AnalogFlavour::default(),
             pending: None,
             sample_rate,
@@ -290,7 +467,7 @@ impl AnalogStage {
     }
 
     fn design(&mut self) {
-        self.l = oversample_factor(self.sample_rate);
+        self.l = self.plan.factor.max(1);
         self.h = if self.l > 1 {
             kaiser_lowpass(TAPS_PER_PHASE * self.l + 1, 0.45 / self.l as f64)
         } else {
@@ -303,7 +480,7 @@ impl AnalogStage {
     fn targets(&self) -> (f32, f32, f32, f32) {
         let s = &self.settings;
         let g = drive_gain(s.drive);
-        let comp = if s.auto_gain { gain_match(self.active, g) } else { 1.0 };
+        let comp = if s.auto_gain { gain_match(self.shaper, g) } else { 1.0 };
         let out = 10f32.powf(s.output_db / 20.0);
         (g, comp, out, s.mix)
     }
@@ -336,6 +513,7 @@ impl AnalogStage {
             self.pending = None;
         } else if !self.primed || self.fade == 0.0 {
             self.active = want;
+            self.shaper = Shaper::new(want);
             self.pending = None;
         } else {
             self.pending = Some(want);
@@ -354,8 +532,9 @@ impl AnalogStage {
         if self.chans.len() != channels {
             // The decimator reads up to (L - 1) + (taps - 1) samples back.
             let taps_total = (self.h.len() + self.l).max(1);
+            let (lat, shaper) = (self.latency(), self.shaper);
             self.chans = (0..channels)
-                .map(|_| Chan::new(TAPS_PER_PHASE + 1, taps_total, self.latency()))
+                .map(|_| Chan::new(TAPS_PER_PHASE + 1, taps_total, lat, &shaper))
                 .collect();
         }
     }
@@ -364,7 +543,11 @@ impl AnalogStage {
 impl DspStage for AnalogStage {
     fn prepare(&mut self, sample_rate: u32) {
         if sample_rate != self.sample_rate {
+            let forced = self.plan != anti_alias_plan(self.sample_rate);
             self.sample_rate = sample_rate;
+            if !forced {
+                self.plan = anti_alias_plan(sample_rate);
+            }
             self.design();
             self.primed = false;
             self.snap();
@@ -376,7 +559,8 @@ impl DspStage for AnalogStage {
     }
 
     fn reset(&mut self) {
-        self.chans.iter_mut().for_each(Chan::clear);
+        let shaper = self.shaper;
+        self.chans.iter_mut().for_each(|c| c.clear(&shaper));
         self.primed = false;
         self.snap();
     }
@@ -388,6 +572,7 @@ impl DspStage for AnalogStage {
         if self.fade == 0.0 {
             if let Some(p) = self.pending.take() {
                 self.active = p;
+                self.shaper = Shaper::new(p);
             }
         }
         let mut target_fade = if self.settings.enabled && self.pending.is_none() { 1.0 } else { 0.0 };
@@ -397,7 +582,8 @@ impl DspStage for AnalogStage {
         self.ensure_chans(channels);
         if self.fade == 0.0 {
             // Coming back from bypass: stale filter history would ring.
-            self.chans.iter_mut().for_each(Chan::clear);
+            let shaper = self.shaper;
+            self.chans.iter_mut().for_each(|c| c.clear(&shaper));
         }
         self.primed = true;
 
@@ -410,8 +596,8 @@ impl DspStage for AnalogStage {
             (tmix - self.mix) / ramp,
             (target_fade - self.fade) / ramp,
         );
-        let mut flavour = self.active;
         let l = self.l;
+        let adaa = self.plan.adaa;
         let latency = self.latency();
         let (dc_r, taps_phase) = (self.dc_r, TAPS_PER_PHASE + 1);
         let gain_up = l as f32;
@@ -427,22 +613,24 @@ impl DspStage for AnalogStage {
                 // Faded out mid-block: swap the curve, clear its history and
                 // fade back in, right here (not at the next block).
                 self.active = self.pending.take().expect("checked above");
-                flavour = self.active;
-                self.chans.iter_mut().for_each(Chan::clear);
-                self.comp = if self.settings.auto_gain { gain_match(flavour, tg) } else { 1.0 };
+                self.shaper = Shaper::new(self.active);
+                let shaper = self.shaper;
+                self.chans.iter_mut().for_each(|c| c.clear(&shaper));
+                self.comp = if self.settings.auto_gain { gain_match(shaper, tg) } else { 1.0 };
                 tcomp = self.comp;
                 sc = 0.0;
                 target_fade = if self.settings.enabled { 1.0 } else { 0.0 };
                 sf = (target_fade - self.fade) / ramp;
             }
             let (comp, out, mix, fade) = (self.comp, self.out, self.mix, self.fade);
-            let curve = Curve::new(flavour, self.g);
+            let shaper = self.shaper;
+            let (gd, inv_g) = (self.g, 1.0 / self.g);
 
             for (ch, smp) in frame.iter_mut().enumerate() {
                 let x = *smp;
                 let st = &mut self.chans[ch];
                 let wet = if l == 1 {
-                    curve.apply(x)
+                    shaper.apply(adaa, &mut st.adaa, x * gd) * inv_g
                 } else {
                     // Interpolate: L high-rate samples per input, shaped as they are made.
                     st.xin.push(x);
@@ -454,7 +642,7 @@ impl DspStage for AnalogStage {
                                 acc += self.h[idx] * st.xin.at(k);
                             }
                         }
-                        st.yhr.push(curve.apply(acc * gain_up));
+                        st.yhr.push(shaper.apply(adaa, &mut st.adaa, acc * gain_up * gd) * inv_g);
                     }
                     // Decimate: one output per input, from the sample L-1 pushes back.
                     let mut acc = 0.0f32;
@@ -499,6 +687,7 @@ fn step(cur: &mut f32, target: f32, step: &mut f32) {
     let next = *cur + *step;
     *cur = if (*step >= 0.0 && next >= target) || (*step < 0.0 && next <= target) { target } else { next };
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -624,15 +813,18 @@ mod tests {
         };
         assert!(h2(0.5, 0.4) > h2(0.5, 0.1) + 6.0, "louder input: more harmonic");
         assert!(h2(0.7, 0.1) > h2(0.4, 0.1) + 3.0, "more drive: more harmonic");
-        assert!(h2(0.0, 0.05) < -60.0, "a quiet signal at zero drive stays clean");
+        assert!(h2(0.0, 0.05) < -40.0, "a quiet signal at zero drive stays very clean");
     }
 
     /// Everything audible that is not a harmonic of the tone is aliasing.
-    fn alias_db(fs: u32, tone_hz: f64, drive: f32, amp: f32) -> f64 {
+    fn alias_db_with(fs: u32, tone_hz: f64, drive: f32, amp: f32, flavour: AnalogFlavour, plan: Option<AntiAlias>) -> f64 {
         let n = 1 << 14;
         let bin = (tone_hz / fs as f64 * n as f64).round() as usize;
-        let mut st = AnalogStage::new(fs);
-        st.set_settings(on(AnalogFlavour::WarmTriode, drive, 1.0));
+        let mut st = match plan {
+            Some(p) => AnalogStage::with_plan(fs, p),
+            None => AnalogStage::new(fs),
+        };
+        st.set_settings(on(flavour, drive, 1.0));
         let sp = spectrum(&run(&mut st, bin, n, amp));
         let lim = (20_000.0 / fs as f64 * n as f64) as usize;
         let err = (1..lim.min(n / 2))
@@ -646,17 +838,146 @@ mod tests {
         db(err / sp[bin])
     }
 
+    fn alias_db(fs: u32, tone_hz: f64, drive: f32, amp: f32) -> f64 {
+        alias_db_with(fs, tone_hz, drive, amp, AnalogFlavour::WarmTriode, None)
+    }
+
+    /// Prints the aliasing of every plan (run with --ignored --nocapture); the
+    /// table in Analog-Emulation.md section 12 comes from this.
+    #[test]
+    #[ignore]
+    fn measure_anti_alias_plans() {
+        let plans: [(usize, bool); 6] = [(1, false), (1, true), (2, false), (2, true), (4, false), (4, true)];
+        for (flavour, name) in [(AnalogFlavour::WarmTriode, "warm triode"), (AnalogFlavour::SolidState, "solid state")] {
+            for (label, drive, amp, tone) in [("hard test tone (drive 0.53, in 0.8, 9.5 kHz)", 0.53f32, 0.8f32, 9_500.0), ("typical (drive 0.4, in 0.3, 5 kHz)", 0.4, 0.3, 5_000.0)] {
+                for fs in [44_100u32, 96_000] {
+                    let row: Vec<String> = plans
+                        .iter()
+                        .map(|&(f, a)| format!("{}x{}: {:>6.1}", f, if a { "+ADAA" } else { "     " }, alias_db_with(fs, tone, drive, amp, flavour, Some(AntiAlias { factor: f, adaa: a }))))
+                        .collect();
+                    println!("{name:<12} {label:<44} {fs:>6} Hz | {}", row.join(" | "));
+                }
+            }
+        }
+    }
+
     #[test]
     fn oversampling_keeps_aliasing_below_audibility() {
         // A hard test tone (research/analog-spike: the same drive without
         // protection aliases at -14 dB at 44.1 kHz).
         let a441 = alias_db(44_100, 9_500.0, 0.53, 0.8);
-        assert!(a441 < -60.0, "44.1 kHz aliasing {a441:.1} dB");
+        assert!(a441 < -65.0, "44.1 kHz aliasing {a441:.1} dB");
         let a48 = alias_db(48_000, 9_500.0, 0.53, 0.8);
-        assert!(a48 < -60.0, "48 kHz aliasing {a48:.1} dB");
+        assert!(a48 < -65.0, "48 kHz aliasing {a48:.1} dB");
         let a96 = alias_db(96_000, 9_500.0, 0.53, 0.8);
-        assert!(a96 < -75.0, "96 kHz aliasing {a96:.1} dB");
+        assert!(a96 < -70.0, "96 kHz aliasing {a96:.1} dB");
+        let a192 = alias_db(192_000, 9_500.0, 0.53, 0.8);
+        assert!(a192 < -70.0, "192 kHz aliasing {a192:.1} dB (ADAA only, no oversampling)");
         assert_eq!((oversample_factor(44_100), oversample_factor(96_000), oversample_factor(192_000)), (4, 2, 1));
+    }
+
+    #[test]
+    fn koren_model_gives_plausible_12ax7_currents() {
+        // Datasheet-scale checks (RCA bogey: about 1.2 mA at 250 V, -2 V grid).
+        let ip = koren_plate_current(-2.0, 250.0) * 1000.0;
+        assert!((0.7..1.6).contains(&ip), "Ip(-2 V, 250 V) = {ip:.2} mA");
+        assert!(koren_plate_current(-6.0, 250.0) < 1e-5, "cut off well below the bias");
+        let (a, b, c) = (koren_plate_current(-3.0, 250.0), koren_plate_current(-2.0, 250.0), koren_plate_current(-1.0, 250.0));
+        assert!(a < b && b < c, "more current as the grid rises");
+        let (p1, p2) = (triode_plate_voltage(-3.0), triode_plate_voltage(-0.5));
+        assert!(p1 > p2 && p1 < B_PLUS && p2 > 0.0, "plate voltage falls as the grid rises: {p1:.0} V -> {p2:.0} V");
+    }
+
+    #[test]
+    fn tube_table_is_a_unit_slope_asymmetric_curve() {
+        let t = triode_table();
+        assert!(t.eval(0.0).abs() < 1e-9, "zero at zero");
+        let slope = (t.eval(0.001) - t.eval(-0.001)) / 0.002;
+        assert!((slope - 1.0).abs() < 0.01, "unit small-signal slope, got {slope}");
+        let mut prev = f64::MIN;
+        for i in -400..=400 {
+            let v = t.eval(i as f64 * 0.01);
+            assert!(v >= prev - 1e-12, "non-decreasing at {}", i as f64 * 0.01);
+            prev = v;
+        }
+        // Asymmetric: the two halves compress differently.
+        let (up, down) = (t.eval(2.0), -t.eval(-2.0));
+        assert!((up - down).abs() / up.max(down) > 0.15, "lopsided: +2 -> {up:.2}, -2 -> {down:.2}");
+        assert!(t.eval(9.0) == t.eval(4.0) && t.eval(-9.0) == t.eval(-4.0), "held flat beyond the table");
+        // The table agrees with the model it was built from.
+        for u in [-3.7, -1.23, -0.4, 0.05, 0.9, 2.2, 3.9] {
+            let direct = -triode_plate_voltage(grid_voltage(u));
+            let mid = -triode_plate_voltage(grid_voltage(0.0));
+            let raw_slope = {
+                let h = 1e-3;
+                (-triode_plate_voltage(grid_voltage(h)) + triode_plate_voltage(grid_voltage(-h))) / (2.0 * h)
+            };
+            let want = (direct - mid) / raw_slope;
+            assert!((t.eval(u) - want).abs() < 2e-3 * want.abs().max(1.0), "table vs model at {u}");
+        }
+    }
+
+    #[test]
+    fn antiderivative_matches_the_curve() {
+        let t = triode_table();
+        for u in [-5.0, -3.99, -2.0, -0.31, 0.0, 0.77, 1.9, 3.5, 4.5] {
+            let h = 1e-4;
+            let numeric = (t.antiderivative(u + h) - t.antiderivative(u - h)) / (2.0 * h);
+            assert!((numeric - t.eval(u)).abs() < 1e-4, "dF/du = f at {u}: {numeric} vs {}", t.eval(u));
+        }
+        // Continuous across a node and across the table edge.
+        let e = TABLE_RANGE;
+        assert!((t.antiderivative(e + 1e-9) - t.antiderivative(e - 1e-9)).abs() < 1e-6);
+        // Analytic tanh antiderivative used by the solid-state curve.
+        let shaper = Shaper::new(AnalogFlavour::SolidState);
+        for u in [-3.0f64, -0.5, 0.0, 1.2, 6.0] {
+            let h = 1e-5;
+            assert!(((shaper.anti(u + h) - shaper.anti(u - h)) / (2.0 * h) - u.tanh()).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn adaa_reproduces_the_curve_for_slow_signals_and_constants() {
+        for flavour in [AnalogFlavour::WarmTriode, AnalogFlavour::SolidState] {
+            let sh = Shaper::new(flavour);
+            let mut st = sh.rest();
+            // A constant input: ADAA must equal f(c) once the state has settled.
+            let y = (0..4).map(|_| sh.apply(true, &mut st, 0.8)).last().unwrap();
+            assert!((y as f64 - sh.f(0.8)).abs() < 1e-6, "{flavour:?}: constant input");
+            // A slowly moving input (a 50 Hz sine at 48 kHz). ADAA of order one
+            // returns the curve at the midpoint of the last step (half a sample
+            // of delay), so compare with that.
+            let mut st = sh.rest();
+            let u_at = |i: usize| 1.5 * (2.0 * PI * 50.0 * i as f64 / 48_000.0).sin();
+            let worst = (1..2000)
+                .map(|i| {
+                    let y = sh.apply(true, &mut st, u_at(i) as f32) as f64;
+                    (y - sh.f(0.5 * (u_at(i) + u_at(i - 1)))).abs()
+                })
+                .skip(2)
+                .fold(0.0, f64::max);
+            assert!(worst < 1e-4, "{flavour:?}: slow signal differs from f by {worst}");
+        }
+    }
+
+    #[test]
+    fn triode_stage_matches_the_prototype_harmonic_profile() {
+        // Research prototype (Analog-Emulation.md 10.2): a 12AX7 stage at input
+        // 0.3 gave 2nd -32.5 dB and 3rd -60 dB; the 2nd rises 1 dB per dB.
+        let (n, bin) = (1 << 14, 200);
+        let h = |amp: f32| {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(on(AnalogFlavour::WarmTriode, 0.0, 1.0));
+            let sp = spectrum(&run(&mut st, bin, n, amp));
+            (db(sp[bin * 2] / sp[bin]), db(sp[bin * 3] / sp[bin]))
+        };
+        let (h2, h3) = h(0.3);
+        assert!((-35.0..-30.0).contains(&h2), "2nd at input 0.3: {h2:.1} dB (prototype -32.5)");
+        assert!(h3 < -52.0, "3rd at input 0.3: {h3:.1} dB (prototype -60)");
+        let (h2_low, _) = h(0.15);
+        assert!((h2 - h2_low - 6.0).abs() < 1.5, "2nd rises about 1 dB per dB of input");
+        let (h2_hi, h3_hi) = h(1.0);
+        assert!(h2_hi > h3_hi + 12.0, "even harmonics keep dominating at full swing ({h2_hi:.1} vs {h3_hi:.1})");
     }
 
     #[test]
