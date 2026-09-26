@@ -151,6 +151,8 @@ struct StubTransport {
     tracks: Mutex<HashMap<i64, Vec<(f32, usize)>>>,
     next_body: Mutex<HashMap<i64, Vec<u8>>>,
     chain_mode: Option<String>,
+    /// `X-Transcode-Chain` value the stub reports (default "wav->passthrough").
+    chain_label: Mutex<Option<String>>,
     opened: Mutex<Vec<(i64, StreamOptions)>>,
 }
 
@@ -160,6 +162,7 @@ impl StubTransport {
             tracks: Mutex::new(HashMap::new()),
             next_body: Mutex::new(HashMap::new()),
             chain_mode: chain_mode.map(|s| s.to_string()),
+            chain_label: Mutex::new(None),
             opened: Mutex::new(Vec::new()),
         }
     }
@@ -183,7 +186,13 @@ impl Transport for StubTransport {
                 return Ok(StreamInfo {
                     reader: Box::new(Cursor::new(body)),
                     content_type: "audio/wav".into(),
-                    chain: Some("wav->passthrough".into()),
+                    chain: Some(
+                        self.chain_label
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| "wav->passthrough".into()),
+                    ),
                     gapless_next: opts.next,
                     gapless_mode: self.chain_mode.clone(),
                 });
@@ -217,7 +226,13 @@ impl Transport for StubTransport {
         Ok(StreamInfo {
             reader: Box::new(Cursor::new(bytes)),
             content_type: "audio/wav".into(),
-            chain: Some("wav->passthrough".into()),
+            chain: Some(
+                self.chain_label
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "wav->passthrough".into()),
+            ),
             gapless_next,
             gapless_mode,
         })
@@ -347,6 +362,53 @@ fn gapless_chained_mode_continues_without_gap() {
     let at_boundary = rms(&s[b - 220..b + 220]);
     let mid_track = rms(&s[10000 * CHANNELS..10000 * CHANNELS + 440]);
     assert!(at_boundary > mid_track * 0.95, "no dip at chained boundary");
+}
+
+#[test]
+fn the_chain_badge_follows_the_track_being_heard_through_a_gapless_boundary() {
+    // The server joins each chained track's chain with " + " (regression: the
+    // UI showed "dsf64->flac 24/88.2 + dsf64->flac 24/88.2" for track one).
+    let mut h = Harness::new(Some("chained"));
+    *h.stub.chain_label.lock().unwrap() =
+        Some("dsf64->flac 24/88.2 + dsf128->flac 24/176.4".into());
+    h.stub.add(1, &[(440.0, 22050)]);
+    h.stub.add(2, &[(880.0, 22050)]);
+    h.player.play_queue(
+        vec![
+            track(1, AudioFormat::Wav, 500),
+            track(2, AudioFormat::Wav, 500),
+        ],
+        0,
+    );
+    assert_eq!(
+        h.player.snapshot().chain.as_deref(),
+        Some("dsf64->flac 24/88.2"),
+        "first track only"
+    );
+
+    // Play across the boundary into the second track.
+    for _ in 0..8 {
+        h.player.pump();
+    }
+    let snap = h.player.snapshot();
+    assert_eq!(snap.track.map(|t| t.id), Some(2), "now on the second track");
+    assert_eq!(
+        snap.chain.as_deref(),
+        Some("dsf128->flac 24/176.4"),
+        "its own chain, not the pair"
+    );
+}
+
+#[test]
+fn a_plain_chain_is_shown_as_the_server_sent_it() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    assert_eq!(
+        h.player.snapshot().chain.as_deref(),
+        Some("wav->passthrough")
+    );
 }
 
 #[test]

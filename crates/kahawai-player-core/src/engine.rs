@@ -318,11 +318,16 @@ impl ActiveStream {
         }
     }
 
+    /// The processing chain of the track being *heard*. A gapless response
+    /// carries several tracks and the server joins their chains with
+    /// " + " ("dsf64->flac 24/88.2 + dsf64->flac 24/88.2"); show only the
+    /// displayed segment's.
     fn chain(&self) -> Option<String> {
-        match self {
-            ActiveStream::Pcm(a) => a.chain.clone(),
-            ActiveStream::Dop(a) => a.chain.clone(),
-        }
+        let (chain, seg) = match self {
+            ActiveStream::Pcm(a) => (a.chain.as_deref(), a.seg_idx),
+            ActiveStream::Dop(a) => (a.chain.as_deref(), a.seg_idx),
+        };
+        chain.map(|c| chain_segment(c, seg).to_string())
     }
 
     /// How many queue positions this response's audio consumed. The
@@ -1273,6 +1278,16 @@ impl Player {
     }
 }
 
+/// The `idx`-th part of an `X-Transcode-Chain` value that lists one chain per
+/// chained track, separated by " + ". A value with fewer parts (or none)
+/// applies to every segment, so it falls back to the whole string.
+fn chain_segment(chain: &str, idx: usize) -> &str {
+    if !chain.contains(" + ") {
+        return chain;
+    }
+    chain.split(" + ").nth(idx).map(str::trim).unwrap_or(chain)
+}
+
 /// Expected frames of a track at `rate`, from catalog metadata. Only used
 /// to move the *displayed* track across an invisible server-side gapless
 /// boundary; the audio path never depends on it.
@@ -1865,5 +1880,42 @@ mod key_tests {
             "a paused seek must reach the UI"
         );
         assert!(moved(PlayerStatus::Stopped));
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::chain_segment;
+
+    #[test]
+    fn a_single_chain_is_returned_unchanged() {
+        assert_eq!(chain_segment("wav->passthrough", 0), "wav->passthrough");
+        assert_eq!(
+            chain_segment("wav->passthrough", 1),
+            "wav->passthrough",
+            "later segments share it"
+        );
+        assert_eq!(chain_segment("", 0), "");
+    }
+
+    #[test]
+    fn a_gapless_response_shows_the_chain_of_the_track_being_heard() {
+        let both = "dsf64->flac 24/88.2 + dsf128->flac 24/176.4";
+        assert_eq!(chain_segment(both, 0), "dsf64->flac 24/88.2");
+        assert_eq!(chain_segment(both, 1), "dsf128->flac 24/176.4");
+    }
+
+    #[test]
+    fn an_out_of_range_segment_falls_back_to_the_whole_string() {
+        let both = "a->b + c->d";
+        assert_eq!(chain_segment(both, 5), both);
+    }
+
+    #[test]
+    fn identical_chains_collapse_to_one() {
+        // The case from the bug report: two DSF64 tracks back to back.
+        let both = "dsf64->flac 24/88.2 + dsf64->flac 24/88.2";
+        assert_eq!(chain_segment(both, 0), "dsf64->flac 24/88.2");
+        assert!(!chain_segment(both, 0).contains('+'));
     }
 }
