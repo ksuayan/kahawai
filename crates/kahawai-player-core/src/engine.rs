@@ -1019,8 +1019,9 @@ impl Player {
             }
         }
 
-        // DSP follows the stream rate.
-        self.eq.set_sample_rate(spec.sample_rate);
+        // The EQ runs on what the sink receives (after any resampling), so
+        // it is designed at the sink rate, not the file's.
+        self.eq.set_sample_rate(sink_rate);
 
         // The playhead starts at the seek target for *both* seek styles.
         // (Passthrough skips decoded frames without counting them as

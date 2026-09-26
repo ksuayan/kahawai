@@ -118,6 +118,9 @@ impl AudioSink for SharedSink {
     fn state(&self) -> kahawai_player_core::SinkState {
         self.0.lock().unwrap().state()
     }
+    fn preferred_sample_rate(&self) -> Option<u32> {
+        self.0.lock().unwrap().preferred_sample_rate()
+    }
     fn buffered_frames(&self) -> u64 {
         self.0.lock().unwrap().buffered_frames()
     }
@@ -1118,6 +1121,36 @@ fn dop_bypasses_dsp_entirely() {
         1,
         "no loudness pre-scan on the DoP path"
     );
+}
+
+#[test]
+fn eq_is_tuned_to_the_device_rate_when_the_stream_is_resampled() {
+    // A 44.1 kHz tone on a device that wants 48 kHz is resampled before the
+    // EQ, so a narrow +12 dB band at the tone's frequency must still give
+    // ~x4 (designed at 48 kHz). Designed at 44.1 kHz it would sit ~9% high
+    // and miss the tone.
+    let run = |eq: bool| {
+        let mut h = Harness::new(None);
+        h.sink.0.lock().unwrap().demand_rate = Some(48_000);
+        h.stub.add(1, &[(440.0, 44100)]);
+        if eq {
+            h.player
+                .set_eq_bands(vec![EqBand {
+                    band_type: EqBandType::Peaking,
+                    freq: 440.0,
+                    gain_db: 12.0,
+                    q: 6.0,
+                }])
+                .expect("valid band");
+        }
+        h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+        h.pump_until_done(100);
+        assert_eq!(h.sink.0.lock().unwrap().sample_rate, Some(48_000), "resampled to the device rate");
+        let s = h.samples();
+        rms(&s[s.len() / 2..]) // steady state, after the filter settles
+    };
+    let ratio = run(true) / run(false);
+    assert!((ratio - 4.0).abs() < 0.6, "expected ~x4 at the tone, got {ratio}");
 }
 
 #[test]
