@@ -92,3 +92,13 @@ describe("EqControl", () => {
     expect($$('[data-testid="eq-popover"]').length).toBe(0);
   });
 });
+
+describe("EqControl opens the editor directly", () => {
+  it("shows the graph dialog on click, with no intermediate popover", async () => {
+    const { wrapper } = await boot();
+    expect(document.body.querySelector('[data-testid="eq-graph"]')).toBeNull();
+    await open(wrapper);
+    expect(document.body.querySelector('[data-testid="eq-graph"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-testid="eq-popover"]')).toBeNull();
+  });
+});

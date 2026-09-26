@@ -121,12 +121,23 @@ describe("NowPlayingView", () => {
     expect(w.get('[role="alert"]').text()).toBe("decode failed");
   });
 
-  it("embeds the transport controls but no seek bar or volume slider (they live in the bar)", async () => {
+  it("has no transport, seek, volume or stream-format controls (they live in the bar)", async () => {
     const w = await boot(makeState({ status: "paused", position_ms: 83_000, track: makeTrack({ duration_ms: 318_742 }) }));
-    expect(w.get('[data-testid="play-pause"]').attributes("aria-label")).toBe("Play");
-    expect(w.findAll("button").some((b) => b.attributes("aria-label") === "Stop")).toBe(false);
-    expect(w.find('[role="slider"][aria-label="Seek"]').exists()).toBe(false);
-    expect(w.find('[role="slider"][aria-label="Volume"]').exists()).toBe(false);
+    expect(w.find('[data-testid="play-pause"]').exists()).toBe(false);
+    expect(w.find('[role="slider"]').exists()).toBe(false);
+    expect(w.find('[aria-label="Stream format for this track"]').exists()).toBe(false);
+    expect(w.text()).not.toContain("Stream this track as");
+  });
+
+  it("offers Add to queue and Add to playlist… buttons instead of a ⋯ menu, and no duplicate source-format badge", async () => {
+    const track = makeTrack({ format: "flac", bit_depth: 24, sample_rate: 96000 });
+    const w = await boot(makeState({ status: "playing", track }));
+    expect(w.get('[data-testid="add-to-queue"]').text()).toContain("Add to queue");
+    expect(w.get('[data-testid="add-to-playlist"]').text()).toContain("Add to playlist");
+    expect(w.find('[aria-label^="Actions for"]').exists()).toBe(false);
+    expect(w.get('[data-testid="add-to-queue"] svg').classes().join(" ")).toContain("lucide-list-plus");
+    // The source format appears once (inside the path badge), not as a separate tag.
+    expect(w.text().match(/FLAC · 24\/96k/g)).toHaveLength(1);
   });
 
   it("navigates back to the library; EQ is a transport control now, not a separate button", async () => {

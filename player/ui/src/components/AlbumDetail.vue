@@ -80,7 +80,7 @@ function totalDuration(): string {
             <UiButton variant="primary" :disabled="playableTracks().length === 0" @click="playAll">
               <Play class="fill-current" /> Play
             </UiButton>
-            <TrackMenu :tracks="tracks" :album-id="album.id" />
+            <TrackMenu :tracks="tracks" :album-id="album.id" layout="buttons" />
           </div>
         </div>
       </header>

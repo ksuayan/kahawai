@@ -135,6 +135,18 @@ describe("AlbumDetail", () => {
     expect(wrapper.findAll("[data-playable]").map((r) => r.find(".truncate").text())).toEqual(["Smoke Signals", "Demi Moore", "Reprise"]);
   });
 
+  it("offers Add to queue / Add to playlist… buttons instead of a ⋯ menu, adding only playable tracks", async () => {
+    routes();
+    const { wrapper } = mountApp(AlbumDetail, { id: 5 });
+    await settle();
+    expect(wrapper.get('[data-testid="add-to-playlist"]').text()).toContain("Add to playlist");
+    expect(wrapper.find('[aria-label="Actions"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="add-to-queue"]').trigger("click");
+    await settle();
+    const sent = (tauri.callsTo("queue_append")[0] as { tracks: { id: number }[] }).tracks.map((t) => t.id);
+    expect(sent).toEqual([t1.id, t2.id]);
+  });
+
   it("Play queues the playable tracks from the start (skipping missing files)", async () => {
     routes();
     const { wrapper } = mountApp(AlbumDetail, { id: 5 });

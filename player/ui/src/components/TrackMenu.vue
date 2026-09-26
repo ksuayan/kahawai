@@ -31,8 +31,10 @@ const props = withDefaults(
     /** Multi-track context (album). `track` wins when both are given. */
     tracks?: Track[] | null;
     albumId?: number | null;
+    /** "menu" (default): one ⋯ button. "buttons": labelled Add to queue / Add to playlist… buttons. */
+    layout?: "menu" | "buttons";
   }>(),
-  { track: null, tracks: null, albumId: null },
+  { track: null, tracks: null, albumId: null, layout: "menu" },
 );
 
 const queue = useQueueStore();
@@ -120,7 +122,30 @@ const menuLabel = computed(() => {
 
 <template>
   <span class="inline-block" @dblclick.stop>
-    <DropdownMenuRoot>
+    <span v-if="layout === 'buttons'" class="flex flex-wrap items-center gap-2" data-testid="track-actions">
+      <UiButton :disabled="list.length === 0 || busy" data-testid="add-to-queue" @click="addToQueue">
+        <ListPlus /> Add to queue
+      </UiButton>
+      <DropdownMenuRoot>
+        <DropdownMenuTrigger as-child>
+          <UiButton :disabled="list.length === 0 || busy" data-testid="add-to-playlist">
+            <ListMusic /> Add to playlist…
+          </UiButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuPortal>
+          <DropdownMenuContent align="start" :side-offset="4" :class="contentClass">
+            <DropdownMenuItem v-for="p in playlists.items" :key="p.id" :class="itemClass" :disabled="busy" @select="addToPlaylist(p.id)">
+              {{ p.name }} <span class="text-[11px] text-faint">({{ p.track_ids.length }})</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator v-if="playlists.items.length" class="my-1 h-px bg-line" />
+            <DropdownMenuItem :class="itemClass" :disabled="busy" @select="naming = true">
+              <span class="flex items-center gap-2"><Plus class="size-4 text-dim" />New playlist…</span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenuPortal>
+      </DropdownMenuRoot>
+    </span>
+    <DropdownMenuRoot v-else>
       <DropdownMenuTrigger as-child>
         <UiButton variant="icon" :title="menuLabel" :aria-label="menuLabel"><Ellipsis /></UiButton>
       </DropdownMenuTrigger>

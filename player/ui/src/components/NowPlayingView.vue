@@ -11,9 +11,7 @@ import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import Artwork from "./Artwork.vue";
-import TrackFormatSelect from "./TrackFormatSelect.vue";
 import TrackMenu from "./TrackMenu.vue";
-import TransportControls from "./TransportControls.vue";
 
 const player = usePlayerStore();
 const lib = useLibraryStore();
@@ -68,7 +66,6 @@ const artworkHash = computed(() => {
         <p class="m-0 mb-4 text-sm text-faint">{{ track.album ?? "" }}</p>
 
         <div class="mb-5 flex flex-wrap gap-2">
-          <UiBadge>{{ formatBadge(track) }}</UiBadge>
           <UiBadge v-if="track.mqa" variant="accent" :title="mqaTitle(track)" data-testid="mqa-badge">{{ mqaLabel(track) }}</UiBadge>
           <UiBadge variant="accent" :title="`Audio chain: ${player.chain ?? '—'}`">{{ audioPath }}</UiBadge>
           <UiBadge
@@ -89,15 +86,7 @@ const artworkHash = computed(() => {
           <UiBadge v-if="!isPlayable(track)" variant="danger">{{ unplayableReason(track) }}</UiBadge>
         </div>
 
-        <div class="mb-5"><TransportControls large /></div>
-
-        <div class="mb-4 flex flex-wrap items-center gap-4">
-          <div class="flex items-center gap-2 text-xs text-dim">
-            Stream this track as
-            <TrackFormatSelect :track="track" :disabled="!isPlayable(track)" />
-          </div>
-          <TrackMenu :track="track" />
-        </div>
+        <div class="mb-4"><TrackMenu :track="track" layout="buttons" /></div>
 
         <StateMessage v-if="player.error" kind="error">{{ player.error }}</StateMessage>
       </div>

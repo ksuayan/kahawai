@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Plus, Trash2 } from "lucide-vue-next";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { totalResponseDb } from "../eqResponse";
 import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
@@ -21,6 +21,35 @@ import UiSwitch from "../ui/UiSwitch.vue";
 const open = defineModel<boolean>("open", { required: true });
 const dsp = useDspStore();
 const player = usePlayerStore();
+
+const selected = ref<number | null>(null);
+// Edits apply live so the change is audible; Cancel (or closing the window)
+// puts back what was there when the dialog opened, OK keeps it.
+let snap: ReturnType<typeof dsp.snapshotEq> | null = null;
+watch(
+  open,
+  (o) => {
+    if (o) {
+      snap = dsp.snapshotEq();
+      selected.value = null;
+    }
+  },
+  { immediate: true },
+);
+function ok(): void {
+  snap = null;
+  open.value = false;
+}
+function cancel(): void {
+  if (snap) void dsp.restoreEq(snap);
+  snap = null;
+  open.value = false;
+}
+/** Escape / overlay click / close all count as Cancel. */
+function onOpenChange(v: boolean): void {
+  if (v) open.value = true;
+  else cancel();
+}
 
 const unsupported = computed(() => player.isExclusive);
 const UNSUPPORTED_TEXT = "EQ is not supported for this stream type.";
@@ -54,7 +83,6 @@ const fill = computed(() => `${curve.value} L${xOf(F_MAX)},${yOf(0)} L${xOf(F_MI
 
 const hasGain = (t: EqBandType) => t === "peaking" || t === "low_shelf" || t === "high_shelf";
 
-const selected = ref<number | null>(null);
 const sel = computed(() => (selected.value === null ? null : (dsp.rows[selected.value] ?? null)));
 
 // --- interaction ------------------------------------------------------------
@@ -151,7 +179,7 @@ function choose(v: string | null): void {
 </script>
 
 <template>
-  <UiDialog v-model:open="open" wide title="Equalizer" description="Drag a point to shape the sound. Double-click the graph to add a band.">
+  <UiDialog :open="open" wide @update:open="onOpenChange" title="Equalizer" description="Drag a point to shape the sound. Double-click the graph to add a band.">
     <p v-if="unsupported" class="mb-3 rounded-md border border-line bg-active px-3 py-2 text-sm text-dim" role="status" data-testid="eq-unsupported">
       {{ UNSUPPORTED_TEXT }}
     </p>
@@ -241,6 +269,10 @@ function choose(v: string | null): void {
         <span v-if="dsp.rowError" class="text-danger" role="alert">{{ dsp.rowError }}</span>
       </div>
     </div>
+    <template #footer>
+      <UiButton data-testid="eq-cancel" @click="cancel">Cancel</UiButton>
+      <UiButton variant="primary" data-testid="eq-ok" @click="ok">OK</UiButton>
+    </template>
     <PromptDialog v-model:open="naming" title="Save EQ preset" label="Preset name" placeholder="My tuning" confirm-label="Save" :maxlength="40" @submit="(n) => dsp.saveUserPreset(n)" />
   </UiDialog>
 </template>

@@ -86,3 +86,42 @@ describe("EqDialog", () => {
     expect(dsp.rows[0].gain_db).toBe(4);
   });
 });
+
+describe("EqDialog OK / Cancel", () => {
+  const click = async (id: string) => {
+    (document.body.querySelector(`[data-testid="${id}"]`) as HTMLElement).click();
+    await settle();
+  };
+
+  it("OK keeps the edits", async () => {
+    const { wrapper, dsp } = await boot();
+    await dsp.applyPreset("builtin:rock");
+    await click("eq-ok");
+    expect(dsp.activePreset?.name).toBe("Rock");
+    expect(wrapper.emitted("update:open")?.at(-1)).toEqual([false]);
+  });
+
+  it("Cancel puts back the bands and on/off state from when it opened", async () => {
+    tauri.on("get_state", makeState({ status: "playing", output_path: "pcm-shared" }));
+    const { wrapper } = mountApp(EqDialog, { open: false });
+    const dsp = useDspStore();
+    await settle();
+    await dsp.applyPreset("builtin:jazz");
+    await wrapper.setProps({ open: true });
+    await settle();
+    await dsp.applyPreset("builtin:rock");
+    await dsp.saveEqEnabled(false);
+    await click("eq-cancel");
+    expect(dsp.activePreset?.name).toBe("Jazz");
+    expect(dsp.eqEnabled).toBe(true);
+    expect(tauri.callsTo("set_eq_enabled").at(-1)).toEqual({ enabled: true });
+    expect(wrapper.emitted("update:open")?.at(-1)).toEqual([false]);
+  });
+
+  it("has the preset picker, Save as preset and OK/Cancel in one dialog", async () => {
+    await boot();
+    for (const sel of ['[aria-label="EQ preset"]', '[data-testid="save-preset"]', '[data-testid="eq-ok"]', '[data-testid="eq-cancel"]']) {
+      expect(document.body.querySelector(sel)).not.toBeNull();
+    }
+  });
+});

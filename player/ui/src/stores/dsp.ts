@@ -182,6 +182,19 @@ export const useDspStore = defineStore("dsp", () => {
     persistPresets();
   }
 
+  /** Capture the EQ state so an editor session can be cancelled. */
+  function snapshotEq(): { rows: EqBandRow[]; enabled: boolean } {
+    return { rows: rows.value.map((r) => ({ ...r })), enabled: eqEnabled.value };
+  }
+
+  /** Put back a state taken with `snapshotEq` (edits apply live, so Cancel = undo them). */
+  async function restoreEq(snap: { rows: EqBandRow[]; enabled: boolean }): Promise<void> {
+    rows.value = snap.rows.map((r) => ({ ...r }));
+    rowError.value = null;
+    await pushBands();
+    if (eqEnabled.value !== snap.enabled) await saveEqEnabled(snap.enabled);
+  }
+
   function addBand(): void {
     if (!canAddBand.value) return;
     rows.value.push({ band_type: "peaking", freq: 1000, gain_db: 0, q: 1.0, enabled: true });
@@ -253,6 +266,8 @@ export const useDspStore = defineStore("dsp", () => {
     userPresets,
     activePreset,
     applyPreset,
+    snapshotEq,
+    restoreEq,
     saveUserPreset,
     deleteUserPreset,
     init,
