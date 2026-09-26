@@ -237,6 +237,11 @@ pub async fn run_scan_with_progress(
         }
     }
 
+    let merged = consolidate_albums(pool).await?;
+    if merged > 0 {
+        info!(merged, "merged duplicate album rows");
+    }
+
     report.elapsed_secs = start.elapsed().as_secs_f64();
     sqlx::query(
         "UPDATE scan_log SET finished_at = datetime('now'), files_scanned = ?,
@@ -414,10 +419,23 @@ async fn ensure_artist(
 
 /// Find or create the album row for a track.
 ///
-/// Grouping key is (title, album-artist tag). The display artist starts as
-/// the album-artist tag, else the track artist; when a second distinct artist
-/// shows up under the same key the display is promoted to "Various Artists"
-/// so compilations without an explicit album-artist tag still group.
+/// Files are matched to an existing album with the same title, in order:
+///
+/// 1. **Album-artist tag** equal to the album's artist (tagged rips).
+///
+/// For files WITHOUT an album-artist tag — most rips only tag the track
+/// artist — the tag can't be the key, so:
+///
+/// 2. **Same folder.** A track sitting next to another track of an album with
+///    the same title belongs to it. If the track artists differ this is an
+///    untagged compilation and the display artist is promoted to
+///    "Various Artists".
+/// 3. **Same artist.** Same title and the same track artist elsewhere (e.g.
+///    `CD1/`, `CD2/` folders) is the same album.
+/// 4. A "Various Artists" row already promoted for this title.
+///
+/// Otherwise a new album is created. (Before this ordering, untagged files
+/// only ever matched an empty album-artist, so every track got its own album.)
 async fn resolve_album(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     title: &str,
@@ -425,6 +443,7 @@ async fn resolve_album(
     track_artist: Option<&str>,
     year: Option<u16>,
     artwork_hash: Option<&str>,
+    dir: Option<&str>,
 ) -> Result<i64, MusicError> {
     let display = album_artist.or(track_artist);
     let rows = sqlx::query("SELECT id, artist, year, artwork_hash FROM albums WHERE title = ?")
@@ -433,42 +452,65 @@ async fn resolve_album(
         .await
         .map_err(db::cvt)?;
 
-    let norm = |o: Option<String>| o.unwrap_or_default();
     struct AlbumChoice {
         id: i64,
         artist: Option<String>,
         year: Option<i64>,
         artwork_hash: Option<String>,
     }
+    let choice_of = |r: &sqlx::sqlite::SqliteRow| AlbumChoice {
+        id: r.get("id"),
+        artist: r.get("artist"),
+        year: r.get("year"),
+        artwork_hash: r.get("artwork_hash"),
+    };
+
     let mut chosen: Option<AlbumChoice> = None;
-    for r in &rows {
-        let id: i64 = r.get("id");
-        let artist: Option<String> = r.get("artist");
-        if norm(artist.clone()) == album_artist.unwrap_or("") {
-            chosen = Some(AlbumChoice {
-                id,
-                artist,
-                year: r.get("year"),
-                artwork_hash: r.get("artwork_hash"),
-            });
-            break;
-        }
-    }
-    if chosen.is_none() && album_artist.is_none() {
-        // Untagged compilation bucket: reuse the "Various Artists" row if one
-        // was already promoted for this title.
-        for r in &rows {
-            let artist: Option<String> = r.get("artist");
-            if artist.as_deref() == Some("Various Artists") {
-                let id: i64 = r.get("id");
-                chosen = Some(AlbumChoice {
-                    id,
-                    artist,
-                    year: r.get("year"),
-                    artwork_hash: r.get("artwork_hash"),
-                });
-                break;
+    if let Some(aa) = album_artist {
+        // 1. Album-artist tag.
+        chosen = rows
+            .iter()
+            .find(|r| r.get::<Option<String>, _>("artist").as_deref() == Some(aa))
+            .map(choice_of);
+    } else {
+        // 2. Same folder.
+        if let Some(dir) = dir {
+            let siblings = sqlx::query(
+                "SELECT DISTINCT a.id AS id, t.path AS path FROM albums a
+                 JOIN tracks t ON t.album_id = a.id WHERE a.title = ?",
+            )
+            .bind(title)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(db::cvt)?;
+            let same_dir = siblings
+                .iter()
+                .find(|r| parent_dir(&r.get::<String, _>("path")) == Some(dir))
+                .map(|r| r.get::<i64, _>("id"));
+            if let Some(id) = same_dir {
+                chosen = rows
+                    .iter()
+                    .find(|r| r.get::<i64, _>("id") == id)
+                    .map(choice_of);
             }
+        }
+        // 3. Same track artist.
+        if chosen.is_none() {
+            if let Some(artist) = track_artist {
+                chosen = rows
+                    .iter()
+                    .find(|r| r.get::<Option<String>, _>("artist").as_deref() == Some(artist))
+                    .map(choice_of);
+            }
+        }
+        // 4. An already-promoted "Various Artists" row.
+        if chosen.is_none() {
+            chosen = rows
+                .iter()
+                .find(|r| {
+                    r.get::<Option<String>, _>("artist").as_deref() == Some("Various Artists")
+                })
+                .map(choice_of);
         }
     }
 
@@ -513,6 +555,135 @@ async fn resolve_album(
     Ok(id)
 }
 
+/// Parent directory of a catalog path (as stored: a plain string).
+fn parent_dir(path: &str) -> Option<&str> {
+    Path::new(path).parent().and_then(|p| p.to_str())
+}
+
+/// Merge album rows that are really one album. Runs at the end of every scan,
+/// which repairs catalogs split by the old untagged-file grouping without
+/// re-reading a single file.
+///
+/// Two rows with the same title are the same album when they share the
+/// album artist, or when they have tracks in the same folder (an untagged
+/// compilation whose tracks were each given their own row). Merged rows keep
+/// the lowest id; tracks and artist links move over, missing year/artwork are
+/// filled in, and a folder with several artists becomes "Various Artists".
+/// Returns how many duplicate rows were removed.
+pub async fn consolidate_albums(pool: &SqlitePool) -> Result<u64, MusicError> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT a.id AS id, a.title AS title, a.artist AS artist, t.path AS path
+         FROM albums a JOIN tracks t ON t.album_id = a.id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db::cvt)?;
+
+    // Union-find over album ids.
+    let mut parent: HashMap<i64, i64> = HashMap::new();
+    fn find(p: &mut HashMap<i64, i64>, x: i64) -> i64 {
+        let px = *p.entry(x).or_insert(x);
+        if px == x {
+            return x;
+        }
+        let r = find(p, px);
+        p.insert(x, r);
+        r
+    }
+    let union = |p: &mut HashMap<i64, i64>, a: i64, b: i64| {
+        let (ra, rb) = (find(p, a), find(p, b));
+        if ra != rb {
+            // Lowest id survives.
+            p.insert(ra.max(rb), ra.min(rb));
+        }
+    };
+    let mut by_artist: HashMap<(String, String), i64> = HashMap::new();
+    let mut by_dir: HashMap<(String, String), i64> = HashMap::new();
+    for r in &rows {
+        let id: i64 = r.get("id");
+        let title: String = r.get("title");
+        let artist: Option<String> = r.get("artist");
+        let path: String = r.get("path");
+        find(&mut parent, id);
+        if let Some(a) = artist {
+            match by_artist.get(&(title.clone(), a.clone())) {
+                Some(&other) => union(&mut parent, id, other),
+                None => {
+                    by_artist.insert((title.clone(), a), id);
+                }
+            }
+        }
+        if let Some(d) = parent_dir(&path) {
+            match by_dir.get(&(title.clone(), d.to_string())) {
+                Some(&other) => union(&mut parent, id, other),
+                None => {
+                    by_dir.insert((title, d.to_string()), id);
+                }
+            }
+        }
+    }
+
+    let ids: Vec<i64> = parent.keys().copied().collect();
+    let mut groups: HashMap<i64, Vec<i64>> = HashMap::new();
+    for id in ids {
+        let root = find(&mut parent, id);
+        groups.entry(root).or_default().push(id);
+    }
+
+    let mut removed = 0u64;
+    let mut tx = pool.begin().await.map_err(db::cvt)?;
+    for (keep, members) in groups.into_iter().filter(|(_, m)| m.len() > 1) {
+        for &dup in members.iter().filter(|&&m| m != keep) {
+            sqlx::query("UPDATE tracks SET album_id = ? WHERE album_id = ?")
+                .bind(keep)
+                .bind(dup)
+                .execute(&mut *tx)
+                .await
+                .map_err(db::cvt)?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO album_artists (album_id, artist_id)
+                 SELECT ?, artist_id FROM album_artists WHERE album_id = ?",
+            )
+            .bind(keep)
+            .bind(dup)
+            .execute(&mut *tx)
+            .await
+            .map_err(db::cvt)?;
+            sqlx::query("DELETE FROM album_artists WHERE album_id = ?")
+                .bind(dup)
+                .execute(&mut *tx)
+                .await
+                .map_err(db::cvt)?;
+            sqlx::query(
+                "UPDATE albums SET
+                   year = COALESCE(year, (SELECT year FROM albums WHERE id = ?)),
+                   artwork_hash = COALESCE(artwork_hash, (SELECT artwork_hash FROM albums WHERE id = ?)),
+                   artist = CASE
+                     WHEN artist IS NULL THEN (SELECT artist FROM albums WHERE id = ?)
+                     WHEN artist = COALESCE((SELECT artist FROM albums WHERE id = ?), artist) THEN artist
+                     ELSE 'Various Artists' END
+                 WHERE id = ?",
+            )
+            .bind(dup)
+            .bind(dup)
+            .bind(dup)
+            .bind(dup)
+            .bind(keep)
+            .execute(&mut *tx)
+            .await
+            .map_err(db::cvt)?;
+            sqlx::query("DELETE FROM albums WHERE id = ?")
+                .bind(dup)
+                .execute(&mut *tx)
+                .await
+                .map_err(db::cvt)?;
+            removed += 1;
+        }
+    }
+    tx.commit().await.map_err(db::cvt)?;
+    Ok(removed)
+}
+
 async fn upsert_track(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     a: &FileAnalysis,
@@ -542,6 +713,7 @@ async fn upsert_track(
                 a.artist.as_deref(),
                 a.year,
                 artwork_hash.as_deref(),
+                parent_dir(&a.path),
             )
             .await?,
         ),
@@ -1420,5 +1592,517 @@ mod scan_tests {
             .get(0);
         assert_eq!(runs, 5);
         let _ = dir; // keep tempdir alive
+    }
+}
+
+/// Album grouping for files WITHOUT an album-artist tag (very common: most
+/// rips only tag the track artist). Regression: every such track used to get
+/// its own album row.
+#[cfg(test)]
+mod album_grouping_tests {
+    use super::fixtures::*;
+    use super::*;
+
+    fn spec<'a>(
+        dir: &'a str,
+        file: &'a str,
+        title: &'a str,
+        artist: &'a str,
+        album: &'a str,
+        album_artist: Option<&'a str>,
+        track_no: u32,
+    ) -> TrackSpec<'a> {
+        TrackSpec {
+            dir,
+            file,
+            codec: "flac",
+            title,
+            artist,
+            album,
+            album_artist,
+            track_no,
+            year: Some("2012"),
+            genre: None,
+            art: false,
+        }
+    }
+
+    async fn scan(specs: &[TrackSpec<'_>]) -> (SqlitePool, tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        for s in specs {
+            make_track(&lib, None, s);
+        }
+        let pool = db::open(&dir.path().join("test.db")).await.unwrap();
+        run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        (pool, dir, lib)
+    }
+
+    /// (title, artist, track count) of every album, ordered.
+    async fn albums(pool: &SqlitePool) -> Vec<(String, Option<String>, i64)> {
+        sqlx::query(
+            "SELECT a.title, a.artist, COUNT(t.id) AS n FROM albums a
+             LEFT JOIN tracks t ON t.album_id = a.id
+             GROUP BY a.id ORDER BY a.title, a.artist, a.id",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get("title"), r.get("artist"), r.get("n")))
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn untagged_album_with_one_artist_is_one_album() {
+        // "Come Away With Me": 4 tracks, track-artist tag only.
+        let (pool, _d, _l) = scan(&[
+            spec(
+                "Norah",
+                "01.flac",
+                "Don't Know Why",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                1,
+            ),
+            spec(
+                "Norah",
+                "02.flac",
+                "Seven Years",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                2,
+            ),
+            spec(
+                "Norah",
+                "03.flac",
+                "Cold Cold Heart",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                3,
+            ),
+            spec(
+                "Norah",
+                "04.flac",
+                "Feelin' The Same Way",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                4,
+            ),
+        ])
+        .await;
+        assert_eq!(
+            albums(&pool).await,
+            vec![("Come Away With Me".into(), Some("Norah Jones".into()), 4)]
+        );
+    }
+
+    #[tokio::test]
+    async fn untagged_compilation_in_one_folder_is_one_various_artists_album() {
+        let (pool, _d, _l) = scan(&[
+            spec(
+                "Comp",
+                "01.flac",
+                "A",
+                "Artist One",
+                "Best of 2012",
+                None,
+                1,
+            ),
+            spec(
+                "Comp",
+                "02.flac",
+                "B",
+                "Artist Two",
+                "Best of 2012",
+                None,
+                2,
+            ),
+            spec(
+                "Comp",
+                "03.flac",
+                "C",
+                "Artist Three",
+                "Best of 2012",
+                None,
+                3,
+            ),
+        ])
+        .await;
+        assert_eq!(
+            albums(&pool).await,
+            vec![("Best of 2012".into(), Some("Various Artists".into()), 3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn same_title_by_different_artists_in_different_folders_stays_separate() {
+        let (pool, _d, _l) = scan(&[
+            spec("X", "01.flac", "One", "Artist X", "Greatest Hits", None, 1),
+            spec("X", "02.flac", "Two", "Artist X", "Greatest Hits", None, 2),
+            spec("Y", "01.flac", "One", "Artist Y", "Greatest Hits", None, 1),
+        ])
+        .await;
+        assert_eq!(
+            albums(&pool).await,
+            vec![
+                ("Greatest Hits".into(), Some("Artist X".into()), 2),
+                ("Greatest Hits".into(), Some("Artist Y".into()), 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn same_artist_and_title_across_folders_is_one_album() {
+        // e.g. a two-disc rip in CD1/ and CD2/.
+        let (pool, _d, _l) = scan(&[
+            spec("Album/CD1", "01.flac", "One", "Band", "Double", None, 1),
+            spec("Album/CD2", "01.flac", "Two", "Band", "Double", None, 1),
+        ])
+        .await;
+        assert_eq!(
+            albums(&pool).await,
+            vec![("Double".into(), Some("Band".into()), 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tagged_and_untagged_files_of_one_album_group_together() {
+        let (pool, _d, _l) = scan(&[
+            spec(
+                "Mixed",
+                "01.flac",
+                "One",
+                "Band",
+                "Mixed Tags",
+                Some("Band"),
+                1,
+            ),
+            spec("Mixed", "02.flac", "Two", "Band", "Mixed Tags", None, 2),
+            spec(
+                "Mixed",
+                "03.flac",
+                "Three",
+                "Band",
+                "Mixed Tags",
+                Some("Band"),
+                3,
+            ),
+        ])
+        .await;
+        assert_eq!(
+            albums(&pool).await,
+            vec![("Mixed Tags".into(), Some("Band".into()), 3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tagged_albums_still_group_by_album_artist() {
+        let (pool, _d, _l) = scan(&[
+            spec(
+                "V",
+                "01.flac",
+                "A",
+                "Solo A",
+                "Sampler",
+                Some("Various Artists"),
+                1,
+            ),
+            spec(
+                "V",
+                "02.flac",
+                "B",
+                "Solo B",
+                "Sampler",
+                Some("Various Artists"),
+                2,
+            ),
+        ])
+        .await;
+        assert_eq!(
+            albums(&pool).await,
+            vec![("Sampler".into(), Some("Various Artists".into()), 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn rescanning_does_not_split_or_duplicate_albums() {
+        let (pool, _d, lib) = scan(&[
+            spec(
+                "N",
+                "01.flac",
+                "One",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                1,
+            ),
+            spec(
+                "N",
+                "02.flac",
+                "Two",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                2,
+            ),
+        ])
+        .await;
+        for _ in 0..2 {
+            run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            albums(&pool).await,
+            vec![("Come Away With Me".into(), Some("Norah Jones".into()), 2)]
+        );
+        assert_eq!(count(&pool, "tracks").await, 2);
+    }
+
+    /// Recreate what the old scanner produced: one album row per track.
+    async fn split_into_one_album_per_track(pool: &SqlitePool, title: &str) {
+        let ids: Vec<i64> = sqlx::query("SELECT id FROM tracks WHERE album = ? ORDER BY id")
+            .bind(title)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        for track_id in ids.into_iter().skip(1) {
+            let old: i64 = sqlx::query("SELECT album_id FROM tracks WHERE id = ?")
+                .bind(track_id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+                .get(0);
+            let new_id: i64 = sqlx::query(
+                "INSERT INTO albums (title, artist, year, artwork_hash)
+                 SELECT title, artist, year, artwork_hash FROM albums WHERE id = ? RETURNING id",
+            )
+            .bind(old)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .get(0);
+            sqlx::query("UPDATE tracks SET album_id = ? WHERE id = ?")
+                .bind(new_id)
+                .bind(track_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT OR IGNORE INTO album_artists (album_id, artist_id)
+                 SELECT ?, artist_id FROM album_artists WHERE album_id = ?",
+            )
+            .bind(new_id)
+            .bind(old)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn consolidate_repairs_an_already_split_catalog() {
+        let (pool, _d, _l) = scan(&[
+            spec(
+                "N",
+                "01.flac",
+                "One",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                1,
+            ),
+            spec(
+                "N",
+                "02.flac",
+                "Two",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                2,
+            ),
+            spec(
+                "N",
+                "03.flac",
+                "Three",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                3,
+            ),
+            spec(
+                "Other",
+                "01.flac",
+                "Solo",
+                "Someone Else",
+                "Another Album",
+                None,
+                1,
+            ),
+        ])
+        .await;
+        split_into_one_album_per_track(&pool, "Come Away With Me").await;
+        assert_eq!(
+            count(&pool, "albums").await,
+            4,
+            "precondition: split like the bug"
+        );
+
+        let removed = consolidate_albums(&pool).await.unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            albums(&pool).await,
+            vec![
+                ("Another Album".into(), Some("Someone Else".into()), 1),
+                ("Come Away With Me".into(), Some("Norah Jones".into()), 3),
+            ]
+        );
+        // Every track still has a valid album, and artist links survived.
+        let orphans: i64 = sqlx::query(
+            "SELECT COUNT(*) FROM tracks t LEFT JOIN albums a ON a.id = t.album_id WHERE a.id IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get(0);
+        assert_eq!(orphans, 0);
+        let links: i64 = sqlx::query(
+            "SELECT COUNT(*) FROM album_artists aa JOIN artists ar ON ar.id = aa.artist_id
+             JOIN albums a ON a.id = aa.album_id WHERE a.title = 'Come Away With Me' AND ar.name = 'Norah Jones'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get(0);
+        assert_eq!(links, 1);
+        // Idempotent.
+        assert_eq!(consolidate_albums(&pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_scan_repairs_a_split_catalog_without_touching_any_file() {
+        let (pool, _d, lib) = scan(&[
+            spec(
+                "N",
+                "01.flac",
+                "One",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                1,
+            ),
+            spec(
+                "N",
+                "02.flac",
+                "Two",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                2,
+            ),
+        ])
+        .await;
+        split_into_one_album_per_track(&pool, "Come Away With Me").await;
+        assert_eq!(count(&pool, "albums").await, 2);
+        let report = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            report.files_updated + report.files_added,
+            0,
+            "nothing changed on disk"
+        );
+        assert_eq!(
+            albums(&pool).await,
+            vec![("Come Away With Me".into(), Some("Norah Jones".into()), 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn consolidate_merges_a_split_untagged_compilation_into_various_artists() {
+        let (pool, _d, _l) = scan(&[
+            spec("Comp", "01.flac", "A", "Artist One", "Mix", None, 1),
+            spec("Comp", "02.flac", "B", "Artist Two", "Mix", None, 2),
+        ])
+        .await;
+        split_into_one_album_per_track(&pool, "Mix").await;
+        consolidate_albums(&pool).await.unwrap();
+        assert_eq!(
+            albums(&pool).await,
+            vec![("Mix".into(), Some("Various Artists".into()), 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn consolidate_keeps_the_year_and_artwork_that_only_a_duplicate_had() {
+        let (pool, _d, _l) = scan(&[
+            spec(
+                "N",
+                "01.flac",
+                "One",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                1,
+            ),
+            spec(
+                "N",
+                "02.flac",
+                "Two",
+                "Norah Jones",
+                "Come Away With Me",
+                None,
+                2,
+            ),
+        ])
+        .await;
+        split_into_one_album_per_track(&pool, "Come Away With Me").await;
+        // Only the later duplicate has artwork; the lowest id survives.
+        sqlx::query(
+            "INSERT INTO artwork (hash, mime, bytes) VALUES ('abc123', 'image/png', x'00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE albums SET artwork_hash = NULL, year = NULL WHERE id = (SELECT MIN(id) FROM albums)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE albums SET artwork_hash = 'abc123', year = 2012 WHERE id = (SELECT MAX(id) FROM albums)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        consolidate_albums(&pool).await.unwrap();
+        let r = sqlx::query("SELECT year, artwork_hash FROM albums")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(r.get::<Option<i64>, _>("year"), Some(2012));
+        assert_eq!(
+            r.get::<Option<String>, _>("artwork_hash").as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[tokio::test]
+    async fn consolidate_never_merges_different_albums_that_share_only_a_title_or_artist() {
+        let (pool, _d, _l) = scan(&[
+            spec("X", "01.flac", "One", "Artist X", "Greatest Hits", None, 1),
+            spec("Y", "01.flac", "One", "Artist Y", "Greatest Hits", None, 1), // same title, other artist + folder
+            spec("X", "02.flac", "Live", "Artist X", "Live at Home", None, 2), // same artist, other title
+        ])
+        .await;
+        assert_eq!(consolidate_albums(&pool).await.unwrap(), 0);
+        assert_eq!(count(&pool, "albums").await, 3);
     }
 }
