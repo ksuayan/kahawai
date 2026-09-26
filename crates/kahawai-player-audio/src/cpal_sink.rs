@@ -28,6 +28,12 @@ use ringbuf::{traits::*, HeapRb};
 const RING_SECONDS: u32 = 1;
 const RING_MAX_RATE: u32 = 192_000;
 const RING_MAX_CHANNELS: usize = 8;
+/// How far ahead of the speakers `write()` lets the engine run, in ms of
+/// audio. The ring is *allocated* for the worst case (192 kHz x 8 ch), which
+/// is ~17 s at 44.1 kHz stereo — filling that far ahead made volume changes
+/// land many seconds late and put the playhead far ahead of what was heard.
+/// Keep only a short cushion queued; `write()` blocks (backpressure) beyond it.
+const TARGET_BUFFER_MS: usize = 200;
 /// How long `write()` waits for the device to drain before giving up.
 const WRITE_DEADLINE: Duration = Duration::from_secs(2);
 
@@ -151,6 +157,19 @@ impl AudioSink for CpalSink {
             .ok_or_else(|| MusicError::Audio("sink not open".into()))?;
         let mut rest = &chunk.frames[..];
         let deadline = Instant::now() + WRITE_DEADLINE;
+        // Backpressure: wait until the queued audio is down to the target.
+        let target = self.stream_rate.unwrap_or(48_000) as usize
+            * self.channels.max(1) as usize
+            * TARGET_BUFFER_MS
+            / 1000;
+        while prod.occupied_len() > target {
+            if Instant::now() >= deadline {
+                return Err(MusicError::Audio(
+                    "output ring full: device not draining".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
         while !rest.is_empty() {
             let n = prod.push_slice(rest);
             rest = &rest[n..];
@@ -206,6 +225,32 @@ impl AudioSink for CpalSink {
 
     fn select_output_path(&mut self, _path: OutputPath) {
         // This sink *is* the PCM path; the router only sends PCM here.
+    }
+
+    fn buffered_frames(&self) -> u64 {
+        match (&self.producer, self.channels) {
+            (Some(p), ch) if ch > 0 => (p.occupied_len() / ch as usize) as u64,
+            _ => 0,
+        }
+    }
+
+    fn drain(&mut self) {
+        // Only a running stream empties its ring; a paused/stopped one
+        // would never drain, so don't wait on it.
+        if self.state != SinkState::Playing {
+            return;
+        }
+        let rate = self.stream_rate.unwrap_or(48_000).max(1) as u64;
+        let ch = self.channels.max(1) as usize;
+        let Some(p) = self.producer.as_ref() else {
+            return;
+        };
+        // Bounded by the audio that is actually queued, plus slack.
+        let queued_ms = (p.occupied_len() / ch) as u64 * 1000 / rate;
+        let deadline = Instant::now() + Duration::from_millis(queued_ms + 500);
+        while p.occupied_len() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn underrun_count(&self) -> u64 {

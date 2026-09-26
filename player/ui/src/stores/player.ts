@@ -32,9 +32,31 @@ export const usePlayerStore = defineStore("player", () => {
   const tick = ref(0);
 
   let timer: number | undefined;
+  /**
+   * A scrub the engine has not confirmed yet. Events already in flight when
+   * the user releases the slider still carry the OLD playhead; without this
+   * the bar would jump back for a moment (or for the whole download if the
+   * seek needs a fresh stream).
+   */
+  let pendingSeek: { ms: number; until: number } | null = null;
+  const SEEK_GUARD_MS = 5000;
+
+  function applySeekGuard(s: PlayerState): PlayerState {
+    if (!pendingSeek) return s;
+    if (Date.now() > pendingSeek.until) {
+      pendingSeek = null;
+      return s;
+    }
+    if (Math.abs(s.position_ms - pendingSeek.ms) <= 1500) {
+      pendingSeek = null; // the engine caught up with the target
+      return s;
+    }
+    return { ...s, position_ms: pendingSeek.ms };
+  }
 
   async function init(): Promise<void> {
-    await onPlayerState((s) => {
+    await onPlayerState((incoming) => {
+      const s = applySeekGuard(incoming);
       raw.value = s;
       lastEventAt.value = Date.now();
       connected.value = true;
@@ -87,10 +109,14 @@ export const usePlayerStore = defineStore("player", () => {
     // Optimistic local update so the bar doesn't snap back mid-drag.
     if (raw.value) raw.value = { ...raw.value, position_ms: Math.round(ms) };
     lastEventAt.value = Date.now();
+    pendingSeek = { ms: Math.round(ms), until: Date.now() + SEEK_GUARD_MS };
     await seekMs(ms);
   }
 
   async function changeVolume(v: number): Promise<void> {
+    // Optimistic: the slider must not wait for the round trip (or be
+    // yanked back by an event that predates this change).
+    if (raw.value) raw.value = { ...raw.value, volume: v };
     await setVolume(v);
   }
 

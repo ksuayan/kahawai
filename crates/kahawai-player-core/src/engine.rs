@@ -285,9 +285,15 @@ impl DopPlayback {
 }
 
 impl ActiveStream {
-    fn position_ms(&self) -> u64 {
+    /// Playhead in ms. `buffered` = frames the sink has accepted but not
+    /// played yet (PCM path): the position is what is audible, not what has
+    /// merely been decoded and queued.
+    fn position_ms(&self, buffered: u64) -> u64 {
         match self {
-            ActiveStream::Pcm(a) => (a.base_frames + a.pumped_frames) * 1000 / a.sink_rate as u64,
+            ActiveStream::Pcm(a) => {
+                let played = a.pumped_frames.saturating_sub(buffered);
+                (a.base_frames + played) * 1000 / a.sink_rate as u64
+            }
             ActiveStream::Dop(a) => {
                 (a.base_frames + a.pumped_frames) * 1000 / a.spec.dop_rate_hz as u64
             }
@@ -554,7 +560,7 @@ impl Player {
     /// User-initiated prev: restart the track when a few seconds in,
     /// otherwise go back.
     pub fn prev(&mut self) {
-        let pos = self.active.as_ref().map(|a| a.position_ms()).unwrap_or(0);
+        let pos = self.position_ms();
         if pos > PREV_RESTART_MS {
             self.seek_ms(0);
             return;
@@ -863,10 +869,11 @@ impl Player {
         // DSP follows the stream rate.
         self.eq.set_sample_rate(spec.sample_rate);
 
-        let base_frames = match (seek, passthrough_seek) {
-            (Some(ms), false) => ms * sink_rate as u64 / 1000,
-            _ => 0,
-        };
+        // The playhead starts at the seek target for *both* seek styles.
+        // (Passthrough skips decoded frames without counting them as
+        // pumped, so leaving the base at 0 restarted the clock at 0:00
+        // after every scrub.)
+        let base_frames = seek.unwrap_or(0) * sink_rate as u64 / 1000;
         let skip_frames = if passthrough_seek {
             seek.unwrap_or(0) * spec.sample_rate as u64 / 1000
         } else {
@@ -1060,6 +1067,9 @@ impl Player {
     /// The response is fully consumed: advance past the tracks whose audio
     /// actually played and open the next one.
     fn on_stream_end(&mut self) {
+        // Let the tail of the finished stream play out; opening the next
+        // track (or stopping) discards whatever is still buffered.
+        self.sink.drain();
         let consumed = self
             .active
             .as_ref()
@@ -1088,13 +1098,22 @@ impl Player {
 
     // -- introspection -----------------------------------------------------
 
+    /// Audible playhead of the active stream (0 when idle).
+    fn position_ms(&self) -> u64 {
+        let buffered = self.sink.buffered_frames();
+        self.active
+            .as_ref()
+            .map(|a| a.position_ms(buffered))
+            .unwrap_or(0)
+    }
+
     pub fn snapshot(&self) -> PlayerSnapshot {
         let (track, position_ms, duration_ms, format, chain) = match &self.active {
             Some(a) => {
                 let t = a.display_track().clone();
                 (
                     Some(t.clone()),
-                    a.position_ms(),
+                    self.position_ms(),
                     t.duration_ms,
                     Some(a.format_used()),
                     a.chain().clone(),
@@ -1534,13 +1553,33 @@ fn playback_loop(
 }
 
 /// UI-visible snapshot identity minus the ever-moving playhead.
-fn snapshot_key(s: &PlayerSnapshot) -> (PlayerStatus, Option<i64>, Vec<i64>, RepeatMode, bool) {
+fn snapshot_key(
+    s: &PlayerSnapshot,
+) -> (
+    PlayerStatus,
+    Option<i64>,
+    Vec<i64>,
+    RepeatMode,
+    bool,
+    u32,
+    u64,
+) {
+    // Volume changes must reach the UI even while paused/stopped, and a
+    // seek while paused moves the (otherwise static) playhead. While
+    // playing the position rides the 4 Hz throttle instead.
+    let idle_position = if s.status == PlayerStatus::Playing {
+        0
+    } else {
+        s.position_ms
+    };
     (
         s.status,
         s.current_id,
         s.queue_ids.clone(),
         s.repeat,
         s.shuffle,
+        s.volume.to_bits(),
+        idle_position,
     )
 }
 
@@ -1575,5 +1614,57 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
             // The transport reads the shared URL lock directly; nothing to do.
         }
         EngineCommand::Shutdown => {}
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    fn snap() -> PlayerSnapshot {
+        PlayerSnapshot::default()
+    }
+
+    #[test]
+    fn volume_change_changes_the_key_in_every_state() {
+        for status in [
+            PlayerStatus::Playing,
+            PlayerStatus::Paused,
+            PlayerStatus::Stopped,
+        ] {
+            let a = PlayerSnapshot { status, ..snap() };
+            let b = PlayerSnapshot {
+                status,
+                volume: 0.3,
+                ..snap()
+            };
+            assert_ne!(snapshot_key(&a), snapshot_key(&b), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn playhead_moves_the_key_only_when_not_playing() {
+        let moved = |status| {
+            let a = PlayerSnapshot {
+                status,
+                position_ms: 100,
+                ..snap()
+            };
+            let b = PlayerSnapshot {
+                status,
+                position_ms: 900,
+                ..snap()
+            };
+            snapshot_key(&a) != snapshot_key(&b)
+        };
+        assert!(
+            !moved(PlayerStatus::Playing),
+            "playing rides the 4 Hz throttle"
+        );
+        assert!(
+            moved(PlayerStatus::Paused),
+            "a paused seek must reach the UI"
+        );
+        assert!(moved(PlayerStatus::Stopped));
     }
 }

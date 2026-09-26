@@ -38,3 +38,7 @@ node_modules/
 
 # macOS
 .DS_Store
+
+# start-server.sh runtime files
+/.kahawai-server.pid
+/kahawai-server.log

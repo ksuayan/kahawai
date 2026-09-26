@@ -85,6 +85,19 @@ pub trait AudioSink: Send {
         ))
     }
 
+    /// PCM frames (per channel, at the sink's output rate) accepted by
+    /// `write` but not yet played. The engine subtracts this from the
+    /// frames it has written so the displayed position tracks what is
+    /// audible, not what is merely decoded. 0 = unknown/none.
+    fn buffered_frames(&self) -> u64 {
+        0
+    }
+
+    /// Block (bounded) until everything already written has been played.
+    /// Called at a natural end of stream, before the next track's `open`
+    /// discards the device buffer, so the tail of a track is never cut.
+    fn drain(&mut self) {}
+
     /// Audio-callback underruns since the sink was created (0 for sinks
     /// without a real-time callback). Surfaced for diagnostics.
     fn underrun_count(&self) -> u64 {
@@ -164,6 +177,10 @@ pub struct VecSink {
     state: SinkState,
     /// For resample-seam tests: pretend the device wants this rate.
     pub demand_rate: Option<u32>,
+    /// Test knob: what `buffered_frames()` reports (audio "queued, not yet played").
+    pub buffered: u64,
+    /// How many times the engine called `drain()` (natural end of stream).
+    pub drains: u32,
 }
 
 impl VecSink {
@@ -220,6 +237,14 @@ impl AudioSink for VecSink {
 
     fn preferred_sample_rate(&self) -> Option<u32> {
         self.demand_rate
+    }
+
+    fn buffered_frames(&self) -> u64 {
+        self.buffered
+    }
+
+    fn drain(&mut self) {
+        self.drains += 1;
     }
 }
 
@@ -337,6 +362,24 @@ impl AudioSink for SinkRouter {
         match self.dop.as_mut() {
             Some(d) => d.write_dop(bytes),
             None => Err(MusicError::BadRequest("no DoP sink installed".into())),
+        }
+    }
+
+    fn buffered_frames(&self) -> u64 {
+        match self.active {
+            OutputPath::Pcm => self.pcm.buffered_frames(),
+            OutputPath::Dop => 0,
+        }
+    }
+
+    fn drain(&mut self) {
+        match self.active {
+            OutputPath::Pcm => self.pcm.drain(),
+            OutputPath::Dop => {
+                if let Some(d) = self.dop.as_mut() {
+                    d.drain();
+                }
+            }
         }
     }
 

@@ -116,6 +116,12 @@ impl AudioSink for SharedSink {
     fn state(&self) -> kahawai_player_core::SinkState {
         self.0.lock().unwrap().state()
     }
+    fn buffered_frames(&self) -> u64 {
+        self.0.lock().unwrap().buffered_frames()
+    }
+    fn drain(&mut self) {
+        self.0.lock().unwrap().drain()
+    }
 }
 
 /// Stub transport emulating the server:
@@ -425,6 +431,19 @@ fn passthrough_seek_skips_decoded_frames() {
         assert_eq!(last.1.seek_ms, None);
     }
 
+    // The clock must start at the target, not at 0:00, both right away
+    // and once the skipped frames have been consumed.
+    assert_eq!(h.player.snapshot().position_ms, 1000);
+    // ~11 pumps skip the first second; the next few play from 1.0 s.
+    for _ in 0..15 {
+        h.player.pump();
+    }
+    let pos = h.player.snapshot().position_ms;
+    assert!(
+        pos > 1000 && pos <= 2000,
+        "playhead continues from 1.0 s: {pos}"
+    );
+
     h.pump_until_done(100);
     let s = h.samples();
     let got = (s[0] * 32768.0).round() as i16;
@@ -567,6 +586,60 @@ fn volume_scales_samples() {
     assert!(!s.is_empty());
     let peak = s.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
     assert!((peak - 0.35).abs() < 0.02, "peak {peak} ≈ 0.7 * 0.5");
+}
+
+#[test]
+fn position_is_what_is_audible_not_what_is_queued() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    for _ in 0..30 {
+        h.player.pump();
+    }
+    let written = h.player.snapshot().position_ms;
+    assert!(written > 1000, "pumped a good second of audio: {written}");
+
+    // 0.5 s of what we wrote is still sitting in the device buffer.
+    h.sink.0.lock().unwrap().buffered = (RATE / 2) as u64;
+    let audible = h.player.snapshot().position_ms;
+    assert_eq!(audible, written - 500);
+
+    // More buffered than written (right after a seek) clamps at the base.
+    h.sink.0.lock().unwrap().buffered = u64::MAX / 4;
+    assert_eq!(h.player.snapshot().position_ms, 0);
+}
+
+#[test]
+fn natural_end_of_stream_drains_the_sink_before_moving_on() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.stub.add(2, &[(660.0, 4410)]);
+    h.player.play_queue(
+        vec![
+            track(1, AudioFormat::Wav, 100),
+            track(2, AudioFormat::Wav, 100),
+        ],
+        0,
+    );
+    h.pump_until_done(200);
+    // One drain per stream end: the tail of each track is played out
+    // before the next open()/stop() discards the device buffer.
+    assert_eq!(h.sink.0.lock().unwrap().drains, 2);
+}
+
+#[test]
+fn volume_and_paused_seek_are_visible_in_the_snapshot() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    h.player.pause();
+    h.player.set_volume(0.25);
+    assert_eq!(h.player.snapshot().volume, 0.25);
+    h.player.seek_ms(2000);
+    assert_eq!(h.player.snapshot().position_ms, 2000);
+    assert_eq!(h.player.status(), PlayerStatus::Paused);
 }
 
 // ---------------------------------------------------------------------------

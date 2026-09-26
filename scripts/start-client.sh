@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Launch Kahawai Player once the server is up.
 #
-#   scripts/start.sh                 # use the server URL saved by setup.sh / the app
-#   scripts/start.sh --url http://192.168.1.10:8080   # also saved into the app's settings
-#   scripts/start.sh --wait 60       # wait up to 60s for the server (default 30)
-#   scripts/start.sh --dev           # run `cargo tauri dev` instead of a built app
+#   scripts/start-client.sh                 # use the server URL saved by setup.sh / the app
+#   scripts/start-client.sh --url http://192.168.1.10:8080   # also saved into the app's settings
+#   scripts/start-client.sh --wait 60       # wait up to 60s for the server (default 30)
+#   scripts/start-client.sh --dev           # run `cargo tauri dev` instead of a built app
 #
 # Picks the first app it finds: dist/Kahawai Player.app (universal build),
 # then a per-arch bundle under player/src-tauri/target. Falls back to dev mode.

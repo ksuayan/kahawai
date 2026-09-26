@@ -273,9 +273,11 @@ fn stop(app: AppHandle, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn seek_ms(app: AppHandle, state: State<'_, AppState>, ms: u64) {
+fn seek_ms(state: State<'_, AppState>, ms: u64) {
+    // No `emit_state` here: the snapshot is refreshed by the playback
+    // thread *after* it applies the command, so emitting now would send the
+    // pre-seek position. The thread emits the real state itself.
     state.engine.seek_ms(ms);
-    emit_state(&app, &state.engine);
 }
 
 #[tauri::command]
@@ -320,9 +322,10 @@ fn set_track_format(
 }
 
 #[tauri::command]
-fn set_volume(app: AppHandle, state: State<'_, AppState>, v: f32) {
+fn set_volume(state: State<'_, AppState>, v: f32) {
+    // See `seek_ms`: the playback thread emits the updated snapshot; an
+    // immediate emit here carried the OLD volume and snapped the slider back.
     state.engine.set_volume(v.clamp(0.0, 1.0));
-    emit_state(&app, &state.engine);
 }
 
 // ---------------------------------------------------------------------------

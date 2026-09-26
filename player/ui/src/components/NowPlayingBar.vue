@@ -45,14 +45,19 @@ const volumePct = ref(100);
 onMounted(() => {
   volumePct.value = Math.round(player.volume * 100);
 });
+// Events keep arriving while the slider is being dragged; don't let one
+// that predates the latest input pull the thumb back.
+let volumeTouchedAt = 0;
 watch(
   () => player.volume,
   (v) => {
+    if (Date.now() - volumeTouchedAt < 600) return;
     volumePct.value = Math.round(v * 100);
   },
 );
 
 function onVolume(e: Event): void {
+  volumeTouchedAt = Date.now();
   const v = Number((e.target as HTMLInputElement).value) / 100;
   volumePct.value = Number((e.target as HTMLInputElement).value);
   void player.changeVolume(v);
