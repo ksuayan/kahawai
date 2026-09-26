@@ -75,16 +75,16 @@ menus, dialogs, text fields).
 
 ## Architecture boundary
 
-```
-Vue UI  ──invoke──▶  Tauri commands (player/src-tauri/src/main.rs)
-                         │
-                         ▼
-                  EngineController  (kahawai-player-core, dedicated playback thread)
-                    │          │
-              HttpTransport   SinkRouter
-                    │          ├─▶ CpalSink (shared-mode PCM, all OSes)
-              music server    └─▶ CoreAudioDopSink (macOS exclusive hog mode)
-                                   / StubDopSink (elsewhere: no DoP)
+```mermaid
+flowchart TD
+    ui["Vue UI"] -->|invoke| cmds["Tauri commands<br/>player/src-tauri/src/main.rs"]
+    cmds --> engine["<b>EngineController</b><br/>kahawai-player-core, dedicated playback thread"]
+    engine --> transport["HttpTransport"]
+    engine --> router["SinkRouter"]
+    transport --> server[("music server")]
+    router --> cpal["<b>CpalSink</b><br/>shared-mode PCM, all OSes"]
+    router --> dop["<b>CoreAudioDopSink</b><br/>macOS exclusive hog mode"]
+    router --> stub["<b>StubDopSink</b><br/>elsewhere: no DoP"]
 ```
 
 - The **frontend never touches the network for playback**. It invokes Tauri

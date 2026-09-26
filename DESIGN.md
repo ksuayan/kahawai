@@ -81,29 +81,15 @@ gets flagged in review.
 
 ### 2.1 Component map
 
-```
-music_dirs (your files, read-only)
-        │
-        ▼
-┌─────────────┐     ┌──────────────┐     ┌────────────────┐
-│   Scanner   │────▶│    Catalog   │◀────│   Browse API   │
-│ walkdir +   │     │ SQLite (WAL) │     │ albums/artists │
-│ blake3 +    │     │ tracks,      │     │ tracks/search/ │
-│ lofty       │     │ albums,      │     │ artwork/play-  │
-└─────────────┘     │ artists,    │     │ lists          │
-                    │ playlists,  │     └────────────────┘
-                    │ jobs, FTS5  │
-                    └──────┬───────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        ▼                  ▼                  ▼
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│  /stream/:id │   │ Transcode    │   │  DoP packer  │
-│  Range, HEAD │   │ pipeline     │   │  DSD→WAV     │
-└──────────────┘   │ symphonia→   │   │  0x05/0xFA    │
-                   │ flacenc/    │   └──────────────┘
-                   │ opus/lame   │
-                   └──────────────┘
+```mermaid
+flowchart TD
+    files[/"music_dirs<br/>(your files, read-only)"/] --> scanner
+    scanner["<b>Scanner</b><br/>walkdir + blake3 + lofty"] --> catalog
+    api["<b>Browse API</b><br/>albums / artists / tracks / search /<br/>artwork / playlists"] --> catalog
+    catalog[("<b>Catalog</b><br/>SQLite (WAL)<br/>tracks, albums, artists,<br/>playlists, jobs, FTS5")]
+    catalog --> stream["<b>/stream/:id</b><br/>Range, HEAD"]
+    catalog --> transcode["<b>Transcode pipeline</b><br/>symphonia → flacenc / opus / lame"]
+    catalog --> dop["<b>DoP packer</b><br/>DSD → WAV<br/>0x05 / 0xFA markers"]
 ```
 
 - **Scanner** (§3.1 of the build record): two-phase walk (count, then scan),
@@ -175,33 +161,17 @@ internet exposure, ever, in v1.
 
 ### 3.1 Layer map
 
-```
-┌─────────────────────────────────────────────────┐
-│ Vue 3 + Pinia (ui/)                             │
-│ views · stores (library/player/queue/playlists/ │
-│ jobs/settings) · direct fetch for browse APIs    │
-└───────────────┬─────────────────────────────────┘
-                │ Tauri invoke / events
-┌───────────────▼─────────────────────────────────┐
-│ src-tauri/ — thin shell: 30+ commands, engine   │
-│ ownership, server-URL + prefs persistence       │
-└───────────────┬─────────────────────────────────┘
-                │
-┌───────────────▼─────────────────────────────────┐
-│ kahawai-player-core — playback engine (no Tauri, no OS) │
-│ Player state machine · HttpTransport (ureq) ·   │
-│ symphonia decode · DSP (EQ → loudness → volume) │
-│ queue/shuffle/repeat · format resolution        │
-└───────┬─────────────────────────────┬───────────┘
-        │                             │
-┌───────▼──────────┐        ┌─────────▼───────────┐
-│ kahawai-player-api       │        │ kahawai-player-audio        │
-│ reqwest client   │        │ CpalSink (PCM,      │
-│ for browse APIs  │        │ shared mode, all    │
-│ used by shell    │        │ OSes) ·             │
-│                  │        │ CoreAudioDopSink    │
-│                  │        │ (macOS hog-mode)    │
-└──────────────────┘        └─────────────────────┘
+```mermaid
+flowchart TD
+    ui["<b>Vue 3 + Pinia</b> (ui/)<br/>views · stores (library / player / queue / playlists / jobs / settings)<br/>direct fetch for browse APIs"]
+    shell["<b>src-tauri/</b> — thin shell<br/>30+ commands, engine ownership,<br/>server-URL + prefs persistence"]
+    core["<b>kahawai-player-core</b><br/>Player state machine · HttpTransport (ureq) · symphonia decode<br/>DSP (EQ → loudness → volume) · queue / shuffle / repeat · format resolution"]
+    api["<b>kahawai-player-api</b><br/>reqwest client for the browse APIs"]
+    audio["<b>kahawai-player-audio</b><br/>CpalSink (PCM, shared mode, all OSes) ·<br/>CoreAudioDopSink (macOS hog mode)"]
+    ui -->|"Tauri invoke / events"| shell
+    shell --> core
+    shell -->|"browse calls"| api
+    core --> audio
 ```
 
 The split is deliberate: **the webview never streams audio** — playback

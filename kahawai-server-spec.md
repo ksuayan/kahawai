@@ -17,14 +17,11 @@ internet-scale concurrency, DSP/plugin hosting on the client (v2 spike).
 
 ## 1. Architecture
 
-```
-  ┌─────────────┐      HTTP/Range       ┌──────────────────┐
-  │  VLC (v1)   │◄────────────────────►│                  │
-  └─────────────┘      REST + stream   │  Rust server     │
-  ┌─────────────┐                      │  (axum + tokio)  │
-  │ Tauri client│◄────────────────────►│                  │
-  │ (Rust+Vue)  │   REST + stream      │  SQLite catalog  │
-  └─────────────┘                      └──────────────────┘
+```mermaid
+flowchart LR
+    vlc["VLC (v1)"] <-->|"HTTP / Range"| server
+    client["Tauri client<br/>(Rust + Vue)"] <-->|"REST + stream"| server
+    server["<b>Rust server</b><br/>(axum + tokio)<br/>SQLite catalog"]
 ```
 
 One binary, one SQLite DB, one config file. This is a genuine async-I/O
