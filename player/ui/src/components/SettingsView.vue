@@ -83,7 +83,7 @@ function formatLabel(f: StreamFormat): string {
 }
 
 const formatOptions: UiSelectOption[] = [
-  { value: null, label: "Auto (server default)" },
+  { value: null, label: "Auto (recommended)" },
   ...STREAM_FORMATS.map((f) => ({ value: f, label: formatLabel(f) })),
 ];
 
@@ -214,10 +214,11 @@ const dopRates = computed(() =>
       </p>
     </SettingsSection>
 
-    <SettingsSection title="Default stream format">
+    <SettingsSection title="Stream format">
       <UiHint>
-        Global preference sent via <code class="font-mono text-xs">set_format</code>. Per-track overrides in the
-        now-playing bar take precedence for that track.
+        How music is sent to this player. <strong class="font-semibold text-fg">Auto</strong> is best for most people: it plays
+        each file as-is when it can, and converts only when it has to. Pick a format here to use it for
+        <em>every</em> track. To change just one track, use the format picker in the player bar at the bottom.
       </UiHint>
       <UiSelect
         aria-label="Default stream format"

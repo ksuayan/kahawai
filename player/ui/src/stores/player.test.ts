@@ -175,3 +175,38 @@ describe("transport commands", () => {
     expect(tauri.calls.map((c) => c.cmd)).toEqual(expect.arrayContaining(["toggle", "next_track", "prev_track"]));
   });
 });
+
+describe("per-track format overrides", () => {
+  it("has no override until one is chosen", async () => {
+    const p = await ready();
+    expect(p.formatOverride(1)).toBeNull();
+    expect(p.formatOverride(null)).toBeNull();
+    expect(p.formatOverride(undefined)).toBeNull();
+  });
+
+  it("remembers the forced format per track and sends it to the engine", async () => {
+    const p = await ready();
+    await p.changeTrackFormat(7, "flac");
+    await p.changeTrackFormat(8, "opus");
+    expect(p.formatOverride(7)).toBe("flac");
+    expect(p.formatOverride(8)).toBe("opus");
+    expect(p.formatOverride(9)).toBeNull();
+    expect(tauri.callsTo("set_track_format")).toEqual([{ track_id: 7, fmt: "flac" }, { track_id: 8, fmt: "opus" }]);
+  });
+
+  it("Auto (null) clears the override and tells the engine", async () => {
+    const p = await ready();
+    await p.changeTrackFormat(7, "flac");
+    await p.changeTrackFormat(7, null);
+    expect(p.formatOverride(7)).toBeNull();
+    expect(tauri.callsTo("set_track_format").at(-1)).toEqual({ track_id: 7, fmt: null });
+  });
+
+  it("changing the format of one track leaves the others alone", async () => {
+    const p = await ready();
+    await p.changeTrackFormat(1, "mp3");
+    await p.changeTrackFormat(2, "flac");
+    await p.changeTrackFormat(1, null);
+    expect(p.formatOverride(2)).toBe("flac");
+  });
+});

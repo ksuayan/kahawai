@@ -108,10 +108,25 @@ describe("Settings: output device", () => {
 });
 
 describe("Settings: playback preferences", () => {
+  it("explains the format setting in plain words and points to the per-track picker", async () => {
+    const w = await mountSettings();
+    const section = w.findAll("section").find((x) => x.find("h3").text() === "Stream format")!;
+    expect(section.exists()).toBe(true);
+    expect(section.text()).toContain("Auto is best for most people");
+    expect(section.text()).toContain("every track");
+    expect(section.text()).toContain("player bar");
+    expect(section.text()).not.toMatch(/set_format/); // no internal command names
+  });
+
+  it("defaults to Auto (recommended)", async () => {
+    const w = await mountSettings();
+    expect(select(w, "Default stream format").textContent).toContain("Auto (recommended)");
+  });
+
   it("sets the default stream format (and can return to Auto)", async () => {
     const w = await mountSettings();
     await openSelect(select(w, "Default stream format"));
-    expect(optionLabels()).toEqual(["Auto (server default)", "Passthrough (original)", "FLAC", "OPUS", "MP3", "DOP"]);
+    expect(optionLabels()).toEqual(["Auto (recommended)", "Passthrough (original)", "FLAC", "OPUS", "MP3", "DOP"]);
     pick(options()[2]);
     await settle();
     expect(tauri.callsTo("set_format")).toEqual([{ fmt: "flac" }]);

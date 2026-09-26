@@ -95,7 +95,7 @@ function goEq(): void {
             <VolumeSlider class="w-[120px]" />
           </label>
           <div class="flex items-center gap-2 text-xs text-dim">
-            Track format
+            Stream this track as
             <TrackFormatSelect :track="track" :disabled="!isPlayable(track)" />
           </div>
           <UiButton variant="icon" title="Open EQ in Settings" @click="goEq"><SlidersHorizontal /> EQ</UiButton>

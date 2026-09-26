@@ -1,15 +1,12 @@
 <script setup lang="ts">
-import { ListMusic, Settings, TriangleAlert } from "lucide-vue-next";
+import { ListOrdered, TriangleAlert } from "lucide-vue-next";
 import { computed } from "vue";
-import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
-import { useSettingsStore } from "../stores/settings";
-import { STREAM_FORMATS, isPlayable, trackTitle, unplayableReason, type StreamFormat } from "../types";
+import { isPlayable, trackTitle, unplayableReason } from "../types";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
-import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import Artwork from "./Artwork.vue";
 import SeekBar from "./SeekBar.vue";
 import TrackFormatSelect from "./TrackFormatSelect.vue";
@@ -18,7 +15,6 @@ import TransportControls from "./TransportControls.vue";
 import VolumeSlider from "./VolumeSlider.vue";
 
 const player = usePlayerStore();
-const settings = useSettingsStore();
 const lib = useLibraryStore();
 const nav = useNavStore();
 
@@ -26,17 +22,8 @@ const track = computed(() => player.currentTrack);
 const trackPlayable = computed(() => (track.value ? isPlayable(track.value) : false));
 
 const formatTitle = computed(() =>
-  !track.value
-    ? "No track playing"
-    : !trackPlayable.value
-      ? unplayableReason(track.value)
-      : "Stream format for this track",
+  !track.value ? "No track playing" : !trackPlayable.value ? unplayableReason(track.value) : undefined,
 );
-
-const globalFormatOptions: UiSelectOption[] = [
-  { value: null, label: "Auto (server default)" },
-  ...STREAM_FORMATS.map((f) => ({ value: f, label: f === "passthrough" ? "Passthrough" : f.toUpperCase() })),
-];
 
 const artworkHash = computed(() => {
   const t = track.value;
@@ -104,31 +91,8 @@ function goNowPlaying(): void {
           trigger-class="w-[140px]"
         />
         <VolumeSlider class="w-[100px]" />
-        <UiButton variant="icon" title="Queue" aria-label="Queue" @click="nav.go('queue')"><ListMusic /></UiButton>
+        <UiButton variant="icon" title="Queue" aria-label="Queue" @click="nav.go('queue')"><ListOrdered /></UiButton>
         <TrackMenu v-if="track" :track="track" />
-        <PopoverRoot>
-          <PopoverTrigger as-child>
-            <UiButton variant="icon" title="Playback settings" aria-label="Playback settings"><Settings /></UiButton>
-          </PopoverTrigger>
-          <PopoverPortal>
-            <PopoverContent
-              side="top"
-              align="end"
-              :side-offset="8"
-              class="z-50 w-[230px] rounded-[10px] border border-line bg-hover p-3 shadow-[0_8px_24px_rgba(0,0,0,0.5)] outline-none"
-            >
-              <span class="mb-1.5 block text-xs text-dim">Default format</span>
-              <UiSelect
-                aria-label="Default format"
-                trigger-class="w-full"
-                :model-value="settings.globalFormat"
-                :options="globalFormatOptions"
-                @update:model-value="(v) => settings.saveGlobalFormat(v as StreamFormat | null)"
-              />
-              <p class="mb-0 mt-2 text-[11px] text-faint">Applies to tracks without a per-track override.</p>
-            </PopoverContent>
-          </PopoverPortal>
-        </PopoverRoot>
       </div>
     </div>
   </footer>

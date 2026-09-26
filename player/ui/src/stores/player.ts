@@ -130,7 +130,21 @@ export const usePlayerStore = defineStore("player", () => {
     await setVolume(v);
   }
 
+  /**
+   * Formats the user forced for individual tracks this session. The engine
+   * keeps the same map in memory (it is not persisted); mirroring it here
+   * lets the picker say "Auto" until a track has really been overridden,
+   * instead of showing whatever format happens to be playing.
+   */
+  const trackOverrides = ref<Record<number, StreamFormat>>({});
+
+  function formatOverride(trackId: number | null | undefined): StreamFormat | null {
+    return trackId == null ? null : (trackOverrides.value[trackId] ?? null);
+  }
+
   async function changeTrackFormat(trackId: number, fmt: StreamFormat | null): Promise<void> {
+    if (fmt === null) delete trackOverrides.value[trackId];
+    else trackOverrides.value[trackId] = fmt;
     await setTrackFormat(trackId, fmt);
   }
 
@@ -189,6 +203,7 @@ export const usePlayerStore = defineStore("player", () => {
     seekTo,
     changeVolume,
     changeTrackFormat,
+    formatOverride,
     cycleRepeat,
     toggleShuffle,
     appendTracks,

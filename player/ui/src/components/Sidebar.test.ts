@@ -47,6 +47,34 @@ describe("Sidebar", () => {
     expect(wrapper.get('[data-testid="queue-count"]').text()).toBe("3");
   });
 
+  it("gives every entry an icon, and Settings a gear", () => {
+    const { wrapper } = mountApp(Sidebar);
+    const icons = wrapper.findAll("button").map((b) => ({
+      label: b.text().replace(/\s+\d+$/, ""),
+      icon: b.find("svg").classes().find((c) => /^lucide-[a-z0-9-]+$/.test(c) && !c.endsWith("-icon")),
+    }));
+    expect(icons).toEqual([
+      { label: "Albums", icon: "lucide-disc-3" },
+      { label: "Artists", icon: "lucide-mic-vocal" },
+      { label: "Playlists", icon: "lucide-list-music" },
+      { label: "Search", icon: "lucide-search" },
+      { label: "Queue", icon: "lucide-list-ordered" },
+      { label: "Settings", icon: "lucide-settings" },
+    ]);
+    // Icons are decoration; the visible label names the button.
+    for (const b of wrapper.findAll("button")) expect(b.find("svg").attributes("aria-hidden")).toBe("true");
+  });
+
+  it("puts the icon to the left of the label, and the queue count on the right", async () => {
+    const { wrapper } = mountApp(Sidebar);
+    useQueueStore().tracks = [makeTrack()];
+    await wrapper.vm.$nextTick();
+    const queue = wrapper.findAll("button").find((b) => b.text().startsWith("Queue"))!;
+    const children = Array.from(queue.element.children);
+    expect(children[0].querySelector("svg")).not.toBeNull();
+    expect(children[1].getAttribute("data-testid")).toBe("queue-count");
+  });
+
   it("left-aligns nav labels (regression: they were centred)", () => {
     const { wrapper } = mountApp(Sidebar);
     const cls = wrapper.findAll("button")[0].classes();
