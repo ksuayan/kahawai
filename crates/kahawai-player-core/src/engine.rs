@@ -37,7 +37,7 @@ use crate::dsp::{
 use crate::queue::{Queue, RepeatMode};
 use crate::resample::CubicResampler;
 use crate::sink::{AudioSink, OutputPath, PcmChunk};
-use crate::transport::{HttpTransport, StreamOptions, Transport};
+use crate::transport::{HttpTransport, StreamOptions, StreamProgress, Transport};
 
 /// Frames decoded per pump iteration (~93 ms at 44.1 kHz).
 const CHUNK_FRAMES: usize = 4096;
@@ -138,6 +138,11 @@ pub struct PlayerSnapshot {
     pub current_id: Option<i64>,
     pub position_ms: u64,
     pub duration_ms: Option<u64>,
+    /// How far into the track the data received from the server reaches
+    /// (ms). `None` when the server didn't say how big the stream is
+    /// (transcoded/chunked) or several tracks share one response.
+    #[serde(default)]
+    pub buffered_ms: Option<u64>,
     /// The rendition actually streaming (explicit `?format=` value).
     pub format: Option<StreamFormat>,
     /// `X-Transcode-Chain` of the active response.
@@ -162,6 +167,7 @@ impl Default for PlayerSnapshot {
             current_id: None,
             position_ms: 0,
             duration_ms: None,
+            buffered_ms: None,
             format: None,
             chain: None,
             output_path: OutputPath::Pcm,
@@ -236,6 +242,8 @@ struct PcmStream {
     /// Exclusive bit-perfect output: samples go to the sink untouched as
     /// packed 24-bit, bypassing EQ, loudness, volume and resampling.
     bit_perfect: bool,
+    /// Bytes received from the network (see `ActiveStream::buffered_ms`).
+    progress: Option<StreamProgress>,
 }
 
 /// One open `?format=dop` response. DoP bytes flow to the sink untouched —
@@ -252,6 +260,7 @@ struct DopPlayback {
     pumped_frames: u64,
     /// Position offset in DoP frames (`?seek_ms=`).
     base_frames: u64,
+    progress: Option<StreamProgress>,
 }
 
 /// The engine's active response: PCM (decoded, DSP'd) or DoP (byte pipe).
@@ -302,6 +311,35 @@ impl ActiveStream {
                 (a.base_frames + a.pumped_frames) * 1000 / a.spec.dop_rate_hz as u64
             }
         }
+    }
+
+    /// How far into the displayed track the bytes received so far reach, in
+    /// ms; `None` when unknowable (chunked/transcoded body, or a gapless
+    /// response carrying several tracks). Never behind the playhead.
+    fn buffered_ms(&self, position_ms: u64) -> Option<u64> {
+        let (progress, segments, base_ms) = match self {
+            ActiveStream::Pcm(a) => (
+                a.progress.as_ref()?,
+                &a.segments,
+                a.base_frames * 1000 / a.sink_rate as u64,
+            ),
+            ActiveStream::Dop(a) => (
+                a.progress.as_ref()?,
+                &a.segments,
+                a.base_frames * 1000 / a.spec.dop_rate_hz as u64,
+            ),
+        };
+        if segments.len() != 1 {
+            return None;
+        }
+        let duration = segments[0].duration_ms?;
+        let frac = progress.fraction()?;
+        let ms = if progress.offset > 0 {
+            (duration as f64 * frac) as u64
+        } else {
+            base_ms + ((duration.saturating_sub(base_ms)) as f64 * frac) as u64
+        };
+        Some(ms.clamp(position_ms.min(duration), duration))
     }
 
     fn display_track(&self) -> &Track {
@@ -789,6 +827,7 @@ impl Player {
             }
         };
         let gapless_mode = info.gapless_mode.clone();
+        let progress = info.progress.clone();
         let chained = gapless_mode.as_deref() == Some("chained");
         let established = self.dop_spec;
         let stream = match DopStream::new(info.reader, dop_rate, established, chained) {
@@ -831,6 +870,7 @@ impl Player {
             spec,
             pumped_frames: 0,
             base_frames,
+            progress,
         }));
         self.status = PlayerStatus::Playing;
     }
@@ -878,6 +918,7 @@ impl Player {
             }
         };
         let gapless_mode = info.gapless_mode.clone();
+        let progress = info.progress.clone();
         let expect_chained = gapless_mode.as_deref() == Some("chained");
         let decoder = match StreamDecoder::new(info.reader, expect_chained) {
             Ok(d) => d,
@@ -1008,6 +1049,7 @@ impl Player {
             base_frames,
             skip_frames,
             bit_perfect,
+            progress,
         }));
         self.status = PlayerStatus::Playing;
     }
@@ -1238,18 +1280,20 @@ impl Player {
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
-        let (track, position_ms, duration_ms, format, chain) = match &self.active {
+        let (track, position_ms, duration_ms, buffered_ms, format, chain) = match &self.active {
             Some(a) => {
                 let t = a.display_track().clone();
+                let pos = self.position_ms();
                 (
                     Some(t.clone()),
-                    self.position_ms(),
+                    pos,
                     t.duration_ms,
+                    a.buffered_ms(pos),
                     Some(a.format_used()),
                     a.chain().clone(),
                 )
             }
-            None => (self.queue.current().cloned(), 0, None, None, None),
+            None => (self.queue.current().cloned(), 0, None, None, None, None),
         };
         PlayerSnapshot {
             status: self.status,
@@ -1259,6 +1303,7 @@ impl Player {
             current_id: self.queue.current().map(|t| t.id),
             position_ms,
             duration_ms,
+            buffered_ms,
             format,
             chain,
             output_path: self.output_path,

@@ -118,6 +118,8 @@ struct PlayerStateDto {
     queue_index: Option<usize>,
     position_ms: u64,
     duration_ms: Option<u64>,
+    /// How far the data received from the server reaches into the track.
+    buffered_ms: Option<u64>,
     format: Option<&'static str>,
     chain: Option<String>,
     /// "pcm-shared" | "dop-exclusive" — drives the Exclusive DoP badge.
@@ -173,6 +175,7 @@ impl From<PlayerSnapshot> for PlayerStateDto {
             queue_index: s.queue_index,
             position_ms: s.position_ms,
             duration_ms: s.duration_ms,
+            buffered_ms: s.buffered_ms,
             format: s.format.map(format_str),
             chain: s.chain,
             output_path: output_path_str(s.output_path),

@@ -6,6 +6,7 @@
 //! is needed inside kahawai-player-core).
 
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use kahawai_core::{api::StreamFormat, MusicError};
@@ -24,6 +25,46 @@ pub struct StreamOptions {
     pub range_start: Option<u64>,
 }
 
+/// How much of a response the client has pulled off the network. The
+/// transport owns the counter (it is the only party that sees every byte).
+#[derive(Debug, Clone)]
+pub struct StreamProgress {
+    /// Bytes read from this response so far.
+    pub received: Arc<AtomicU64>,
+    /// `Content-Length` of this response; `None` for chunked (transcoded)
+    /// bodies, whose total size is unknown.
+    pub content_length: Option<u64>,
+    /// Byte offset this response starts at (HTTP Range resume), else 0.
+    pub offset: u64,
+}
+
+impl StreamProgress {
+    /// Fraction of the whole resource received, 0.0–1.0 (`None` if unknown).
+    /// Relative to the response, or to the full file for a Range resume.
+    pub fn fraction(&self) -> Option<f64> {
+        let len = self.content_length?;
+        if len == 0 {
+            return None;
+        }
+        let got = self.received.load(Ordering::Relaxed);
+        Some(((self.offset + got) as f64 / (self.offset + len) as f64).clamp(0.0, 1.0))
+    }
+}
+
+/// Counts bytes as they pass through.
+struct CountingReader<R> {
+    inner: R,
+    count: Arc<AtomicU64>,
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
 /// An opened stream: the byte reader plus the response metadata the
 /// engine needs for gapless handoff and UI display.
 pub struct StreamInfo {
@@ -37,6 +78,8 @@ pub struct StreamInfo {
     /// `X-Gapless-Mode`: `single-session` | `chained`, when the server
     /// actually chained audio into this response.
     pub gapless_mode: Option<String>,
+    /// Network progress, when the transport can measure it.
+    pub progress: Option<StreamProgress>,
 }
 
 /// Opens `/stream/:id` responses. Object-safe so the engine can hold
@@ -125,8 +168,19 @@ impl Transport for HttpTransport {
         let chain = header("x-transcode-chain");
         let gapless_next = header("x-gapless-next").and_then(|v| v.parse().ok());
         let gapless_mode = header("x-gapless-mode");
+        let content_length = header("content-length").and_then(|v| v.parse::<u64>().ok());
+        let received = Arc::new(AtomicU64::new(0));
+        let reader = CountingReader {
+            inner: resp.into_body().into_reader(),
+            count: received.clone(),
+        };
         Ok(StreamInfo {
-            reader: Box::new(resp.into_body().into_reader()),
+            reader: Box::new(reader),
+            progress: Some(StreamProgress {
+                received,
+                content_length,
+                offset: opts.range_start.unwrap_or(0),
+            }),
             content_type,
             chain,
             gapless_next,
@@ -234,6 +288,36 @@ mod tests {
             "request:\n{}",
             reqs[0]
         );
+    }
+
+    #[test]
+    fn progress_counts_bytes_read_against_content_length() {
+        let stub = Stub::serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
+        );
+        let t = HttpTransport::new(format!("http://{}", stub.addr));
+        let mut info = t.open_stream(1, &StreamOptions::default()).expect("open");
+        let p = info.progress.clone().expect("http transport reports progress");
+        assert_eq!(p.content_length, Some(10));
+        assert_eq!(p.fraction(), Some(0.0));
+        let mut buf = [0u8; 4];
+        info.reader.read_exact(&mut buf).unwrap();
+        assert_eq!(p.fraction(), Some(0.4));
+        let mut rest = Vec::new();
+        info.reader.read_to_end(&mut rest).unwrap();
+        assert_eq!(p.fraction(), Some(1.0));
+    }
+
+    #[test]
+    fn progress_is_relative_to_the_whole_file_for_range_resumes() {
+        let p = StreamProgress {
+            received: Arc::new(AtomicU64::new(25)),
+            content_length: Some(50),
+            offset: 50,
+        };
+        assert_eq!(p.fraction(), Some(0.75)); // (50 + 25) / (50 + 50)
+        let unknown = StreamProgress { content_length: None, ..p };
+        assert_eq!(unknown.fraction(), None);
     }
 
     #[test]

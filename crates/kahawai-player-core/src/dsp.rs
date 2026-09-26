@@ -867,6 +867,7 @@ mod tests {
             _opts: &StreamOptions,
         ) -> Result<crate::transport::StreamInfo, MusicError> {
             Ok(crate::transport::StreamInfo {
+                progress: None,
                 reader: Box::new(Cursor::new(self.body.clone())),
                 content_type: "audio/wav".into(),
                 chain: None,

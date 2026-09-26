@@ -95,6 +95,7 @@ export const usePlayerStore = defineStore("player", () => {
   const isPlaying = computed(() => status.value === "playing");
   const isLoading = computed(() => status.value === "loading");
   const durationMs = computed(() => raw.value?.duration_ms ?? null);
+  const bufferedMs = computed(() => raw.value?.buffered_ms ?? null);
   const chain = computed(() => raw.value?.chain ?? null);
   const activeFormat = computed(() => raw.value?.format ?? null);
   const outputPath = computed(() => raw.value?.output_path ?? "pcm-shared");
@@ -188,6 +189,7 @@ export const usePlayerStore = defineStore("player", () => {
     isLoading,
     positionMs,
     durationMs,
+    bufferedMs,
     chain,
     activeFormat,
     outputPath,

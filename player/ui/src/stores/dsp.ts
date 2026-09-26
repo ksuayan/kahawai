@@ -11,6 +11,7 @@ import {
   setLoudnessEnabled,
   setLoudnessTarget,
 } from "../tauri";
+import { BUILTIN_PRESETS, sameBands, type EqPreset } from "../eqPresets";
 import {
   DEFAULT_DSP_SETTINGS,
   MAX_EQ_BANDS,
@@ -21,6 +22,17 @@ import {
 } from "../types";
 
 const ROWS_KEY = "kahawai-player.eq-rows";
+const PRESETS_KEY = "kahawai-player.eq-user-presets";
+
+function loadUserPresets(): EqPreset[] {
+  try {
+    const raw = localStorage.getItem(PRESETS_KEY);
+    const list = raw ? (JSON.parse(raw) as { name: string; bands: EqBand[] }[]) : [];
+    return list.map((p) => ({ id: `user:${p.name}`, name: p.name, bands: p.bands, builtin: false }));
+  } catch {
+    return [];
+  }
+}
 
 /** Client-side mirror of the Rust `validate_bands` limits. */
 export function validateRow(r: EqBandRow): string | null {
@@ -53,6 +65,12 @@ export const useDspStore = defineStore("dsp", () => {
 
   const activeBands = computed<EqBand[]>(() =>
     rows.value.filter((r) => r.enabled).map(({ enabled: _e, ...b }) => b),
+  );
+  const userPresets = ref<EqPreset[]>(loadUserPresets());
+  const presets = computed<EqPreset[]>(() => [...BUILTIN_PRESETS, ...userPresets.value]);
+  /** The preset the enabled rows currently equal; null = a custom tuning. */
+  const activePreset = computed<EqPreset | null>(
+    () => presets.value.find((p) => sameBands(p.bands, activeBands.value)) ?? null,
   );
   const canAddBand = computed(() => rows.value.length < MAX_EQ_BANDS);
 
@@ -124,6 +142,46 @@ export const useDspStore = defineStore("dsp", () => {
     () => outputDevice.value !== null && !devices.value.some((d) => d.name === outputDevice.value),
   );
 
+  function persistPresets(): void {
+    try {
+      localStorage.setItem(
+        PRESETS_KEY,
+        JSON.stringify(userPresets.value.map((p) => ({ name: p.name, bands: p.bands }))),
+      );
+    } catch {
+      /* storage unavailable — presets stay session-local */
+    }
+  }
+
+  /** Replace the EQ rows with a preset's bands (turning EQ on for anything but Flat). */
+  async function applyPreset(id: string): Promise<void> {
+    const p = presets.value.find((x) => x.id === id);
+    if (!p) return;
+    rows.value = p.bands.map((b) => ({ ...b, enabled: true }));
+    rowError.value = null;
+    await pushBands();
+    if (p.bands.length > 0 && !eqEnabled.value) await saveEqEnabled(true);
+  }
+
+  /** Save the current enabled bands as a user preset (same name overwrites). */
+  function saveUserPreset(name: string): void {
+    const clean = name.trim();
+    if (!clean) return;
+    const preset: EqPreset = {
+      id: `user:${clean}`,
+      name: clean,
+      bands: activeBands.value.map((b) => ({ ...b })),
+      builtin: false,
+    };
+    userPresets.value = [...userPresets.value.filter((p) => p.id !== preset.id), preset];
+    persistPresets();
+  }
+
+  function deleteUserPreset(id: string): void {
+    userPresets.value = userPresets.value.filter((p) => p.id !== id);
+    persistPresets();
+  }
+
   function addBand(): void {
     if (!canAddBand.value) return;
     rows.value.push({ band_type: "peaking", freq: 1000, gain_db: 0, q: 1.0, enabled: true });
@@ -191,6 +249,12 @@ export const useDspStore = defineStore("dsp", () => {
     rowError,
     activeBands,
     canAddBand,
+    presets,
+    userPresets,
+    activePreset,
+    applyPreset,
+    saveUserPreset,
+    deleteUserPreset,
     init,
     refreshDevices,
     chooseOutputDevice,

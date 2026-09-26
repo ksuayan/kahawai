@@ -121,23 +121,18 @@ describe("NowPlayingView", () => {
     expect(w.get('[role="alert"]').text()).toBe("decode failed");
   });
 
-  it("embeds the shared seek, volume and transport controls", async () => {
-    const w = await boot(makeState({ status: "paused", position_ms: 83_000, volume: 0.4, track: makeTrack({ duration_ms: 318_742 }) }));
-    expect(w.get('[data-testid="elapsed"]').text()).toBe("1:23");
-    expect(w.get('[role="slider"][aria-label="Volume"]').attributes("aria-valuenow")).toBe("40");
+  it("embeds the transport controls but no seek bar or volume slider (they live in the bar)", async () => {
+    const w = await boot(makeState({ status: "paused", position_ms: 83_000, track: makeTrack({ duration_ms: 318_742 }) }));
     expect(w.get('[data-testid="play-pause"]').attributes("aria-label")).toBe("Play");
-    // No stop button on the full page (that lives in the bar).
     expect(w.findAll("button").some((b) => b.attributes("aria-label") === "Stop")).toBe(false);
-    await w.get('[role="slider"][aria-label="Seek"]').trigger("keydown", { key: "ArrowRight" });
-    await settle();
-    expect(tauri.callsTo("seek_ms")).toEqual([{ ms: 84_000 }]);
+    expect(w.find('[role="slider"][aria-label="Seek"]').exists()).toBe(false);
+    expect(w.find('[role="slider"][aria-label="Volume"]').exists()).toBe(false);
   });
 
-  it("navigates back to the library and to the EQ settings", async () => {
+  it("navigates back to the library; EQ is a transport control now, not a separate button", async () => {
     const w = await boot();
+    expect(w.findAll("button").some((b) => b.text().trim() === "EQ")).toBe(false);
     await w.findAll("button").find((b) => b.text().includes("Library"))!.trigger("click");
     expect(useNavStore().view.name).toBe("albums");
-    await w.findAll("button").find((b) => b.text().includes("EQ"))!.trigger("click");
-    expect(useNavStore().view.name).toBe("settings");
   });
 });

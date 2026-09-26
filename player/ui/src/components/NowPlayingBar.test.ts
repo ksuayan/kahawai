@@ -54,7 +54,7 @@ describe("NowPlayingBar", () => {
     const w = await boot(makeState({ track: null, queue_ids: [], queue_index: null }));
     expect(w.get('[data-testid="title"]').text()).toBe("Nothing playing");
     expect(w.get('[data-testid="artist"]').text()).toBe("—");
-    const controls = w.findAll("button").filter((b) => ["Shuffle", "Previous", "Next", "Stop"].includes(b.attributes("aria-label") ?? ""));
+    const controls = w.findAll("button").filter((b) => ["Shuffle", "Previous", "Next", "Repeat off"].includes(b.attributes("aria-label") ?? ""));
     expect(controls.length).toBe(4);
     expect(controls.every((b) => b.attributes("disabled") !== undefined)).toBe(true);
     expect(w.find('[role="slider"][aria-label="Seek"]').attributes("data-disabled")).toBeDefined();

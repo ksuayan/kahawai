@@ -184,6 +184,7 @@ impl Transport for StubTransport {
         if opts.next.is_some() {
             if let Some(body) = self.next_body.lock().unwrap().get(&track_id).cloned() {
                 return Ok(StreamInfo {
+                    progress: None,
                     reader: Box::new(Cursor::new(body)),
                     content_type: "audio/wav".into(),
                     chain: Some(
@@ -224,6 +225,7 @@ impl Transport for StubTransport {
             _ => (None, None),
         };
         Ok(StreamInfo {
+            progress: None,
             reader: Box::new(Cursor::new(bytes)),
             content_type: "audio/wav".into(),
             chain: Some(
@@ -998,6 +1000,7 @@ impl Transport for DopTransport {
                 self.wav.clone()
             };
             return Ok(StreamInfo {
+                progress: None,
                 reader: Box::new(Cursor::new(body)),
                 content_type: "audio/wav".into(),
                 chain: None,
@@ -1006,6 +1009,7 @@ impl Transport for DopTransport {
             });
         }
         Ok(StreamInfo {
+            progress: None,
             reader: Box::new(Cursor::new(wav_bytes(440.0, 22050))),
             content_type: "audio/wav".into(),
             chain: Some("dsd->flac".into()),

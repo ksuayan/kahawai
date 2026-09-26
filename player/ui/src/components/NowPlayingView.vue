@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronLeft, SlidersHorizontal } from "lucide-vue-next";
+import { ChevronLeft } from "lucide-vue-next";
 import { computed } from "vue";
 import { useDspStore } from "../stores/dsp";
 import { useLibraryStore } from "../stores/library";
@@ -11,11 +11,9 @@ import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import Artwork from "./Artwork.vue";
-import SeekBar from "./SeekBar.vue";
 import TrackFormatSelect from "./TrackFormatSelect.vue";
 import TrackMenu from "./TrackMenu.vue";
 import TransportControls from "./TransportControls.vue";
-import VolumeSlider from "./VolumeSlider.vue";
 
 const player = usePlayerStore();
 const lib = useLibraryStore();
@@ -50,10 +48,6 @@ const artworkHash = computed(() => {
   if (!t?.album_id) return null;
   return lib.albums.find((a) => a.id === t.album_id)?.artwork_hash ?? null;
 });
-
-function goEq(): void {
-  nav.go("settings");
-}
 
 </script>
 
@@ -95,23 +89,13 @@ function goEq(): void {
           <UiBadge v-if="!isPlayable(track)" variant="danger">{{ unplayableReason(track) }}</UiBadge>
         </div>
 
-        <SeekBar size="md" />
-        <p class="mb-5 mt-1 text-[11px] text-faint">
-          Buffer: not exposed by the engine — the stream is progressive HTTP (the position above is the playhead).
-        </p>
-
-        <div class="mb-5"><TransportControls large :show-stop="false" /></div>
+        <div class="mb-5"><TransportControls large /></div>
 
         <div class="mb-4 flex flex-wrap items-center gap-4">
-          <label class="flex items-center gap-2 text-xs text-dim">
-            Volume
-            <VolumeSlider class="w-[120px]" />
-          </label>
           <div class="flex items-center gap-2 text-xs text-dim">
             Stream this track as
             <TrackFormatSelect :track="track" :disabled="!isPlayable(track)" />
           </div>
-          <UiButton variant="icon" title="Open EQ in Settings" @click="goEq"><SlidersHorizontal /> EQ</UiButton>
           <TrackMenu :track="track" />
         </div>
 

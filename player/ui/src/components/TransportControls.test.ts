@@ -47,16 +47,15 @@ describe("TransportControls", () => {
     expect(btn.text()).toBe("");
   });
 
-  it("wires next, previous, stop, shuffle and repeat to the bridge", async () => {
+  it("wires next, previous, shuffle and repeat to the bridge", async () => {
     const w = await boot();
     await btn(w, "Next").trigger("click");
     await btn(w, "Previous").trigger("click");
-    await btn(w, "Stop").trigger("click");
     await btn(w, "Shuffle").trigger("click");
     await btn(w, /^Repeat/).trigger("click");
     await settle();
     const cmds = tauri.calls.map((c) => c.cmd);
-    expect(cmds).toEqual(expect.arrayContaining(["next_track", "prev_track", "stop", "set_shuffle", "set_repeat"]));
+    expect(cmds).toEqual(expect.arrayContaining(["next_track", "prev_track", "set_shuffle", "set_repeat"]));
   });
 
   it("reflects shuffle and repeat state as pressed toggles", async () => {
@@ -76,9 +75,13 @@ describe("TransportControls", () => {
     expect(btn(all, "Repeat all").find("svg").classes().join(" ")).not.toMatch(/lucide-repeat-?1/);
   });
 
-  it("can hide Stop (full-page view) and disable everything (nothing playing)", async () => {
-    const noStop = await boot(makeState(), { showStop: false });
-    expect(noStop.findAll("button").some((b) => b.attributes("aria-label") === "Stop")).toBe(false);
+  it("has no Stop button, groups shuffle/repeat apart from the main buttons, and disables all when idle", async () => {
+    const w = await boot(makeState());
+    expect(w.findAll("button").some((b) => b.attributes("aria-label") === "Stop")).toBe(false);
+    const main = w.get('[data-testid="main-controls"]');
+    const mode = w.get('[data-testid="mode-controls"]');
+    expect(main.findAll("button").map((b) => b.attributes("aria-label"))).toEqual(["Previous", expect.stringMatching(/^(Play|Pause)$/), "Next"]);
+    expect(mode.findAll("button").map((b) => b.attributes("aria-label"))).toEqual(["Shuffle", expect.stringMatching(/^Repeat/), "Equalizer"]);
     const off = await boot(makeState(), { disabled: true });
     expect(off.findAll("button").every((b) => b.attributes("disabled") !== undefined)).toBe(true);
   });

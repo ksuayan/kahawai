@@ -95,3 +95,16 @@ describe("SeekBar", () => {
     expect(wrapper.get('[data-testid="elapsed"]').classes().join(" ")).toContain("text-xs");
   });
 });
+
+describe("SeekBar buffered fill", () => {
+  it("draws data received from the server behind the playhead, and nothing when unknown", async () => {
+    tauri.on("get_state", makeState({ status: "playing", position_ms: 10_000, buffered_ms: 60_000, track: makeTrack({ duration_ms: 240_000 }) }));
+    const { wrapper } = mountApp(SeekBar);
+    await usePlayerStore().init();
+    await settle();
+    expect(wrapper.get('[data-testid="buffered"]').attributes("style")).toContain("width: 25%");
+    tauri.emit("player-state", makeState({ status: "playing", position_ms: 10_000, buffered_ms: null, track: makeTrack({ duration_ms: 240_000 }) }));
+    await settle();
+    expect(wrapper.find('[data-testid="buffered"]').exists()).toBe(false);
+  });
+});

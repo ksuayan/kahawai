@@ -5,7 +5,7 @@ import { formatDuration } from "../types";
 import UiSlider from "../ui/UiSlider.vue";
 
 /**
- * Elapsed time, seek slider and duration.
+ * Elapsed time, seek slider (with the received-data fill behind it) and duration.
  *
  * While the user drags, the slider and the elapsed label follow the pointer
  * (`scrubbing`), not the engine; the seek is sent once on release (or per key
@@ -53,6 +53,7 @@ const timeClass = computed(() =>
       :max="duration"
       :step="1000"
       :disabled="isDisabled"
+      :buffered="player.bufferedMs"
       @update:model-value="onUpdate"
       @commit="onCommit"
     />
