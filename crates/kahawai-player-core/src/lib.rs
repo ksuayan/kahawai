@@ -6,6 +6,7 @@
 //! platform audio (cpal/rodio on desktop, AudioTrack/AVAudioPlayer on mobile)
 //! lives behind the [`AudioSink`] trait, implemented by each shell.
 
+pub mod artwork;
 pub mod decode;
 pub mod dop;
 pub mod dsp;
@@ -15,6 +16,7 @@ pub mod resample;
 pub mod sink;
 pub mod transport;
 
+pub use artwork::{fetch_from_server as fetch_artwork, ArtworkCache, CachedArt};
 pub use decode::{DecodedSpec, StreamDecoder};
 pub use dop::{dop_pcm_rate, parse_wav_header, DopSpec, DopStream, DOP_BITS_PER_SAMPLE};
 pub use dsp::{

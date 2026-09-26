@@ -16,12 +16,12 @@ use std::time::Duration;
 use kahawai_core::{StreamFormat, Track};
 use kahawai_player_api::Client as ApiClient;
 use kahawai_player_audio::{
-    CpalSink, SinkRouter, dop_capable_rates, exclusive_dop_sink,
-    list_output_devices as audio_list_output_devices,
+    dop_capable_rates, exclusive_dop_sink, list_output_devices as audio_list_output_devices,
+    CpalSink, SinkRouter,
 };
 use kahawai_player_core::{
-    DsdStory, DspSettings, EngineController, EqBand, OutputPath, PlayerEvent, PlayerSnapshot,
-    PlayerStatus, RepeatMode, validate_bands,
+    fetch_artwork, validate_bands, ArtworkCache, DsdStory, DspSettings, EngineController, EqBand,
+    OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, RepeatMode,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -31,6 +31,81 @@ struct AppState {
     engine: Arc<EngineController>,
     api: Mutex<ApiClient>,
     settings_path: PathBuf,
+}
+
+/// Album-art disk cache + the engine (for the live server URL). Served to
+/// the webview through the `artwork://` protocol; see `serve_artwork`.
+struct ArtworkState {
+    cache: ArtworkCache,
+    engine: Arc<EngineController>,
+}
+
+/// Upper bound for the on-disk cover cache (least recently used go first).
+const ARTWORK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// `artwork://localhost/<hash>` → cached bytes, fetching from the server on
+/// a miss. Runs on a worker thread: the request handler must not block the
+/// UI thread on the network.
+fn serve_artwork(
+    app: AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+    responder: tauri::UriSchemeResponder,
+) {
+    let hash = request.uri().path().trim_start_matches('/').to_string();
+    std::thread::spawn(move || {
+        let reply = |status: u16, body: Vec<u8>, mime: &str, cache: &str| {
+            tauri::http::Response::builder()
+                .status(status)
+                .header("Content-Type", mime)
+                .header("Cache-Control", cache)
+                .header("Access-Control-Allow-Origin", "*")
+                .body(body)
+                .expect("static response headers are valid")
+        };
+        let Some(st) = app.try_state::<ArtworkState>() else {
+            return responder.respond(reply(503, Vec::new(), "text/plain", "no-store"));
+        };
+        let server = st.engine.server_url();
+        match st
+            .cache
+            .get_or_fetch(&hash, || fetch_artwork(&server, &hash))
+        {
+            // Content-addressed: the webview may keep it forever too.
+            Ok(art) => responder.respond(reply(
+                200,
+                art.bytes,
+                art.mime,
+                "public, max-age=31536000, immutable",
+            )),
+            Err(e) => {
+                let status = match e {
+                    kahawai_core::MusicError::BadRequest(_) => 400,
+                    kahawai_core::MusicError::NotFound(_) => 404,
+                    _ => 502,
+                };
+                // Failures must not be cached by the webview: the server
+                // may just be starting.
+                responder.respond(reply(status, Vec::new(), "text/plain", "no-store"));
+            }
+        }
+    });
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ArtworkCacheStats {
+    bytes: u64,
+    files: usize,
+}
+
+#[tauri::command]
+fn artwork_cache_stats(state: State<'_, ArtworkState>) -> ArtworkCacheStats {
+    let (bytes, files) = state.cache.stats();
+    ArtworkCacheStats { bytes, files }
+}
+
+#[tauri::command]
+fn clear_artwork_cache(state: State<'_, ArtworkState>) -> usize {
+    state.cache.clear()
 }
 
 /// `player-state` payload. Field names match `ui/src/types.ts PlayerState`
@@ -429,6 +504,9 @@ fn dop_status() -> DopStatusDto {
 
 fn main() {
     tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("artwork", |ctx, request, responder| {
+            serve_artwork(ctx.app_handle().clone(), request, responder);
+        })
         .setup(|app| {
             // Persisted engine settings (server URL) live in the app config
             // dir; fall back to a temp file if the dir is unavailable.
@@ -447,6 +525,19 @@ fn main() {
             let server_url = engine.server_url();
             let api = Mutex::new(ApiClient::new(server_url));
 
+            // Album-art cache: the OS cache dir (safe for the OS to purge).
+            let art_dir = app
+                .path()
+                .app_cache_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("kahawai-player"))
+                .join("artwork");
+            let cache = ArtworkCache::new(art_dir, ARTWORK_CACHE_BYTES)
+                .map_err(|e| format!("artwork cache: {e}"))?;
+            app.manage(ArtworkState {
+                cache,
+                engine: engine.clone(),
+            });
+
             let handle = app.handle();
             let engine2 = engine.clone();
             app.manage(AppState {
@@ -461,18 +552,18 @@ fn main() {
             let handle2 = handle.clone();
             std::thread::Builder::new()
                 .name("player-state-forward".into())
-                .spawn(move || {
-                    loop {
-                        for event in engine2.drain_events() {
-                            if let PlayerEvent::State(snap) = event {
+                .spawn(move || loop {
+                    for event in engine2.drain_events() {
+                        match event {
+                            PlayerEvent::State(snap) => {
                                 let dto = PlayerStateDto::from(snap);
                                 if let Err(e) = handle2.emit("player-state", dto) {
                                     eprintln!("[shell] player-state emit failed: {e}");
                                 }
                             }
                         }
-                        std::thread::sleep(Duration::from_millis(50));
                     }
+                    std::thread::sleep(Duration::from_millis(50));
                 })
                 .expect("spawn player-state-forward thread");
 
@@ -484,6 +575,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_state,
             get_server_url,
+            artwork_cache_stats,
+            clear_artwork_cache,
             set_server_url,
             play_track,
             queue_play,

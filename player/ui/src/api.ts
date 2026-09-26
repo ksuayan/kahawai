@@ -11,6 +11,7 @@ import type {
   Playlist,
   Track,
 } from "./types";
+import { cachedArtworkUrl, inTauri } from "./tauri";
 
 let baseUrl = "http://localhost:8080";
 
@@ -22,9 +23,14 @@ export function getBaseUrl(): string {
   return baseUrl;
 }
 
+/**
+ * `<img src>` for a cover. In the app it goes through the shell's disk
+ * cache; under plain `vite dev` (no shell) it hits the server directly.
+ */
 export function artworkSrc(hash?: string | null): string {
   if (!hash) return "";
-  return `${baseUrl}/artwork/${encodeURIComponent(hash)}`;
+  if (inTauri()) return cachedArtworkUrl(hash);
+  return `${baseUrl}/api/artwork/${encodeURIComponent(hash)}`;
 }
 
 /**
@@ -126,8 +132,25 @@ export async function fetchAllAlbums(perPage = 500): Promise<Album[]> {
   return out;
 }
 
+export interface AlbumDetailResponse {
+  album: Album;
+  tracks: Track[];
+}
+
+/**
+ * GET /api/albums/{id}. The server wraps the record as `{album, tracks}`;
+ * a bare album is tolerated so an older/looser server still works.
+ */
+export async function fetchAlbumDetail(id: number): Promise<AlbumDetailResponse> {
+  const raw = await get<AlbumDetailResponse | Album>(`/api/albums/${id}`);
+  if ("album" in raw && raw.album) {
+    return { album: raw.album, tracks: Array.isArray(raw.tracks) ? raw.tracks : [] };
+  }
+  return { album: raw as Album, tracks: [] };
+}
+
 export async function fetchAlbum(id: number): Promise<Album> {
-  return get<Album>(`/api/albums/${id}`);
+  return (await fetchAlbumDetail(id)).album;
 }
 
 export async function fetchArtists(): Promise<Artist[]> {

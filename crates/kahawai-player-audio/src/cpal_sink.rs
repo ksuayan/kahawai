@@ -66,6 +66,11 @@ impl CpalSink {
     }
 }
 
+// `cpal::Stream` is `!Send` on macOS (it holds a boxed property-listener
+// closure), but the sink is only ever moved to the playback thread once and
+// used there; the stream is never shared. Same contract as CoreAudioDopSink.
+unsafe impl Send for CpalSink {}
+
 impl Default for CpalSink {
     fn default() -> Self {
         Self::new()

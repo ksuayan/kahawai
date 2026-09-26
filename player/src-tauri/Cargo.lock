@@ -1875,6 +1875,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "kahawai-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "kahawai-player"
+version = "0.1.0"
+dependencies = [
+ "kahawai-core",
+ "kahawai-player-api",
+ "kahawai-player-audio",
+ "kahawai-player-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+]
+
+[[package]]
+name = "kahawai-player-api"
+version = "0.1.0"
+dependencies = [
+ "kahawai-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "kahawai-player-audio"
+version = "0.1.0"
+dependencies = [
+ "coreaudio-sys",
+ "cpal",
+ "kahawai-core",
+ "kahawai-player-core",
+ "ringbuf",
+ "tracing",
+]
+
+[[package]]
+name = "kahawai-player-core"
+version = "0.1.0"
+dependencies = [
+ "kahawai-core",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "symphonia-adapter-libopus",
+ "thiserror 2.0.21",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2083,30 +2145,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "kahawai-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror 2.0.21",
- "toml 0.8.23",
-]
-
-[[package]]
-name = "kahawai-player"
-version = "0.1.0"
-dependencies = [
- "kahawai-core",
- "kahawai-player-api",
- "kahawai-player-audio",
- "kahawai-player-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
 ]
 
 [[package]]
@@ -2592,44 +2630,6 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
-
-[[package]]
-name = "kahawai-player-api"
-version = "0.1.0"
-dependencies = [
- "kahawai-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "kahawai-player-audio"
-version = "0.1.0"
-dependencies = [
- "coreaudio-sys",
- "cpal",
- "kahawai-core",
- "kahawai-player-core",
- "ringbuf",
- "tracing",
-]
-
-[[package]]
-name = "kahawai-player-core"
-version = "0.1.0"
-dependencies = [
- "kahawai-core",
- "serde",
- "serde_json",
- "symphonia",
- "symphonia-adapter-libopus",
- "thiserror 2.0.21",
- "tracing",
- "ureq",
-]
 
 [[package]]
 name = "plist"
@@ -3593,9 +3593,11 @@ dependencies = [
  "symphonia-bundle-mp3",
  "symphonia-codec-aac",
  "symphonia-codec-adpcm",
+ "symphonia-codec-alac",
  "symphonia-codec-pcm",
  "symphonia-codec-vorbis",
  "symphonia-core",
+ "symphonia-format-isomp4",
  "symphonia-format-mkv",
  "symphonia-format-ogg",
  "symphonia-format-riff",
@@ -3659,6 +3661,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "symphonia-codec-alac"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920a78f96f3cf62932d0c497959c0cc2100ef36b03c7ca1417b260f432a482d8"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+]
+
+[[package]]
 name = "symphonia-codec-pcm"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3703,6 +3716,18 @@ dependencies = [
  "num-complex",
  "rustfft",
  "smallvec",
+]
+
+[[package]]
+name = "symphonia-format-isomp4"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e681a70e1870d34e02abf1dbc51e4267c3f1827801474e8870be8c689fc4dc3"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-metadata",
 ]
 
 [[package]]

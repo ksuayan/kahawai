@@ -16,3 +16,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 flacenc = { workspace = true }
+tempfile = "3"

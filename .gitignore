@@ -19,3 +19,22 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Build artifacts
+# Universal binaries / app bundles from scripts/build-*.sh
+/dist/
+# Tauri shell is its own Cargo project (excluded from the workspace)
+/player/src-tauri/target/
+# Tauri generated schemas (regenerated on every build)
+/player/src-tauri/gen/
+# Vue UI: dependencies and Vite build output
+node_modules/
+/player/ui/dist/
+
+# Local config written by scripts/setup.sh (machine-specific paths/IPs)
+/config.toml
+/config.toml.bak.*
+/data/
+
+# macOS
+.DS_Store

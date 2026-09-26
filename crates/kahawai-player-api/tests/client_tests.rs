@@ -148,6 +148,6 @@ async fn artwork_url_is_stable() {
     let c = Client::new("http://localhost:8080");
     assert_eq!(
         c.artwork_url("abc123"),
-        "http://localhost:8080/artwork/abc123"
+        "http://localhost:8080/api/artwork/abc123"
     );
 }

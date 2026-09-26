@@ -715,6 +715,10 @@ pub async fn import_playlist(
     }
 }
 
+/// Artwork is addressed by the hash of its bytes, so a URL never changes
+/// meaning: clients may cache it forever without revalidating.
+const ARTWORK_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
 /// Artwork by content hash, with ETag caching. (Spec §3.3, S2.)
 pub async fn artwork(
     State(s): State<AppState>,
@@ -730,7 +734,12 @@ pub async fn artwork(
     if let Some(v) = headers.get(header::IF_NONE_MATCH) {
         if let Ok(v) = v.to_str() {
             if v.split(',').any(|t| t.trim() == etag || t.trim() == "*") {
-                return Ok(StatusCode::NOT_MODIFIED.into_response());
+                return Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header(header::ETAG, etag)
+                    .header(header::CACHE_CONTROL, ARTWORK_CACHE_CONTROL)
+                    .body(axum::body::Body::empty())
+                    .map_err(|e| ApiError(MusicError::Http(e.to_string())));
             }
         }
     }
@@ -745,6 +754,7 @@ pub async fn artwork(
     Response::builder()
         .header(header::CONTENT_TYPE, mime)
         .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, ARTWORK_CACHE_CONTROL)
         .header(header::CONTENT_LENGTH, bytes.len())
         .body(axum::body::Body::from(bytes))
         .map_err(|e| ApiError(MusicError::Http(e.to_string())))

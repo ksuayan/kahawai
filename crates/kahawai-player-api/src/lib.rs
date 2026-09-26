@@ -165,7 +165,7 @@ impl Client {
 
     /// Direct URL for an `<img>` tag; no request is made.
     pub fn artwork_url(&self, hash: &str) -> String {
-        self.url(&format!("/artwork/{hash}"))
+        self.url(&format!("/api/artwork/{hash}"))
     }
 
     // -- jobs & scan (S9) ----------------------------------------------------

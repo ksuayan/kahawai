@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import {
   checkHealth,
-  fetchAlbum,
+  fetchAlbumDetail,
   fetchAllAlbums,
   fetchArtistDetail,
   fetchArtists,
@@ -76,8 +76,11 @@ export const useLibraryStore = defineStore("library", () => {
 
   /** Full album detail: album record + its tracks, sorted by disc/track. */
   async function getAlbumDetail(id: number): Promise<{ album: Album; tracks: Track[] }> {
-    const album = await fetchAlbum(id);
-    const tracks = sortTracks(await ensureTracks(album.track_ids));
+    const { album, tracks: served } = await fetchAlbumDetail(id);
+    // The server ships the tracks with the album; cache them and only
+    // fetch individually if it left any out.
+    cacheTracks(served);
+    const tracks = sortTracks(await ensureTracks(album.track_ids ?? served.map((t) => t.id)));
     return { album, tracks };
   }
 

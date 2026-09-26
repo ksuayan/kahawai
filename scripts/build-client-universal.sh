@@ -51,6 +51,7 @@ else
 fi
 
 APP_NAME="Kahawai Player"  # must match productName in player/src-tauri/tauri.conf.json
+EXE_NAME="kahawai-player"  # the Cargo bin name inside Contents/MacOS (not the product name)
 
 for target in x86_64-apple-darwin aarch64-apple-darwin; do
   echo "==> cargo tauri build --target ${target}…"
@@ -74,9 +75,9 @@ echo "==> assembling universal bundle → ${OUT}"
 rm -rf "${OUT}"
 cp -R "${BUNDLE_ARM}/${APP_NAME}.app" "${OUT}"
 
-BIN_X64="${BUNDLE_X64}/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
-BIN_ARM="${BUNDLE_ARM}/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
-BIN_OUT="${OUT}/Contents/MacOS/${APP_NAME}"
+BIN_X64="${BUNDLE_X64}/${APP_NAME}.app/Contents/MacOS/${EXE_NAME}"
+BIN_ARM="${BUNDLE_ARM}/${APP_NAME}.app/Contents/MacOS/${EXE_NAME}"
+BIN_OUT="${OUT}/Contents/MacOS/${EXE_NAME}"
 
 if [[ ! -f "${BIN_X64}" || ! -f "${BIN_ARM}" ]]; then
   echo "error: app bundle executables not found." >&2
@@ -97,11 +98,11 @@ Manual signing & notarization (requires a paid Apple Developer identity;
 NOT attempted here):
   1. codesign --deep --force --options runtime \
        --sign "Developer ID Application: <Your Name> (<TEAMID>)" \
-       dist/music-client.app
-  2. ditto -c -k --keepParent dist/music-client.app dist/music-client.zip
-  3. xcrun notarytool submit dist/music-client.zip \
+       "dist/Kahawai Player.app"
+  2. ditto -c -k --keepParent "dist/Kahawai Player.app" "dist/Kahawai Player.zip"
+  3. xcrun notarytool submit "dist/Kahawai Player.zip" \
        --apple-id <APPLE_ID> --team-id <TEAMID> --password <APP_SPECIFIC_PASSWORD> \
        --wait
-  4. xcrun stapler staple dist/music-client.app
-  5. spctl -a -vvv -t install dist/music-client.app   # sanity check
+  4. xcrun stapler staple "dist/Kahawai Player.app"
+  5. spctl -a -vvv -t install "dist/Kahawai Player.app"   # sanity check
 EOF

@@ -3,7 +3,7 @@
 // Every call is guarded: in plain `vite dev` (no Tauri webview) the
 // commands fail softly and return undefined.
 
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   DsdStory,
@@ -24,6 +24,34 @@ async function cmd<T>(name: string, args?: Record<string, unknown>): Promise<T |
     console.warn(`[tauri] command '${name}' failed:`, err);
     return undefined;
   }
+}
+
+/** True inside the Tauri webview (false under plain `vite dev`). */
+export function inTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/**
+ * URL for a cover through the shell's `artwork://` protocol, which serves
+ * from the on-disk cache and fetches from the server only on a miss.
+ * (`convertFileSrc` yields the right form per OS, e.g. Windows' http://artwork.localhost.)
+ */
+export function cachedArtworkUrl(hash: string): string {
+  return convertFileSrc(hash, "artwork");
+}
+
+export interface ArtworkCacheStats {
+  bytes: number;
+  files: number;
+}
+
+export async function artworkCacheStats(): Promise<ArtworkCacheStats | undefined> {
+  return cmd<ArtworkCacheStats>("artwork_cache_stats");
+}
+
+/** Returns how many cached images were deleted. */
+export async function clearArtworkCache(): Promise<number | undefined> {
+  return cmd<number>("clear_artwork_cache");
 }
 
 export async function getServerUrl(): Promise<string | undefined> {

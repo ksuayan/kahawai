@@ -75,14 +75,16 @@ fn default_output_device() -> Result<AudioObjectID, MusicError> {
     let mut device: AudioObjectID = 0;
     let mut size = std::mem::size_of::<AudioObjectID>() as u32;
     os(
-        AudioObjectGetPropertyData(
-            kAudioObjectSystemObject,
-            &addr,
-            0,
-            ptr::null(),
-            &mut size,
-            &mut device as *mut _ as *mut c_void,
-        ),
+        unsafe {
+            AudioObjectGetPropertyData(
+                kAudioObjectSystemObject,
+                &addr,
+                0,
+                ptr::null(),
+                &mut size,
+                &mut device as *mut _ as *mut c_void,
+            )
+        },
         "get default output device",
     )?;
     if device == 0 {
@@ -96,7 +98,7 @@ fn available_sample_rates(device: AudioObjectID) -> Result<Vec<f64>, MusicError>
     let addr = prop_addr(kAudioDevicePropertyAvailableNominalSampleRates);
     let mut size: u32 = 0;
     os(
-        AudioObjectGetPropertyDataSize(device, &addr, 0, ptr::null(), &mut size),
+        unsafe { AudioObjectGetPropertyDataSize(device, &addr, 0, ptr::null(), &mut size) },
         "get available-rate size",
     )?;
     let count = size as usize / std::mem::size_of::<AudioValueRange>();
@@ -108,14 +110,16 @@ fn available_sample_rates(device: AudioObjectID) -> Result<Vec<f64>, MusicError>
         .collect();
     let mut size2 = size;
     os(
-        AudioObjectGetPropertyData(
-            device,
-            &addr,
-            0,
-            ptr::null(),
-            &mut size2,
-            ranges.as_mut_ptr() as *mut c_void,
-        ),
+        unsafe {
+            AudioObjectGetPropertyData(
+                device,
+                &addr,
+                0,
+                ptr::null(),
+                &mut size2,
+                ranges.as_mut_ptr() as *mut c_void,
+            )
+        },
         "get available rates",
     )?;
     let mut out = Vec::new();
@@ -135,14 +139,16 @@ fn get_nominal_rate(device: AudioObjectID) -> Result<f64, MusicError> {
     let mut rate: f64 = 0.0;
     let mut size = std::mem::size_of::<f64>() as u32;
     os(
-        AudioObjectGetPropertyData(
-            device,
-            &addr,
-            0,
-            ptr::null(),
-            &mut size,
-            &mut rate as *mut _ as *mut c_void,
-        ),
+        unsafe {
+            AudioObjectGetPropertyData(
+                device,
+                &addr,
+                0,
+                ptr::null(),
+                &mut size,
+                &mut rate as *mut _ as *mut c_void,
+            )
+        },
         "get nominal sample rate",
     )?;
     Ok(rate)
@@ -150,16 +156,17 @@ fn get_nominal_rate(device: AudioObjectID) -> Result<f64, MusicError> {
 
 fn set_nominal_rate(device: AudioObjectID, rate: f64) -> Result<(), MusicError> {
     let addr = prop_addr(kAudioDevicePropertyNominalSampleRate);
-    let rate = rate;
     os(
-        AudioObjectSetPropertyData(
-            device,
-            &addr,
-            0,
-            ptr::null(),
-            std::mem::size_of::<f64>() as u32,
-            &rate as *const _ as *const c_void,
-        ),
+        unsafe {
+            AudioObjectSetPropertyData(
+                device,
+                &addr,
+                0,
+                ptr::null(),
+                std::mem::size_of::<f64>() as u32,
+                &rate as *const _ as *const c_void,
+            )
+        },
         "set nominal sample rate",
     )
 }
@@ -169,14 +176,16 @@ fn get_hog_pid(device: AudioObjectID) -> Result<i32, MusicError> {
     let mut pid: i32 = 0;
     let mut size = std::mem::size_of::<i32>() as u32;
     os(
-        AudioObjectGetPropertyData(
-            device,
-            &addr,
-            0,
-            ptr::null(),
-            &mut size,
-            &mut pid as *mut _ as *mut c_void,
-        ),
+        unsafe {
+            AudioObjectGetPropertyData(
+                device,
+                &addr,
+                0,
+                ptr::null(),
+                &mut size,
+                &mut pid as *mut _ as *mut c_void,
+            )
+        },
         "get hog mode",
     )?;
     Ok(pid)
@@ -184,16 +193,17 @@ fn get_hog_pid(device: AudioObjectID) -> Result<i32, MusicError> {
 
 fn set_hog_pid(device: AudioObjectID, pid: i32) -> Result<(), MusicError> {
     let addr = prop_addr(kAudioDevicePropertyHogMode);
-    let pid = pid;
     os(
-        AudioObjectSetPropertyData(
-            device,
-            &addr,
-            0,
-            ptr::null(),
-            std::mem::size_of::<i32>() as u32,
-            &pid as *const _ as *const c_void,
-        ),
+        unsafe {
+            AudioObjectSetPropertyData(
+                device,
+                &addr,
+                0,
+                ptr::null(),
+                std::mem::size_of::<i32>() as u32,
+                &pid as *const _ as *const c_void,
+            )
+        },
         "set hog mode",
     )
 }
@@ -202,21 +212,23 @@ fn output_streams(device: AudioObjectID) -> Result<Vec<AudioStreamID>, MusicErro
     let addr = prop_addr(kAudioDevicePropertyStreams);
     let mut size: u32 = 0;
     os(
-        AudioObjectGetPropertyDataSize(device, &addr, 0, ptr::null(), &mut size),
+        unsafe { AudioObjectGetPropertyDataSize(device, &addr, 0, ptr::null(), &mut size) },
         "get stream list size",
     )?;
     let count = size as usize / std::mem::size_of::<AudioStreamID>();
     let mut ids: Vec<AudioStreamID> = (0..count).map(|_| 0).collect();
     let mut size2 = size;
     os(
-        AudioObjectGetPropertyData(
-            device,
-            &addr,
-            0,
-            ptr::null(),
-            &mut size2,
-            ids.as_mut_ptr() as *mut c_void,
-        ),
+        unsafe {
+            AudioObjectGetPropertyData(
+                device,
+                &addr,
+                0,
+                ptr::null(),
+                &mut size2,
+                ids.as_mut_ptr() as *mut c_void,
+            )
+        },
         "get stream list",
     )?;
     Ok(ids)
@@ -234,6 +246,7 @@ fn dop_stream_format(rate: u32, channels: u16) -> AudioStreamBasicDescription {
         mBytesPerFrame: channels as u32 * 3,
         mChannelsPerFrame: channels as u32,
         mBitsPerChannel: 24,
+        mReserved: 0,
     }
 }
 
@@ -243,14 +256,16 @@ fn set_stream_format(
 ) -> Result<(), MusicError> {
     let addr = prop_addr(kAudioStreamPropertyPhysicalFormat);
     os(
-        AudioObjectSetPropertyData(
-            stream,
-            &addr,
-            0,
-            ptr::null(),
-            std::mem::size_of::<AudioStreamBasicDescription>() as u32,
-            asbd as *const _ as *const c_void,
-        ),
+        unsafe {
+            AudioObjectSetPropertyData(
+                stream,
+                &addr,
+                0,
+                ptr::null(),
+                std::mem::size_of::<AudioStreamBasicDescription>() as u32,
+                asbd as *const _ as *const c_void,
+            )
+        },
         "set stream physical format",
     )
 }
@@ -266,17 +281,20 @@ fn get_stream_format(stream: AudioStreamID) -> Result<AudioStreamBasicDescriptio
         mBytesPerFrame: 0,
         mChannelsPerFrame: 0,
         mBitsPerChannel: 0,
+        mReserved: 0,
     };
     let mut size = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
     os(
-        AudioObjectGetPropertyData(
-            stream,
-            &addr,
-            0,
-            ptr::null(),
-            &mut size,
-            &mut asbd as *mut _ as *mut c_void,
-        ),
+        unsafe {
+            AudioObjectGetPropertyData(
+                stream,
+                &addr,
+                0,
+                ptr::null(),
+                &mut size,
+                &mut asbd as *mut _ as *mut c_void,
+            )
+        },
         "get stream physical format",
     )?;
     Ok(asbd)
@@ -536,7 +554,7 @@ impl AudioSink for CoreAudioDopSink {
             marker: MARKER_EVEN,
         });
         let raw = Box::into_raw(render_state);
-        let mut proc_id: AudioDeviceIOProcID = ptr::null_mut();
+        let mut proc_id: AudioDeviceIOProcID = None;
         let status = unsafe {
             AudioDeviceCreateIOProcID(
                 self.device,
@@ -545,7 +563,7 @@ impl AudioSink for CoreAudioDopSink {
                 &mut proc_id,
             )
         };
-        if status != NO_ERR || proc_id.is_null() {
+        if status != NO_ERR || proc_id.is_none() {
             unsafe {
                 let _ = Box::from_raw(raw);
             }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { checkHealth } from "../api";
+import { artworkCacheStats, clearArtworkCache, inTauri, type ArtworkCacheStats } from "../tauri";
 import { useDspStore } from "../stores/dsp";
 import { useJobsStore } from "../stores/jobs";
 import { useLibraryStore } from "../stores/library";
@@ -68,6 +69,34 @@ function formatLabel(f: StreamFormat): string {
 function onDsdStory(e: Event): void {
   void settings.saveDsdStory((e.target as HTMLSelectElement).value as DsdStory);
 }
+
+// --- Album-art cache ---------------------------------------------------------
+
+const artStats = ref<ArtworkCacheStats | null>(null);
+const artClearing = ref(false);
+
+async function refreshArtStats(): Promise<void> {
+  artStats.value = (await artworkCacheStats()) ?? null;
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function onClearArt(): Promise<void> {
+  artClearing.value = true;
+  try {
+    await clearArtworkCache();
+    await refreshArtStats();
+    // Re-request covers so the grid refills from the server right away.
+    await lib.loadAll();
+  } finally {
+    artClearing.value = false;
+  }
+}
+
+if (inTauri()) void refreshArtStats();
 
 // --- Library scan + jobs -----------------------------------------------------
 
@@ -221,6 +250,21 @@ const dopRates = computed(() =>
         </div>
         <button class="icon-btn" @click="jobs.refresh()">⟳ Refresh</button>
       </div>
+    </section>
+
+    <section v-if="inTauri()">
+      <h3>Album art cache</h3>
+      <p class="hint">
+        Covers are saved on disk the first time they are shown, so they load
+        instantly afterwards and still appear if the server is offline.
+        Older ones are dropped automatically once the cache passes 512&nbsp;MB.
+      </p>
+      <p v-if="artStats" class="hint">
+        {{ artStats.files }} {{ artStats.files === 1 ? "image" : "images" }} · {{ fmtBytes(artStats.bytes) }}
+      </p>
+      <button class="icon-btn" :disabled="artClearing || !artStats?.files" @click="onClearArt">
+        {{ artClearing ? "Clearing…" : "Clear cache" }}
+      </button>
     </section>
 
     <section>

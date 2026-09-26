@@ -31,6 +31,9 @@ use symphonia::core::meta::MetadataOptions;
 /// stereo WAV would be ~2.3 MiB/s, so 512 MiB is generous headroom.
 const CHAINED_BODY_CAP: u64 = 512 * 1024 * 1024;
 
+/// Cap for buffering an MP4/M4A response (see [`StreamDecoder::new`]).
+const MP4_BODY_CAP: u64 = 1024 * 1024 * 1024;
+
 fn symphonia_error(e: SymphoniaError) -> MusicError {
     MusicError::Metadata(format!("decode error: {e}"))
 }
@@ -115,10 +118,35 @@ impl StreamDecoder {
             this.full = Some(buf.into_boxed_slice());
             this.probe_at(0)?;
         } else {
-            let mss = MediaSourceStream::new(
-                Box::new(ReadOnlySource::new(SyncRead(source))),
-                Default::default(),
-            );
+            // Sniff the container: MP4/M4A (AAC, ALAC) commonly keeps its
+            // `moov` index at the END of the file, and symphonia must seek to
+            // it — impossible on a network stream. Buffer those responses so
+            // the demuxer gets a seekable source; everything else (FLAC, MP3,
+            // WAV, Ogg…) keeps streaming with constant memory.
+            let mut source = source;
+            let mut head = Vec::with_capacity(12);
+            (&mut source)
+                .take(12)
+                .read_to_end(&mut head)
+                .map_err(MusicError::Io)?;
+            let is_mp4 = head.len() >= 8 && &head[4..8] == b"ftyp";
+            let mss = if is_mp4 {
+                let mut buf = head;
+                source
+                    .take(MP4_BODY_CAP)
+                    .read_to_end(&mut buf)
+                    .map_err(MusicError::Io)?;
+                MediaSourceStream::new(
+                    Box::new(Cursor::new(buf.into_boxed_slice())),
+                    Default::default(),
+                )
+            } else {
+                let replay = Cursor::new(head).chain(source);
+                MediaSourceStream::new(
+                    Box::new(ReadOnlySource::new(SyncRead(Box::new(replay)))),
+                    Default::default(),
+                )
+            };
             this.probe_stream(mss)?;
         }
         Ok(this)
