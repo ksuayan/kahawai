@@ -58,6 +58,54 @@ describe("QueueView", () => {
     expect(btn(w, "Clear").attributes("disabled")).toBeDefined();
   });
 
+  describe("playing from the queue (double-click)", () => {
+    it("double-clicking a row plays the queue from that track", async () => {
+      const w = await mountQueue([a, b, c], 0);
+      await rows(w)[2].trigger("dblclick");
+      await settle();
+      const call = tauri.callsTo("queue_play")[0] as { tracks: { id: number }[]; index: number };
+      expect(call.index).toBe(2);
+      expect(call.tracks.map((t) => t.id)).toEqual([a.id, b.id, c.id]); // the queue is kept whole
+      expect(useQueueStore().index).toBe(2);
+      expect(useQueueStore().current?.title).toBe("Gamma");
+    });
+
+    it("Enter on a focused row plays it too (keyboard access)", async () => {
+      const w = await mountQueue();
+      await rows(w)[1].trigger("keydown", { key: "Enter" });
+      await settle();
+      expect((tauri.callsTo("queue_play")[0] as { index: number }).index).toBe(1);
+      expect(rows(w)[1].attributes("tabindex")).toBe("0");
+    });
+
+    it("a track that cannot play (missing file) is dimmed and ignores double-click", async () => {
+      const bad = makeTrack({ title: "Gone", missing: true });
+      const w = await mountQueue([a, bad], 0);
+      expect(rows(w)[1].classes()).toContain("opacity-45");
+      expect(rows(w)[1].attributes("title")).toMatch(/missing/i);
+      await rows(w)[1].trigger("dblclick");
+      await settle();
+      expect(tauri.callsTo("queue_play")).toHaveLength(0);
+    });
+
+    it("tells the user how to play a row", async () => {
+      const w = await mountQueue();
+      expect(rows(w)[0].attributes("title")).toContain("Double-click to play");
+    });
+
+    it("only the drag handle shows the grab cursor, not the whole row (regression: hand cursor everywhere)", async () => {
+      const w = await mountQueue();
+      expect(rows(w)[0].classes()).toContain("cursor-default");
+      expect(rows(w)[0].classes()).not.toContain("cursor-grab");
+      expect(rows(w)[0].find("svg.cursor-grab").exists()).toBe(true);
+    });
+
+    it("dragging still works alongside double-click", async () => {
+      const w = await mountQueue();
+      expect(rows(w)[0].attributes("draggable")).toBe("true");
+    });
+  });
+
   describe("row actions", () => {
     it("disables Move up on the first row and Move down on the last", async () => {
       const w = await mountQueue();

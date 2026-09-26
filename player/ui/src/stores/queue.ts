@@ -52,6 +52,13 @@ export const useQueueStore = defineStore("queue", () => {
     }
   }
 
+  /** Jump to (and play) the track at `i` in the current queue. */
+  async function playAt(i: number): Promise<void> {
+    if (i < 0 || i >= tracks.value.length) return;
+    index.value = i;
+    await queuePlay(tracks.value, i);
+  }
+
   async function playAll(list: Track[], startIndex: number): Promise<void> {
     tracks.value = list.map((t) => ({ ...t }));
     index.value = startIndex;
@@ -154,6 +161,7 @@ export const useQueueStore = defineStore("queue", () => {
     queueIds,
     syncFromState,
     playAll,
+    playAt,
     appendTracks,
     playNext,
     reorder,

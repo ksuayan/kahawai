@@ -36,6 +36,29 @@ describe("queue store", () => {
     expect(q.tracks[0].title).toBe("A");
   });
 
+  describe("playAt", () => {
+    it("moves the cursor and restarts playback from that index, keeping the whole queue", async () => {
+      const q = useQueueStore();
+      q.tracks = [a, b, c].map((t) => ({ ...t }));
+      q.index = 0;
+      await q.playAt(2);
+      expect(q.index).toBe(2);
+      const call = tauri.callsTo("queue_play")[0] as { tracks: { id: number }[]; index: number };
+      expect(call.index).toBe(2);
+      expect(call.tracks).toHaveLength(3);
+    });
+
+    it("ignores an index outside the queue", async () => {
+      const q = useQueueStore();
+      q.tracks = [{ ...a }];
+      q.index = 0;
+      await q.playAt(5);
+      await q.playAt(-1);
+      expect(q.index).toBe(0);
+      expect(tauri.callsTo("queue_play")).toHaveLength(0);
+    });
+  });
+
   describe("syncFromState (the engine is the truth)", () => {
     it("adopts the engine's queue order and cursor", async () => {
       const lib = useLibraryStore();

@@ -4,7 +4,7 @@ import { ref } from "vue";
 import { usePlaylistsStore } from "../stores/playlists";
 import { usePlayerStore } from "../stores/player";
 import { useQueueStore } from "../stores/queue";
-import { formatDuration, trackTitle, type Track } from "../types";
+import { formatDuration, isPlayable, trackTitle, unplayableReason, type Track } from "../types";
 import PromptDialog from "../ui/PromptDialog.vue";
 import StateMessage from "../ui/StateMessage.vue";
 import UiButton from "../ui/UiButton.vue";
@@ -55,7 +55,14 @@ function onDragEnd(): void {
 }
 
 function rowTitle(t: Track): string {
-  return `${trackTitle(t)}${t.artist ? ` — ${t.artist}` : ""}`;
+  const base = `${trackTitle(t)}${t.artist ? ` — ${t.artist}` : ""}`;
+  return isPlayable(t) ? `${base}\nDouble-click to play` : `${base} — ${unplayableReason(t)}`;
+}
+
+/** Double-click / Enter: play the queue from this row. */
+function playRow(i: number): void {
+  const t = queue.tracks[i];
+  if (t && isPlayable(t)) void queue.playAt(i);
 }
 
 async function saveAsPlaylist(name: string): Promise<void> {
@@ -106,16 +113,21 @@ async function saveAsPlaylist(name: string): Promise<void> {
       <div
         v-for="(t, i) in queue.tracks"
         :key="t.id"
-        class="flex cursor-grab items-center gap-3 rounded-md px-2.5 py-[7px]"
+        class="flex cursor-default items-center gap-3 rounded-md px-2.5 py-[7px] outline-none focus-visible:outline-2 focus-visible:outline-accent"
         :class="[
           i === queue.index ? 'bg-accent/15' : 'hover:bg-hover',
+          !isPlayable(t) && 'opacity-45',
           dragged === i && 'opacity-40',
           dropTarget === i && dragged !== i && 'shadow-[inset_0_2px_0_var(--color-accent)]',
         ]"
         :data-current="i === queue.index || undefined"
+        :data-playable="isPlayable(t)"
         data-testid="queue-row"
+        tabindex="0"
         :title="rowTitle(t)"
         draggable="true"
+        @dblclick="playRow(i)"
+        @keydown.enter.self="playRow(i)"
         @dragstart="onDragStart(i, $event)"
         @dragover="onDragOver(i, $event)"
         @dragleave="onDragLeave"
