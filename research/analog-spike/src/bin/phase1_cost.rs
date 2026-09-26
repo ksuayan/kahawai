@@ -1,7 +1,7 @@
 //! CPU cost of the real `AnalogStage` for each anti-aliasing plan (release
 //! build): one second of stereo audio in 4096-frame chunks, like the engine.
 use kahawai_player_core::{
-    triode_table, AnalogFlavour, AnalogSettings, AnalogStage, AntiAlias, DspStage, EqBand, EqBandType, ParametricEq,
+    triode_table, AnalogFlavour, AnalogSettings, AnalogStage, AntiAlias, AntiAliasChoice, DspStage, EqBand, EqBandType, ParametricEq,
 };
 use std::time::Instant;
 
@@ -25,7 +25,8 @@ fn main() {
         for (label, flavour) in [("triode", AnalogFlavour::WarmTriode), ("solid state", AnalogFlavour::SolidState)] {
             for (factor, adaa) in [(1usize, false), (1, true), (2, false), (2, true), (4, false), (4, true)] {
                 let mut st = AnalogStage::with_plan(fs as u32, AntiAlias { factor, adaa });
-                st.set_settings(AnalogSettings { enabled: true, flavour, drive: 0.6, mix: 0.5, output_db: 0.0, auto_gain: true, ..Default::default() });
+                let antialias = match (factor, adaa) { (1, false) => AntiAliasChoice::X1, (1, true) => AntiAliasChoice::X1Adaa, (2, false) => AntiAliasChoice::X2, (2, true) => AntiAliasChoice::X2Adaa, (_, false) => AntiAliasChoice::X4, (_, true) => AntiAliasChoice::X4Adaa };
+                st.set_settings(AnalogSettings { enabled: true, flavour, drive: 0.6, mix: 0.5, output_db: 0.0, auto_gain: true, antialias, ..Default::default() });
                 run(&format!("{label}: {factor}x{}", if adaa { " + ADAA" } else { "" }), &mut |c| st.process(c, 2));
             }
         }

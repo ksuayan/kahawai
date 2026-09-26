@@ -95,8 +95,22 @@ describe("Analog warmth settings", () => {
   it("has labelled controls for both slots", async () => {
     await boot();
     for (const s of ["A", "B"]) {
-      for (const name of ["Drive", "Mix", "Output"]) expect(slider(`${name} ${s}`)).not.toBeNull();
+      for (const name of ["Drive", "Mix", "Sag", "Transformer", "Output"]) expect(slider(`${name} ${s}`)).not.toBeNull();
       expect($$(`[aria-label="Flavour ${s}"]`)).toHaveLength(1);
     }
+  });
+});
+
+describe("Analog warmth: sag and transformer", () => {
+  it("edits them per slot and sends them to the engine when that slot is heard", async () => {
+    const { wrapper, store } = await boot();
+    await wrapper.get('[data-testid="ab-b"]').trigger("click");
+    tauri.calls.length = 0;
+    document.body.querySelector('[role="slider"][aria-label="Sag B"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+    document.body.querySelector('[role="slider"][aria-label="Transformer B"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }));
+    await settle();
+    expect(store.b.sag).toBeCloseTo(0.31, 5);
+    expect(store.b.transformer).toBeCloseTo(0.29, 5);
+    expect(tauri.callsTo("set_analog").at(-1)).toMatchObject({ settings: { sag: 0.31, transformer: 0.29 } });
   });
 });

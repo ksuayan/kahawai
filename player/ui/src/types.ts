@@ -152,6 +152,10 @@ export interface AnalogSettings {
   /** Match the processed level to the dry level. */
   auto_gain: boolean;
   antialias: AntiAliasChoice;
+  /** 0..1: power-supply sag (loud passages lower headroom and gain, then recover). */
+  sag: number;
+  /** 0..1: output-transformer colour (bass saturates as the level rises). */
+  transformer: number;
 }
 
 export const DEFAULT_ANALOG_SETTINGS: AnalogSettings = {
@@ -162,6 +166,8 @@ export const DEFAULT_ANALOG_SETTINGS: AnalogSettings = {
   output_db: 0,
   auto_gain: true,
   antialias: "auto",
+  sag: 0.3,
+  transformer: 0.3,
 };
 
 /** Pull every value into its allowed range (the core does the same). */
@@ -175,6 +181,8 @@ export function clampAnalog(s: AnalogSettings): AnalogSettings {
     drive: n(s.drive, 0.4, 0, 1),
     mix: n(s.mix, 0.4, 0, 1),
     output_db: n(s.output_db, 0, -6, 6),
+    sag: n(s.sag, 0.3, 0, 1),
+    transformer: n(s.transformer, 0.3, 0, 1),
   };
 }
 

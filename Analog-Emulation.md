@@ -1,9 +1,10 @@
 # Analog emulation: tube and transistor "euphonics"
 
 Research summary and an itemized plan for adding tube and transistor
-character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 2 done** (research, a working stage in the engine,
+character to the PCM playback chain. Branch: `analog-poc`. Status: **Phases 0 to 3 done** (research, a working stage in the engine,
 the triode curve derived from Koren's model, and antiderivative
-antialiasing), plus **an A/B test panel in Settings** (section 13). Findings: section 10; Phase 1 results: 11;
+antialiasing), sag and transformer colour (section 14), plus **an A/B test panel in
+Settings** (section 13). Findings: section 10; Phase 1 results: 11;
 Phase 2 results: 12.
 
 Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md)
@@ -220,13 +221,13 @@ with something we can listen to and a green test suite.
 | 2.2 | Replace the hand-made curve with a table lookup for the tube flavour | Done; harmonic profile matches the prototype targets (test) |
 | 2.3 | Add ADAA for the table curve so the oversampling factor can drop | Done; measured. ADAA is nearly free and clearly helps, but the factor was kept because oversampling is cheap enough (section 12.3) |
 
-### Phase 3: dynamics and transformer colour (M)
+### Phase 3: dynamics and transformer colour (M) *(done, see section 14)*
 
-| # | Item | Notes / acceptance |
+| # | Item | Status |
 |---|---|---|
-| 3.1 | Sag: slow envelope follower that lowers headroom and gain, with attack and recovery | Level-dependent gain drop matches the flavour target |
-| 3.2 | Transformer colour: cheap level-dependent low shelf plus soft clip; evaluate a hysteresis state as a follow-up | Bass tone THD rises with level and falls with frequency, as intended |
-| 3.3 | Tone shaping: coupling and roll-off filters per flavour | Frequency response within a stated tolerance |
+| 3.1 | Sag: slow envelope follower that lowers headroom and gain, with attack and recovery | Done |
+| 3.2 | Transformer colour: cheap level-dependent low shelf plus soft clip; evaluate a hysteresis state as a follow-up | Done (bass soft clip); hysteresis not tried |
+| 3.3 | Tone shaping: coupling and roll-off filters per flavour | Partly: the 10 Hz coupling high-pass exists; a per-flavour roll-off was judged not worth adding (section 14.3) |
 
 ### Phase 4: UI (M)
 
@@ -704,7 +705,8 @@ Parametric EQ. Code: [AnalogSection.vue](player/ui/src/components/AnalogSection.
 ### 13.1 How it works
 
 - **Two slots, A and B**, each a complete set of settings: *Warmth on*,
-  *Flavour* (warm triode or solid state), *Drive*, *Mix*, *Output* trim,
+  *Flavour* (warm triode or solid state), *Drive*, *Mix*, *Sag*,
+  *Transformer*, *Output* trim,
   *Match level to the dry signal*, and *Anti-aliasing*.
 - **Listening to A / B** chooses which slot the engine plays. **Switch A/B**
   toggles. The switch fades out and in (about 15 ms per step), so it never
@@ -765,3 +767,97 @@ you hear, otherwise the louder side will sound better.
 - No true blind test (hidden identities, random order): the labels A and B
   show their settings.
 - No live level meter to check the match.
+
+---
+
+## 14. Phase 3 results
+
+Code: the sag envelope, transformer stage and their settings in
+[analog.rs](crates/kahawai-player-core/src/analog.rs). Two new controls,
+**Sag** and **Transformer** (0 to 100%, default 30% each), in the engine
+settings, in `dsp.analog`, and in each A/B slot in Settings.
+
+### 14.1 Sag (3.1)
+
+- **What it models:** a tube stage's power supply droops when the signal is
+  loud, so headroom shrinks and the stage plays a little quieter, then the
+  supply recovers.
+- **How:** a per-channel envelope follows the *driven* level (drive times the
+  input): 5 ms attack, 120 ms release. The envelope, squashed by `e / (1 + e)`
+  and scaled by the Sag setting, does two things: it drives the curve up to
+  50% harder (less headroom) and lowers the stage's output by up to 20%.
+  Small signals barely move it; the effect is proportional to how loud and
+  how driven the signal is.
+- **Level match:** the auto gain now includes the steady-state sag at its
+  reference level.
+- **Tests:** with sag on, loud material is compressed more than quiet
+  material (at least 0.5 dB more), and the stage is quieter just after a loud
+  burst than a fraction of a second later (recovery), while with sag at 0
+  there is no such curve.
+
+### 14.2 Transformer colour (3.2)
+
+- **What it models:** an output transformer's core saturating at low
+  frequencies and high levels, which adds bass harmonics without touching the
+  mids or highs.
+- **How:** the wet signal's bass (a one-pole low-pass at 90 Hz) is soft-clipped
+  with a hard `tanh` and blended back in by the Transformer amount:
+  `y = wet + amount × (softclip(bass) − bass)`. At amount 0 this is exactly
+  the signal (bit-identical to Phase 2).
+- **Tests:** at 59 Hz the 3rd harmonic is at least 8 dB higher with the
+  transformer on, at least 12 dB higher at a high level than at a low level,
+  and higher at a larger amount; at 1 kHz it changes by less than 3 dB.
+- **Not tried:** a real hysteresis (Jiles-Atherton) model. This cheap version
+  gives the level- and frequency-dependent bass colour; a hysteresis state
+  would add memory effects. Left as a possible follow-up only if listening
+  says it is missing.
+
+### 14.3 Tone and linearity (3.3)
+
+- **Linear response** is checked: with sag and transformer at 30%, drive at
+  0 and a small signal, both flavours stay within ±1 dB from 30 Hz to
+  16 kHz. (Below 30 Hz the 10 Hz coupling high-pass starts to show, by
+  design.) So colour appears with level, not as a fixed tone change.
+- **HF roll-off:** a per-flavour high-frequency roll-off would only matter at
+  96 kHz and above, and it would work against the goal of not changing the
+  tone at low level. Not added.
+- **Coupling high-pass:** the existing 10 Hz DC blocker; a per-flavour corner
+  was not added.
+
+### 14.4 CPU
+
+Release build, one second of stereo audio, one core, with sag and transformer
+active (they add per-sample work: an envelope follower, a low-pass and a
+`tanh`):
+
+| Sample rate, plan in use | Existing EQ | Triode | Solid state |
+|---|---|---|---|
+| 44.1 kHz (4x + ADAA) | 0.2% | 3.5% | 4.0% |
+| 96 kHz (2x + ADAA) | 0.4% | 4.3% | 4.8% |
+| 192 kHz (1x + ADAA) | 0.8% | 2.4% | 3.1% |
+
+Phase 2 was 3.4%, 4.0% and 1.0% for the triode. The 192 kHz figure rose most
+because the added per-sample work is a larger share when no oversampling
+filter dominates. Still small. (Note: the earlier Phase 2 cost tables in
+sections 11 and 12 are unchanged history; output for every plan is in
+[PHASE1_COST.txt](research/analog-spike/PHASE1_COST.txt). The cost tool
+now sets the anti-aliasing plan explicitly; after the A/B panel added the
+`antialias` setting, it briefly measured "auto" for every row.)
+
+### 14.5 What to listen for
+
+- **Sag:** with drive up, loud hits should feel slightly softer and give way,
+  and the body should come back a moment later. At 0% it should disappear.
+- **Transformer:** on bass-heavy material (kick, bass guitar, organ), more
+  weight and grit on loud bass notes at higher settings; nothing on quiet
+  passages or on vocals.
+- **A/B both:** put the same flavour in A and B with different sag and
+  transformer amounts, or compare against 0% for both.
+
+### 14.6 Still open
+
+- Push-pull and hard-transistor flavours as extra presets.
+- UI polish: a keyboard shortcut and a blind-test mode for the A/B panel.
+- Whether the defaults (30% sag, 30% transformer) suit the music you play;
+  they are guesses.
+- Datasheet tuning of the triode curve, and published harmonic measurements.

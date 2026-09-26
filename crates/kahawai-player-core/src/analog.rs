@@ -90,6 +90,12 @@ pub struct AnalogSettings {
     pub auto_gain: bool,
     /// Anti-aliasing plan; `auto` follows the sample rate.
     pub antialias: AntiAliasChoice,
+    /// 0..=1: power-supply sag. Loud passages lower the stage's headroom and
+    /// gain a little, and it recovers over about a tenth of a second.
+    pub sag: f32,
+    /// 0..=1: output-transformer colour. The low bass saturates as the level
+    /// rises, adding bass harmonics; mids and highs are untouched.
+    pub transformer: f32,
 }
 
 impl Default for AnalogSettings {
@@ -102,6 +108,8 @@ impl Default for AnalogSettings {
             output_db: 0.0,
             auto_gain: true,
             antialias: AntiAliasChoice::Auto,
+            sag: 0.3,
+            transformer: 0.3,
         }
     }
 }
@@ -113,6 +121,8 @@ impl AnalogSettings {
         self.drive = fin(self.drive, 0.4).clamp(0.0, 1.0);
         self.mix = fin(self.mix, 0.4).clamp(0.0, 1.0);
         self.output_db = fin(self.output_db, 0.0).clamp(-6.0, 6.0);
+        self.sag = fin(self.sag, 0.3).clamp(0.0, 1.0);
+        self.transformer = fin(self.transformer, 0.3).clamp(0.0, 1.0);
         self
     }
 }
@@ -315,17 +325,41 @@ impl Shaper {
     }
 }
 
+// Sag: an envelope of the driven level (fast attack, slower recovery) lowers
+// the headroom (the stage is driven a little harder) and the output level.
+const SAG_ATTACK_S: f32 = 0.005;
+const SAG_RELEASE_S: f32 = 0.12;
+/// At full sag and a saturated envelope: how much harder the curve is driven,
+/// and how much quieter the stage gets.
+const SAG_DRIVE: f32 = 0.5;
+const SAG_LEVEL: f32 = 0.2;
+
+/// What the sag envelope does at a level: `(extra drive, output factor)`.
+#[inline]
+fn sag_effect(sag: f32, env: f32) -> (f32, f32) {
+    let sagf = sag * env / (1.0 + env);
+    (1.0 + SAG_DRIVE * sagf, 1.0 - SAG_LEVEL * sagf)
+}
+
+// Transformer colour: the bass (below about 90 Hz) is soft-clipped, blended
+// in by the amount; everything above passes through unchanged.
+const XF_CORNER_HZ: f32 = 90.0;
+const XF_HARDNESS: f32 = 6.0;
+
 /// Gain that makes the processed level match the dry level for a -12 dBFS
 /// RMS sine: what "auto gain match" applies.
-fn gain_match(shaper: Shaper, g: f32) -> f32 {
+fn gain_match(shaper: Shaper, g: f32, sag: f32) -> f32 {
     const N: usize = 2048;
     let amp = 0.354_f64; // -12 dBFS RMS
+    // Steady-state sag envelope for this sine: mean |x| times the drive.
+    let env = (amp * 2.0 / std::f64::consts::PI) as f32 * g;
+    let (extra, level) = sag_effect(sag, env);
     let mut sum_in = 0.0f64;
     let mut ys = [0.0f64; N];
     for (i, y) in ys.iter_mut().enumerate() {
         let x = amp * (2.0 * std::f64::consts::PI * (i as f64) / 64.0).sin();
         sum_in += x * x;
-        *y = shaper.f(g as f64 * x) / g as f64;
+        *y = shaper.f((g * extra) as f64 * x) / (g * extra) as f64 * level as f64;
     }
     let mean = ys.iter().sum::<f64>() / N as f64; // DC is removed downstream
     let sum_out: f64 = ys.iter().map(|&v| (v - mean).powi(2)).sum();
@@ -429,6 +463,9 @@ struct Chan {
     dc_y1: f32,
     /// ADAA memory: previous curve input and its antiderivative.
     adaa: (f64, f64),
+    /// Sag envelope and the transformer's low-pass state.
+    env: f32,
+    lf: f32,
 }
 
 impl Chan {
@@ -440,6 +477,8 @@ impl Chan {
             dc_x1: 0.0,
             dc_y1: 0.0,
             adaa: shaper.rest(),
+            env: 0.0,
+            lf: 0.0,
         }
     }
     fn clear(&mut self, shaper: &Shaper) {
@@ -449,6 +488,8 @@ impl Chan {
         self.dc_x1 = 0.0;
         self.dc_y1 = 0.0;
         self.adaa = shaper.rest();
+        self.env = 0.0;
+        self.lf = 0.0;
     }
 }
 
@@ -499,6 +540,8 @@ pub struct AnalogStage {
     comp: f32,
     out: f32,
     mix: f32,
+    sag: f32,
+    xf: f32,
     /// 1 when the stage is on, 0 when off; fades between.
     fade: f32,
     primed: bool,
@@ -527,6 +570,8 @@ impl AnalogStage {
             comp: 1.0,
             out: 1.0,
             mix: 0.0,
+            sag: 0.0,
+            xf: 0.0,
             fade: 0.0,
             primed: false,
             dc_r: 0.999,
@@ -550,7 +595,7 @@ impl AnalogStage {
     fn targets(&self) -> (f32, f32, f32, f32) {
         let s = &self.settings;
         let g = drive_gain(s.drive);
-        let comp = if s.auto_gain { gain_match(self.shaper, g) } else { 1.0 };
+        let comp = if s.auto_gain { gain_match(self.shaper, g, s.sag) } else { 1.0 };
         let out = 10f32.powf(s.output_db / 20.0);
         (g, comp, out, s.mix)
     }
@@ -561,6 +606,8 @@ impl AnalogStage {
         self.comp = comp;
         self.out = out;
         self.mix = mix;
+        self.sag = self.settings.sag;
+        self.xf = self.settings.transformer;
     }
 
     fn snap(&mut self) {
@@ -689,13 +736,19 @@ impl DspStage for AnalogStage {
 
         let (tg, mut tcomp, tout, tmix) = self.targets();
         let ramp = ((self.sample_rate as f32 * RAMP_SECONDS) as usize).max(1) as f32;
-        let (mut sg, mut sc, mut so, mut sm, mut sf) = (
+        let (tsag, txf) = (self.settings.sag, self.settings.transformer);
+        let (mut sg, mut sc, mut so, mut sm, mut sf, mut ssag, mut sxf) = (
             (tg - self.g) / ramp,
             (tcomp - self.comp) / ramp,
             (tout - self.out) / ramp,
             (tmix - self.mix) / ramp,
             (target_fade - self.fade) / ramp,
+            (tsag - self.sag) / ramp,
+            (txf - self.xf) / ramp,
         );
+        let sr = self.sample_rate.max(1) as f32;
+        let (att, rel) = (1.0 - (-1.0 / (SAG_ATTACK_S * sr)).exp(), 1.0 - (-1.0 / (SAG_RELEASE_S * sr)).exp());
+        let xf_a = 1.0 - (-2.0 * std::f32::consts::PI * XF_CORNER_HZ / sr).exp();
         let mut l = self.l;
         let mut adaa = self.plan.adaa;
         let mut latency = self.latency();
@@ -709,6 +762,8 @@ impl DspStage for AnalogStage {
             step(&mut self.out, tout, &mut so);
             step(&mut self.mix, tmix, &mut sm);
             step(&mut self.fade, target_fade, &mut sf);
+            step(&mut self.sag, tsag, &mut ssag);
+            step(&mut self.xf, txf, &mut sxf);
             if self.fade == 0.0 && (self.pending.is_some() || self.pending_plan.is_some()) {
                 // Faded out mid-block: swap the curve and plan, clear their
                 // history and fade back in, right here (not at the next block).
@@ -720,7 +775,7 @@ impl DspStage for AnalogStage {
                 gain_up = l as f32;
                 let shaper = self.shaper;
                 self.chans.iter_mut().for_each(|c| c.clear(&shaper));
-                self.comp = if self.settings.auto_gain { gain_match(shaper, tg) } else { 1.0 };
+                self.comp = if self.settings.auto_gain { gain_match(shaper, tg, tsag) } else { 1.0 };
                 tcomp = self.comp;
                 sc = 0.0;
                 target_fade = if self.settings.enabled { 1.0 } else { 0.0 };
@@ -728,11 +783,18 @@ impl DspStage for AnalogStage {
             }
             let (comp, out, mix, fade) = (self.comp, self.out, self.mix, self.fade);
             let shaper = self.shaper;
-            let (gd, inv_g) = (self.g, 1.0 / self.g);
+            let g_now = self.g;
+            let (sag, xf) = (self.sag, self.xf);
 
             for (ch, smp) in frame.iter_mut().enumerate() {
                 let x = *smp;
                 let st = &mut self.chans[ch];
+                // Sag: follow the driven level, then drive harder / play quieter.
+                let level = (x * g_now).abs();
+                st.env += (level - st.env) * if level > st.env { att } else { rel };
+                let (extra, sag_out) = sag_effect(sag, st.env);
+                let gd = g_now * extra;
+                let inv_g = 1.0 / gd; // unit small-signal gain at the driven level
                 let wet = if l == 1 {
                     shaper.apply(adaa, &mut st.adaa, x * gd) * inv_g
                 } else {
@@ -755,6 +817,11 @@ impl DspStage for AnalogStage {
                     }
                     acc
                 };
+                let wet = wet * sag_out;
+                // Transformer colour: saturate the bass, blended in by the amount.
+                st.lf += xf_a * (wet - st.lf);
+                let lf_sat = (XF_HARDNESS * st.lf).tanh() / XF_HARDNESS;
+                let wet = wet + xf * (lf_sat - st.lf);
                 // Remove the DC an asymmetric curve creates.
                 let dc = wet - st.dc_x1 + dc_r * st.dc_y1;
                 st.dc_x1 = wet;
@@ -800,7 +867,7 @@ mod tests {
     use std::f64::consts::PI;
 
     fn on(flavour: AnalogFlavour, drive: f32, mix: f32) -> AnalogSettings {
-        AnalogSettings { enabled: true, flavour, drive, mix, output_db: 0.0, auto_gain: false, antialias: AntiAliasChoice::Auto }
+        AnalogSettings { enabled: true, flavour, drive, mix, output_db: 0.0, auto_gain: false, antialias: AntiAliasChoice::Auto, sag: 0.0, transformer: 0.0 }
     }
 
     fn tone(bin: usize, n: usize, periods: usize, amp: f32, channels: usize) -> Vec<f32> {
@@ -1222,6 +1289,102 @@ mod tests {
         // ...and it came back at full level, not stuck faded out.
         let rms = (b[n..].iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / n as f64).sqrt();
         assert!(rms > 0.2, "signal present after the swap: rms {rms}");
+    }
+
+    fn colour(flavour: AnalogFlavour, drive: f32, sag: f32, transformer: f32) -> AnalogSettings {
+        AnalogSettings { sag, transformer, ..on(flavour, drive, 1.0) }
+    }
+
+    /// RMS of the processed signal over `range` (samples of one channel).
+    fn rms(x: &[f32], range: std::ops::Range<usize>) -> f64 {
+        let w = &x[range];
+        (w.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / w.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn sag_compresses_loud_passages_more_than_quiet_ones() {
+        let (n, bin) = (1 << 14, 371); // ~1 kHz
+        let gain_db = |sag: f32, amp: f32| {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(AnalogFlavour::WarmTriode, 0.3, sag, 0.0));
+            let out = run(&mut st, bin, n, amp);
+            let o = (out.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt();
+            db(o / (amp as f64 / 2f64.sqrt()))
+        };
+        let squash = |sag| gain_db(sag, 0.1) - gain_db(sag, 0.8);
+        assert!(squash(1.0) > squash(0.0) + 0.5, "sag adds compression: {:.2} dB vs {:.2} dB", squash(1.0), squash(0.0));
+    }
+
+    #[test]
+    fn sag_recovers_over_about_a_tenth_of_a_second() {
+        let fs = 44_100usize;
+        let quiet_level_after = |sag: f32, start_ms: usize| {
+            let mut st = AnalogStage::new(fs as u32);
+            st.set_settings(colour(AnalogFlavour::SolidState, 0.5, sag, 0.0));
+            // 300 ms loud burst, then a quiet tone.
+            let sr = fs as f64;
+            let mut x: Vec<f32> = (0..fs / 3 * 2).map(|i| if i < fs * 3 / 10 { 0.9 } else { 0.1 } * (2.0 * PI * 1000.0 * i as f64 / sr).sin() as f32).collect();
+            st.process(&mut x, 1);
+            let after = fs * 3 / 10 + fs / 100; // skip the wet-path latency and the fade
+            rms(&x, after + start_ms * fs / 1000..after + start_ms * fs / 1000 + fs / 50)
+        };
+        let drop_db = |sag: f32| db(quiet_level_after(sag, 40) / quiet_level_after(sag, 180));
+        assert!(drop_db(1.0) < -0.3, "just after the burst the stage is quieter: {:.2} dB", drop_db(1.0));
+        assert!(drop_db(0.0).abs() < 0.1, "no sag, no recovery curve: {:.2} dB", drop_db(0.0));
+    }
+
+    #[test]
+    fn transformer_saturates_the_bass_with_level_and_leaves_the_mids_alone() {
+        let n = 1 << 14;
+        let h3 = |bin: usize, amp: f32, xf: f32| {
+            let mut st = AnalogStage::new(44_100);
+            st.set_settings(colour(AnalogFlavour::SolidState, 0.0, 0.0, xf));
+            let sp = spectrum(&run(&mut st, bin, n, amp));
+            db(sp[bin * 3] / sp[bin])
+        };
+        let (bass, mid) = (22, 371); // ~59 Hz and ~1 kHz
+        assert!(h3(bass, 0.3, 1.0) > h3(bass, 0.3, 0.0) + 8.0, "bass harmonics appear with the transformer on");
+        assert!(h3(bass, 0.6, 1.0) > h3(bass, 0.1, 1.0) + 12.0, "and grow with level");
+        assert!(h3(bass, 0.3, 1.0) > h3(bass, 0.3, 0.3), "and with the amount");
+        assert!((h3(mid, 0.3, 1.0) - h3(mid, 0.3, 0.0)).abs() < 3.0, "1 kHz is unaffected");
+    }
+
+    #[test]
+    fn linear_response_stays_flat_at_low_level_with_sag_and_transformer_on() {
+        // Small signals see no colour: within +-1 dB from 30 Hz to 16 kHz, both flavours.
+        let n = 1 << 14;
+        for flavour in [AnalogFlavour::WarmTriode, AnalogFlavour::SolidState] {
+            for hz in [30.0, 60.0, 120.0, 500.0, 2_000.0, 8_000.0, 16_000.0] {
+                let bin = (hz / 44_100.0 * n as f64).round() as usize;
+                let mut st = AnalogStage::new(44_100);
+                st.set_settings(colour(flavour, 0.0, 0.3, 0.3));
+                let sp = spectrum(&run(&mut st, bin, n, 0.01));
+                let gain = db(sp[bin] / 0.01);
+                assert!(gain.abs() < 1.0, "{flavour:?} at {hz} Hz: {gain:.2} dB");
+            }
+        }
+    }
+
+    #[test]
+    fn sag_and_transformer_changes_do_not_click() {
+        let (n, bin) = (1 << 13, 12); // ~65 Hz bass tone
+        let mut st = AnalogStage::new(44_100);
+        st.set_settings(colour(AnalogFlavour::WarmTriode, 0.5, 0.0, 0.0));
+        let mut a = tone(bin, n, 2, 0.4, 1);
+        st.process(&mut a, 1);
+        st.set_settings(colour(AnalogFlavour::WarmTriode, 0.5, 1.0, 1.0));
+        let mut b = tone(bin, n, 2, 0.4, 1);
+        st.process(&mut b, 1);
+        let seam = [a, b].concat();
+        assert!(max_step(&seam[n..], 1) < 0.05, "no click when sag and transformer change live");
+    }
+
+    #[test]
+    fn colour_settings_are_clamped_and_default_in() {
+        let s = AnalogSettings { sag: 3.0, transformer: -1.0, ..Default::default() }.clamped();
+        assert_eq!((s.sag, s.transformer), (1.0, 0.0));
+        let parsed: AnalogSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!((parsed.sag, parsed.transformer), (0.3, 0.3));
     }
 
     #[test]

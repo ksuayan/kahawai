@@ -42,8 +42,8 @@ describe("analog A/B store", () => {
 
   it("clamps values and ignores nonsense", () => {
     const s = useAnalogStore();
-    s.update("a", { drive: 7, mix: -2, output_db: 99 });
-    expect([s.a.drive, s.a.mix, s.a.output_db]).toEqual([1, 0, 6]);
+    s.update("a", { drive: 7, mix: -2, output_db: 99, sag: 4, transformer: -1 });
+    expect([s.a.drive, s.a.mix, s.a.output_db, s.a.sag, s.a.transformer]).toEqual([1, 0, 6, 1, 0]);
     const c = clampAnalog({ ...DEFAULT_ANALOG_SETTINGS, drive: NaN, flavour: "nope" as never, antialias: "x9" as never });
     expect([c.drive, c.flavour, c.antialias]).toEqual([0.4, "warm_triode", "auto"]);
   });

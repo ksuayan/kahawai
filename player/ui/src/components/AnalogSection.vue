@@ -144,6 +144,32 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
             </div>
 
             <div class="flex flex-col gap-1 text-dim">
+              <div class="flex justify-between"><span>Sag</span><span class="tabular-nums">{{ pct(analog[s].sag) }}%</span></div>
+              <UiSlider
+                :aria-label="`Sag ${s.toUpperCase()}`"
+                :model-value="pct(analog[s].sag)"
+                :min="0"
+                :max="100"
+                :step="1"
+                title="Loud passages lower the stage's headroom and gain a little, and it recovers over about a tenth of a second."
+                @update:model-value="(v) => analog.update(s, { sag: v / 100 })"
+              />
+            </div>
+
+            <div class="flex flex-col gap-1 text-dim">
+              <div class="flex justify-between"><span>Transformer</span><span class="tabular-nums">{{ pct(analog[s].transformer) }}%</span></div>
+              <UiSlider
+                :aria-label="`Transformer ${s.toUpperCase()}`"
+                :model-value="pct(analog[s].transformer)"
+                :min="0"
+                :max="100"
+                :step="1"
+                title="The bass saturates as the level rises, adding bass harmonics. Mids and highs are untouched."
+                @update:model-value="(v) => analog.update(s, { transformer: v / 100 })"
+              />
+            </div>
+
+            <div class="flex flex-col gap-1 text-dim">
               <div class="flex justify-between">
                 <span>Output</span>
                 <span class="tabular-nums">{{ analog[s].output_db > 0 ? "+" : "" }}{{ analog[s].output_db.toFixed(1) }} dB</span>
