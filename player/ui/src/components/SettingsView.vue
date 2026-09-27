@@ -133,8 +133,8 @@ const formatIgnoredForDsd = computed(() => settings.globalFormat !== null && dsd
 const player = usePlayerStore();
 const analogStore = useAnalogStore();
 
-/** Analog warmth is switched on: the collapsed Experimental section says so. */
-const analogOn = computed(() => analogStore.current.enabled);
+/** Analog warmth is switched on (master and the active slot): the collapsed Experimental section says so. */
+const analogOn = computed(() => analogStore.effective.enabled);
 
 /** The Advanced section starts open only when something in it overrides the mode. */
 const overrides = computed(() => [
@@ -500,7 +500,6 @@ const dopRates = computed(() =>
       <div class="px-3 pt-1">
         <UiHint>
           Work in progress: these may change or be removed, and are off unless you turn them on.
-          Disabled when Best quality is on.
         </UiHint>
         <AnalogSection />
       </div>

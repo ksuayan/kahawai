@@ -37,7 +37,7 @@ pub use dsp::{
 pub use engine::{
     AnalogLevel,
     resolve_format, valid_formats, DsdStory, DspSettings, EngineCommand, EngineController, Player,
-    PlayerEvent, PlayerSnapshot, PlayerStatus, DEFAULT_SERVER_URL,
+    PlayerEvent, PlayerSnapshot, PlayerStatus, snapshot_key_differs, DEFAULT_SERVER_URL,
 };
 pub use quality::QualityMode;
 pub use queue::{Queue, RepeatMode};

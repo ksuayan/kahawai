@@ -13,6 +13,8 @@ interface Saved {
   a: AnalogSettings;
   b: AnalogSettings;
   active: Slot;
+  /** The master switch (default on; absent in files saved before it existed). */
+  masterOn?: boolean;
 }
 
 function load(): Saved | null {
@@ -21,7 +23,12 @@ function load(): Saved | null {
     if (!raw) return null;
     const v = JSON.parse(raw) as Partial<Saved>;
     if (!v.a || !v.b) return null;
-    return { a: clampAnalog({ ...DEFAULT_ANALOG_SETTINGS, ...v.a }), b: clampAnalog({ ...DEFAULT_ANALOG_SETTINGS, ...v.b }), active: v.active === "b" ? "b" : "a" };
+    return {
+      a: clampAnalog({ ...DEFAULT_ANALOG_SETTINGS, ...v.a }),
+      b: clampAnalog({ ...DEFAULT_ANALOG_SETTINGS, ...v.b }),
+      active: v.active === "b" ? "b" : "a",
+      masterOn: v.masterOn !== false,
+    };
   } catch {
     return null;
   }
@@ -34,17 +41,27 @@ function load(): Saved | null {
  * can compare flavours, drive, or anti-aliasing plans while music plays.
  * Slot A starts as "off" (the dry signal) and slot B as the warm triode.
  * The engine remembers only the active slot; the pair itself is kept here.
+ *
+ * `masterOn` is a separate, single power switch for the whole feature — not
+ * to be confused with a slot's own `enabled` (whether *that slot* applies the
+ * effect; slot A is deliberately the dry point of comparison, so it is
+ * `enabled: false` by design, not "off"). Master off sends `enabled: false`
+ * to the engine regardless of the active slot's own setting, and restores it
+ * exactly when turned back on.
  */
 export const useAnalogStore = defineStore("analog", () => {
   const a = ref<AnalogSettings>({ ...DEFAULT_ANALOG_SETTINGS, enabled: false });
   const b = ref<AnalogSettings>({ ...DEFAULT_ANALOG_SETTINGS, enabled: true });
   const active = ref<Slot>("a");
+  const masterOn = ref(true);
   const loaded = ref(false);
   /** Level change each slot makes (dB, output minus input), once measured while it played; a dry slot is 0 by definition. */
   const measured = ref<Record<Slot, number | null>>({ a: 0, b: null });
 
   const slots = { a, b };
   const current = computed(() => slots[active.value].value);
+  /** What the engine actually has right now: the active slot, with the master switch applied. */
+  const effective = computed<AnalogSettings>(() => ({ ...current.value, enabled: masterOn.value && current.value.enabled }));
 
   /** Forget a slot's measurement (its settings changed), keeping the dry slot's 0. */
   function resetMeasured(slot: Slot): void {
@@ -53,7 +70,7 @@ export const useAnalogStore = defineStore("analog", () => {
 
   function persist(): void {
     try {
-      localStorage.setItem(KEY, JSON.stringify({ a: a.value, b: b.value, active: active.value }));
+      localStorage.setItem(KEY, JSON.stringify({ a: a.value, b: b.value, active: active.value, masterOn: masterOn.value }));
     } catch {
       /* storage unavailable: the pair lasts for this session */
     }
@@ -64,8 +81,15 @@ export const useAnalogStore = defineStore("analog", () => {
 
   function push(): void {
     lastPushAt = Date.now();
-    void setAnalog(current.value);
+    void setAnalog(effective.value);
     persist();
+  }
+
+  /** The master switch for the whole feature (see the store doc comment). */
+  function setMasterOn(v: boolean): void {
+    if (masterOn.value === v) return;
+    masterOn.value = v;
+    push();
   }
 
   /** On boot: restore the pair, or seed it from what the engine has saved. */
@@ -75,6 +99,7 @@ export const useAnalogStore = defineStore("analog", () => {
       a.value = saved.a;
       b.value = saved.b;
       active.value = saved.active;
+      masterOn.value = saved.masterOn ?? true;
     } else {
       const engine = (await getDspSettings())?.analog;
       if (engine?.enabled) {
@@ -135,7 +160,7 @@ export const useAnalogStore = defineStore("analog", () => {
 
   /** The engine's level reading for the slot being heard. Trusted after a few seconds of audio. */
   function noteLevel(level: AnalogLevel | null | undefined): void {
-    if (!current.value.enabled) {
+    if (!effective.value.enabled) {
       measured.value[active.value] = 0;
       return;
     }
@@ -168,5 +193,24 @@ export const useAnalogStore = defineStore("analog", () => {
     update(to, { ...slots[from].value });
   }
 
-  return { a, b, active, current, loaded, measured, noteLevel, matchLevel, init, update, setFlavour, applyRecipe, select, toggle, copy };
+  return {
+    a,
+    b,
+    active,
+    current,
+    effective,
+    masterOn,
+    setMasterOn,
+    loaded,
+    measured,
+    noteLevel,
+    matchLevel,
+    init,
+    update,
+    setFlavour,
+    applyRecipe,
+    select,
+    toggle,
+    copy,
+  };
 });

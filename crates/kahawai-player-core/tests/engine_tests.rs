@@ -2524,3 +2524,109 @@ fn reordering_the_next_track_refreshes_a_stale_gapless_chain() {
     assert!(h.stub.opened.lock().unwrap().len() > opens, "re-opened to chain the right track");
     assert_eq!(h.player.snapshot().current_id, Some(1));
 }
+
+// ---------------------------------------------------------------------------
+// Turning off the last thing that holds Best quality back engages it now
+// ---------------------------------------------------------------------------
+
+fn analog_on() -> AnalogSettings {
+    AnalogSettings { enabled: true, ..Default::default() }
+}
+
+fn best_playing_with_analog() -> Harness {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player.set_analog(analog_on());
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    for _ in 0..10 {
+        h.player.pump();
+    }
+    h
+}
+
+#[test]
+fn turning_off_analog_warmth_engages_bit_perfect_on_the_playing_track() {
+    let mut h = best_playing_with_analog();
+    let s = h.player.snapshot();
+    assert_eq!(s.output_path, OutputPath::Pcm, "analog is on: shared output");
+    assert_eq!(s.exclusive_blockers, vec!["Analog".to_string()]);
+    assert!(s.notice.unwrap_or_default().contains("Analog"));
+    let before = h.player.snapshot().position_ms;
+
+    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    let s = h.player.snapshot();
+    assert_eq!(s.output_path, OutputPath::PcmExclusive, "the last blocker is gone: bit-perfect now");
+    assert!(s.exclusive_blockers.is_empty());
+    assert!(s.notice.is_none(), "the 'paused' notice is gone");
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+    assert!(s.position_ms + 250 >= before, "carries on from where it was: {} vs {before}", s.position_ms);
+}
+
+#[test]
+fn turning_analog_warmth_back_on_steps_bit_perfect_aside_with_a_reason() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    for _ in 0..10 {
+        h.player.pump();
+    }
+    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
+    h.player.set_analog(analog_on());
+    let s = h.player.snapshot();
+    assert_eq!(s.output_path, OutputPath::Pcm);
+    assert!(s.notice.unwrap_or_default().contains("Best quality is paused"));
+}
+
+#[test]
+fn tweaking_a_slider_that_does_not_flip_the_answer_leaves_playback_alone() {
+    let mut h = best_playing_with_analog();
+    let opens = h.stub.opened.lock().unwrap().len();
+    h.player.set_analog(AnalogSettings { drive: 0.9, ..analog_on() });
+    h.player.set_analog(AnalogSettings { drive: 0.3, mix: 0.5, ..analog_on() });
+    assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "still on: nothing re-opens");
+}
+
+#[test]
+fn another_blocker_keeps_bit_perfect_off_when_analog_goes_away() {
+    let mut h = best_playing_with_analog();
+    h.player.set_loudness_enabled(true); // a second thing holding it back
+    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    let s = h.player.snapshot();
+    assert_eq!(s.output_path, OutputPath::Pcm);
+    assert_eq!(s.exclusive_blockers, vec!["Loudness".to_string()]);
+    h.player.set_loudness_enabled(false);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive, "now nothing holds it back");
+}
+
+#[test]
+fn a_paused_track_stays_paused_when_bit_perfect_engages() {
+    let mut h = best_playing_with_analog();
+    h.player.pause();
+    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    assert_eq!(h.player.status(), PlayerStatus::Paused);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
+}
+
+#[test]
+fn an_explicit_override_does_not_follow_the_processing() {
+    // With Bit-perfect set to Off in Advanced, processing changes are irrelevant.
+    let mut h = best_playing_with_analog();
+    h.player.set_bit_perfect(BitPerfect::Off);
+    let opens = h.stub.opened.lock().unwrap().len();
+    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    assert_eq!(h.stub.opened.lock().unwrap().len(), opens);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
+}
+
+#[test]
+fn the_ui_is_told_when_only_the_blockers_change() {
+    // While paused or stopped nothing else moves, so the change key itself must
+    // notice a different blocker list or notice.
+    let mut h = best_playing_with_analog();
+    h.player.pause();
+    let with = h.player.snapshot();
+    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    let without = h.player.snapshot();
+    assert_ne!(with.exclusive_blockers, without.exclusive_blockers);
+    assert!(kahawai_player_core::snapshot_key_differs(&with, &without));
+}

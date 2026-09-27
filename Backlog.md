@@ -15,7 +15,7 @@ cold. Newest thinking wins: edit freely. Size is a rough guess:
 | **Per-channel or mid/side EQ** | M | Every channel gets the same filters. Useful for headphones and for correcting one speaker. |
 | **Move user EQ presets out of the webview** | S | User presets live in the webview's localStorage: per machine, lost if app data is cleared. Storing them in `engine-settings.json` (or its own file) next to the engine settings would make them durable and let the engine own them. |
 | **Tune the built-in presets and severity thresholds by ear** | S | The six presets (Flat, Classical, Jazz, Rock, Pop, Talk Show) and the yellow/red thresholds (`SEVERITY` in [eqResponse.ts](player/ui/src/eqResponse.ts)) are educated guesses, kept gentle on purpose. |
-| **Graph shows the phase or group delay, or an analyzer** | L | Optional polish: a real-time spectrum behind the curve would make it clear what a band is doing to the music. Needs the engine to expose FFT data, so it is a bigger step. |
+| **Live frequency spectrum visualization** | L | Optional polish, and bigger than it looks. The engine has no FFT today; it would need to run one on the PCM chunks already flowing through `pump_pcm` ([engine.rs](crates/kahawai-player-core/src/engine.rs)) — smoothed magnitude bins at a UI-friendly rate (~30 Hz), sent to the shell alongside the existing snapshot rather than per-sample. Two uses: behind the EQ curve in the EQ dialog (makes it obvious what a band is doing to the actual music, not just the theoretical response), and/or a standalone analyzer/visualizer view (Now Playing, screensaver-style). DoP and bit-perfect bypass the DSP chain entirely, so there is nothing to analyze on those paths — show it disabled there, same as the EQ. Decide bar/line style and whether it is linear or log-frequency (log matches the EQ graph). |
 
 ## Playback and streaming
 
@@ -45,6 +45,7 @@ Branch: `look-and-feel` (see [guidelines/Visual-House-Style-Guide.md](guidelines
 | **Use the micro-label style** | S | The utility exists but nothing uses it yet (the app has no table headers or eyebrow labels). Apply it when such labels appear, for example queue column headers. |
 | **Plex Mono for IDs and technical readouts** | S | Not bundled. Candidates: the audio-chain badge, hashes, sample rates. Adds a font download. |
 | **Decide whether `guidelines/` goes in the repo** | S | The folder is untracked. The tests and code now refer to it. |
+| **Coverflow browsing for albums, old-school iTunes style** | L | A horizontally-scrolling, perspective-tilted stack of album covers as an alternate view of the library (or of the queue), the big cover centered and flipping through with arrow keys, scroll, drag, or a filmstrip below. Needs [Artwork.vue](player/ui/src/components/Artwork.vue)'s covers at a higher resolution than the grid uses, CSS 3D transforms (`perspective` + `rotateY` per card) or a canvas/WebGL renderer if CSS performance is poor with a large library, and a decision on how far it reaches: a view alongside Albums, or a full replacement for browsing. Reflection under the cover is the classic touch. Virtualize the strip (render only covers near the center) so a large library does not tank scroll performance. |
 
 ## DSP effects (research first)
 

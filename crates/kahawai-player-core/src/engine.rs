@@ -491,6 +491,9 @@ pub struct Player {
     /// After an exclusive output was lost mid-track, this track re-opens on
     /// shared output instead of trying exclusive again.
     skip_exclusive_track: Option<i64>,
+    /// What `auto_wants_exclusive` said when the loaded track was opened, so a
+    /// later change to the user's processing that flips the answer can re-open it.
+    exclusive_decision: bool,
     /// When to use the exclusive, untouched PCM path (see `bitperfect`).
     bit_perfect: BitPerfect,
     track_formats: HashMap<i64, StreamFormat>,
@@ -539,6 +542,7 @@ impl Player {
             chosen_device: None,
             pending_notice: None,
             skip_exclusive_track: None,
+            exclusive_decision: false,
             bit_perfect: BitPerfect::default(),
             track_formats: HashMap::new(),
             volume: 1.0,
@@ -721,9 +725,11 @@ impl Player {
     /// now? Only in Best quality, on an external DAC, with none of the
     /// user's processing that it would bypass.
     fn auto_wants_exclusive(&self) -> bool {
+        // Cheapest checks first: this runs on every processing tweak, and asking
+        // the OS about the device costs more than looking at our own settings.
         self.quality == QualityMode::Best
-            && self.sink.output_is_external_dac()
             && self.exclusive_blockers().is_empty()
+            && self.sink.output_is_external_dac()
     }
 
     /// The story actually applied. `Auto` follows the quality mode: native
@@ -1036,8 +1042,26 @@ impl Player {
         }
     }
 
+    /// Your own processing changed (EQ, loudness, analog stage, volume). If that
+    /// flips whether Best quality can go exclusive, re-open the loaded track at
+    /// its current position so the switch happens now: turn off the last thing
+    /// holding it back and bit-perfect engages; turn something on and it steps
+    /// aside. Settings that don't flip the answer (a slider tweak) change nothing.
+    fn reconsider_exclusive(&mut self) {
+        let is_dsd = matches!(
+            self.queue.current().map(|t| t.format),
+            Some(AudioFormat::Dsf | AudioFormat::Dff)
+        );
+        // Only a setting that follows the mode, and applies to this track, cares.
+        let follows_mode = self.bit_perfect == BitPerfect::Auto || (is_dsd && self.dsd_story == DsdStory::Auto);
+        if follows_mode && self.auto_wants_exclusive() != self.exclusive_decision {
+            self.reopen_live();
+        }
+    }
+
     pub fn set_volume(&mut self, v: f32) {
         self.volume = v.clamp(0.0, 1.0);
+        self.reconsider_exclusive();
     }
 
     /// Route output to a named device (`None` = system default). If a
@@ -1057,11 +1081,14 @@ impl Player {
     // -- v1 DSP (PCM only; DoP bypasses all of it) --
 
     pub fn set_eq_bands(&mut self, bands: Vec<EqBand>) -> Result<(), MusicError> {
-        self.eq.set_bands(bands)
+        self.eq.set_bands(bands)?;
+        self.reconsider_exclusive();
+        Ok(())
     }
 
     pub fn set_eq_enabled(&mut self, enabled: bool) {
         self.eq.set_enabled(enabled);
+        self.reconsider_exclusive();
     }
 
     /// Analog character stage (PCM shared path only; DoP and bit-perfect
@@ -1073,10 +1100,12 @@ impl Player {
             self.meter_out.reset();
         }
         self.analog.set_settings(settings);
+        self.reconsider_exclusive();
     }
 
     pub fn set_loudness_enabled(&mut self, enabled: bool) {
         self.loudness.set_enabled(enabled);
+        self.reconsider_exclusive();
     }
 
     pub fn set_loudness_target(&mut self, lufs: f32) {
@@ -1128,6 +1157,7 @@ impl Player {
         };
         self.status = PlayerStatus::Loading;
         self.error = None;
+        self.exclusive_decision = self.auto_wants_exclusive();
         self.notice = self.pending_notice.take();
         if let Some(m) = self.missing_device_notice() {
             self.add_notice(m);
@@ -2385,6 +2415,12 @@ fn playback_loop(
     }
 }
 
+/// Would the playback thread publish `b` after `a`? (The UI-visible identity
+/// differs.) Exposed so tests can check that a change reaches the UI on its own.
+pub fn snapshot_key_differs(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
+    snapshot_key(a) != snapshot_key(b)
+}
+
 /// UI-visible snapshot identity minus the ever-moving playhead.
 fn snapshot_key(
     s: &PlayerSnapshot,
@@ -2397,6 +2433,8 @@ fn snapshot_key(
     u32,
     u64,
     OutputPath,
+    Vec<String>,
+    Option<String>,
 ) {
     // Volume changes must reach the UI even while paused/stopped, and a
     // seek while paused moves the (otherwise static) playhead. While
@@ -2417,6 +2455,11 @@ fn snapshot_key(
         // The badge/volume behaviour depends on it, and switching the
         // bit-perfect mode while paused must still reach the UI.
         s.output_path,
+        // Which of the user's processing holds Best quality back, and the
+        // notice explaining a fallback: both must reach the UI on their own,
+        // even while paused or stopped.
+        s.exclusive_blockers.clone(),
+        s.notice.clone(),
     )
 }
 

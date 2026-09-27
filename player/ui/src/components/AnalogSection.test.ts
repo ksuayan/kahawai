@@ -1,3 +1,4 @@
+import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
 import { makeState } from "../test/fixtures";
 import { $$, mountApp, openSelect, options, pick, settle } from "../test/helpers";
@@ -22,7 +23,7 @@ beforeEach(() => localStorage.clear());
 describe("Analog warmth settings", () => {
   it("shows two slots, A dry and B warm, with A being heard", async () => {
     const { wrapper } = await boot();
-    expect(wrapper.text()).toMatch(/analog warmth \(experimental\)/i);
+    expect(wrapper.get("h3").text()).toBe("Analog warmth");
     expect(wrapper.get('[data-testid="ab-a"]').attributes("aria-pressed")).toBe("true");
     expect(wrapper.get('[data-testid="ab-b"]').attributes("aria-pressed")).toBe("false");
     expect(wrapper.get('[data-testid="slot-a-summary"]').text()).toBe("Off (dry signal)");
@@ -100,6 +101,79 @@ describe("Analog warmth settings", () => {
       for (const name of ["Drive", "Mix", "Sag", "Transformer", "Output"]) expect(slider(`${name} ${s}`)).not.toBeNull();
       expect($$(`[aria-label="Flavour ${s}"]`)).toHaveLength(1);
     }
+  });
+});
+
+describe("Analog warmth: master toggle", () => {
+  it("is on by default and everything below it is interactive", async () => {
+    const { wrapper } = await boot();
+    const toggle = wrapper.get('[data-testid="analog-master-toggle"] [role="switch"]');
+    expect(toggle.attributes("aria-checked")).toBe("true");
+    expect(wrapper.find('[data-testid="analog-off"]').exists()).toBe(false);
+    const editor = wrapper.get('[data-testid="analog-editor"]');
+    expect(editor.classes()).not.toContain("opacity-40");
+    expect(editor.attributes("inert")).toBeUndefined();
+  });
+
+  it("turning it off dims and disables the whole area — level meter, blind test, both slot columns, and the recipes", async () => {
+    const { wrapper } = await boot();
+    await wrapper.get('[data-testid="analog-master-toggle"] [role="switch"]').trigger("click");
+    await settle();
+    const editor = wrapper.get('[data-testid="analog-editor"]');
+    expect(editor.classes()).toContain("opacity-40");
+    expect(editor.attributes("inert")).toBe("");
+    expect(wrapper.get('[data-testid="analog-off"]').text()).toContain("Analog warmth is off");
+    // Everything the request named is inside the dimmed container.
+    for (const testid of ["level-meter", "slots", "recipes"]) {
+      expect(editor.find(`[data-testid="${testid}"]`).exists()).toBe(true);
+    }
+    expect(editor.text()).toContain("Listening suggestions");
+  });
+
+  it("forces the engine off even though B (the active slot) is itself enabled, and restores it on re-enable", async () => {
+    const { wrapper, store } = await boot();
+    await wrapper.get('[data-testid="ab-b"]').trigger("click"); // B: enabled, the warm slot
+    expect(sent().at(-1)).toMatchObject({ enabled: true });
+
+    await wrapper.get('[data-testid="analog-master-toggle"] [role="switch"]').trigger("click");
+    await settle();
+    expect(sent().at(-1)).toMatchObject({ enabled: false });
+    expect(store.b.enabled).toBe(true); // the slot's own setting is untouched, only what reaches the engine changes
+
+    await wrapper.get('[data-testid="analog-master-toggle"] [role="switch"]').trigger("click");
+    await settle();
+    expect(sent().at(-1)).toMatchObject({ enabled: true });
+  });
+
+  it("stays off for the intentionally-dry slot A too: turning master on does not itself force sound on", async () => {
+    const { wrapper } = await boot(); // A (dry, enabled: false) is heard by default
+    await wrapper.get('[data-testid="analog-master-toggle"] [role="switch"]').trigger("click"); // off
+    await settle();
+    await wrapper.get('[data-testid="analog-master-toggle"] [role="switch"]').trigger("click"); // back on
+    await settle();
+    expect(sent().at(-1)).toMatchObject({ enabled: false }); // A is still the dry comparison point
+  });
+
+  it("is disabled while a blind test is running, so Cancel is never unreachable", async () => {
+    const { wrapper, store } = await boot();
+    store.update("b", { flavour: "tube_300b" });
+    store.measured.b = 0.1; // close enough to A's dry 0 dB: Start becomes clickable
+    await settle();
+    await wrapper.get('[data-testid="blind-start-button"]').trigger("click");
+    await settle();
+    const toggle = wrapper.get('[data-testid="analog-master-toggle"] [role="switch"]');
+    expect(toggle.attributes("data-disabled")).toBe("");
+  });
+
+  it("persists across a reload", async () => {
+    setActivePinia(createPinia());
+    const store = useAnalogStore();
+    store.setMasterOn(false);
+    // A fresh app: a new Pinia instance, a new store reading the same localStorage.
+    setActivePinia(createPinia());
+    const reloaded = useAnalogStore();
+    await reloaded.init();
+    expect(reloaded.masterOn).toBe(false);
   });
 });
 

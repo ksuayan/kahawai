@@ -101,10 +101,27 @@ const blindCheck = computed(() => {
 const heardLabel = computed(() => abx.heard.toUpperCase());
 
 const status = computed(() => (player.analogPlan ? `Now playing with ${player.analogPlan}.` : "The stage is off, or nothing is playing on the shared output."));
+
+// --- master on/off ---------------------------------------------------------
+// One switch for the whole feature, independent of either slot's own
+// `enabled` (slot A is deliberately the dry point of comparison, so it being
+// "off" does not mean the feature is off). Gates every interaction below it,
+// the same way an unsupported stream type does. Disabled mid-blind-test so a
+// listener can't be stranded with the Cancel button unreachable.
+const dimmed = computed(() => unsupported.value || !analog.masterOn);
 </script>
 
 <template>
-  <SettingsSection title="Analog Warmth (Experimental)">
+  <SettingsSection title="Analog warmth">
+    <UiSwitch
+      class="mb-3"
+      :model-value="analog.masterOn"
+      :disabled="unsupported || abx.running"
+      label="Enabled"
+      data-testid="analog-master-toggle"
+      :title="abx.running ? 'Finish or cancel the blind test to change this' : undefined"
+      @update:model-value="analog.setMasterOn"
+    />
     <UiHint>
       Adds the character of a tube or transistor stage to the shared PCM output, after the EQ. Choose from several tubes (12AX7, 12AT7, 12AU7, 6SN7, 6DJ8, 300B, 2A3), a push-pull pair, or solid-state stages; choosing a flavour also sets Sag and Transformer to typical values for it. Set up two versions and
       switch between them while music plays: compare the effect against the dry signal, or one flavour or
@@ -114,8 +131,60 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
     <p v-if="unsupported" class="m-0 mb-2 text-sm text-dim" role="status" data-testid="analog-unsupported">
       Analog warmth is not supported for this stream type.
     </p>
+    <p v-else-if="!analog.masterOn" class="m-0 mb-2 text-sm text-dim" role="status" data-testid="analog-off">
+      Analog warmth is off. Turn it on above to use the level meter, the blind test, or the A/B editors.
+    </p>
 
-    <div :class="unsupported ? 'pointer-events-none opacity-40 grayscale' : ''" :inert="unsupported || undefined" data-testid="analog-editor">
+    <div :class="dimmed ? 'pointer-events-none opacity-40 grayscale' : ''" :inert="dimmed || undefined" data-testid="analog-editor">
+      <div v-if="!abx.running" class="mb-3 rounded-lg border border-line bg-surface p-3" data-testid="level-meter">
+        <div class="mb-1 flex flex-wrap items-baseline justify-between gap-2">
+          <span class="heading-3">Level meter</span>
+          <span class="text-xs text-dim">what the stage does to the loudness of what you are hearing</span>
+        </div>
+        <template v-if="level && analog.effective.enabled">
+          <div class="mb-2 flex flex-wrap items-baseline gap-x-6 gap-y-1 tabular-nums">
+            <span class="text-dim">Before <span class="text-fg" data-testid="meter-in">{{ level.input_lufs.toFixed(1) }}</span> LUFS</span>
+            <span class="text-dim">After <span class="text-fg" data-testid="meter-out">{{ level.output_lufs.toFixed(1) }}</span> LUFS</span>
+            <span class="text-dim">
+              Change
+              <span
+                class="font-semibold"
+                :class="meterState === 'ok' ? 'text-ok' : meterState === 'warn' ? 'text-warn-fg' : 'text-danger-fg'"
+                data-testid="meter-delta"
+                :data-state="meterState"
+              >{{ dB(level.delta_db) }} dB</span>
+            </span>
+            <span class="text-dim">Peak <span class="text-fg" data-testid="meter-peak">{{ level.peak_dbfs.toFixed(1) }}</span> dBFS</span>
+          </div>
+          <div class="relative h-2 rounded-sm bg-active" role="img" :aria-label="`Level change ${dB(level.delta_db)} dB on a scale from minus 6 to plus 6`">
+            <div class="absolute left-1/2 top-0 h-full w-px bg-faint" />
+            <div
+              class="absolute top-[-2px] h-3 w-1.5 rounded-sm"
+              :class="meterState === 'ok' ? 'bg-ok' : meterState === 'warn' ? 'bg-warn' : 'bg-danger'"
+              :style="{ left: `calc(${markerPct}% - 3px)` }"
+              data-testid="meter-marker"
+            />
+          </div>
+          <div class="mt-1 flex justify-between text-[11px] text-faint tabular-nums"><span>−6 dB</span><span>0</span><span>+6 dB</span></div>
+          <p v-if="clipping" class="m-0 mt-2 flex items-start gap-1.5 text-xs text-danger-fg" role="status" data-testid="meter-clip">
+            <TriangleAlert class="mt-px size-3.5 shrink-0" />
+            The output peaks at {{ level.peak_dbfs.toFixed(1) }} dBFS and may clip. Lower Drive or Output.
+          </p>
+        </template>
+        <p v-else class="m-0 text-xs text-dim" data-testid="meter-idle">{{ meterMessage }}</p>
+
+        <div class="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs">
+          <span class="text-dim" data-testid="measured-a">A: {{ measuredText("a") }}</span>
+          <span class="text-dim" data-testid="measured-b">B: {{ measuredText("b") }}</span>
+          <UiButton :disabled="!canMatch" data-testid="match-b" title="Change B's Output so B is as loud as A" @click="match('a', 'b')">Match B to A</UiButton>
+          <UiButton :disabled="!canMatch" data-testid="match-a" title="Change A's Output so A is as loud as B" @click="match('b', 'a')">Match A to B</UiButton>
+        </div>
+        <p v-if="!canMatch" class="m-0 mt-2 text-xs text-faint">
+          To match levels, play music with A, then with B, for a few seconds each. Each slot's level change is remembered until you edit it.
+        </p>
+        <p v-if="matchNote" class="m-0 mt-2 text-xs text-dim" role="status" data-testid="match-note">{{ matchNote }}</p>
+      </div>
+
       <div v-if="abx.running" class="mb-3 rounded-lg border border-accent bg-surface p-3" data-testid="blind-test">
         <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
           <span class="heading-3">Blind test</span>
@@ -205,55 +274,6 @@ const status = computed(() => (player.analogPlan ? `Now playing with ${player.an
         <span class="text-xs text-faint">Keys: <kbd class="font-mono">A</kbd> <kbd class="font-mono">B</kbd> <kbd class="font-mono">X</kbd>, from any screen</span>
       </div>
       <p v-if="!abx.running" class="m-0 mb-3 text-xs text-dim" data-testid="analog-status">{{ status }}</p>
-
-      <div v-if="!abx.running" class="mb-3 rounded-lg border border-line bg-surface p-3" data-testid="level-meter">
-        <div class="mb-1 flex flex-wrap items-baseline justify-between gap-2">
-          <span class="heading-3">Level meter</span>
-          <span class="text-xs text-dim">what the stage does to the loudness of what you are hearing</span>
-        </div>
-        <template v-if="level && analog.current.enabled">
-          <div class="mb-2 flex flex-wrap items-baseline gap-x-6 gap-y-1 tabular-nums">
-            <span class="text-dim">Before <span class="text-fg" data-testid="meter-in">{{ level.input_lufs.toFixed(1) }}</span> LUFS</span>
-            <span class="text-dim">After <span class="text-fg" data-testid="meter-out">{{ level.output_lufs.toFixed(1) }}</span> LUFS</span>
-            <span class="text-dim">
-              Change
-              <span
-                class="font-semibold"
-                :class="meterState === 'ok' ? 'text-ok' : meterState === 'warn' ? 'text-warn-fg' : 'text-danger-fg'"
-                data-testid="meter-delta"
-                :data-state="meterState"
-              >{{ dB(level.delta_db) }} dB</span>
-            </span>
-            <span class="text-dim">Peak <span class="text-fg" data-testid="meter-peak">{{ level.peak_dbfs.toFixed(1) }}</span> dBFS</span>
-          </div>
-          <div class="relative h-2 rounded-sm bg-active" role="img" :aria-label="`Level change ${dB(level.delta_db)} dB on a scale from minus 6 to plus 6`">
-            <div class="absolute left-1/2 top-0 h-full w-px bg-faint" />
-            <div
-              class="absolute top-[-2px] h-3 w-1.5 rounded-sm"
-              :class="meterState === 'ok' ? 'bg-ok' : meterState === 'warn' ? 'bg-warn' : 'bg-danger'"
-              :style="{ left: `calc(${markerPct}% - 3px)` }"
-              data-testid="meter-marker"
-            />
-          </div>
-          <div class="mt-1 flex justify-between text-[11px] text-faint tabular-nums"><span>−6 dB</span><span>0</span><span>+6 dB</span></div>
-          <p v-if="clipping" class="m-0 mt-2 flex items-start gap-1.5 text-xs text-danger-fg" role="status" data-testid="meter-clip">
-            <TriangleAlert class="mt-px size-3.5 shrink-0" />
-            The output peaks at {{ level.peak_dbfs.toFixed(1) }} dBFS and may clip. Lower Drive or Output.
-          </p>
-        </template>
-        <p v-else class="m-0 text-xs text-dim" data-testid="meter-idle">{{ meterMessage }}</p>
-
-        <div class="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs">
-          <span class="text-dim" data-testid="measured-a">A: {{ measuredText("a") }}</span>
-          <span class="text-dim" data-testid="measured-b">B: {{ measuredText("b") }}</span>
-          <UiButton :disabled="!canMatch" data-testid="match-b" title="Change B's Output so B is as loud as A" @click="match('a', 'b')">Match B to A</UiButton>
-          <UiButton :disabled="!canMatch" data-testid="match-a" title="Change A's Output so A is as loud as B" @click="match('b', 'a')">Match A to B</UiButton>
-        </div>
-        <p v-if="!canMatch" class="m-0 mt-2 text-xs text-faint">
-          To match levels, play music with A, then with B, for a few seconds each. Each slot's level change is remembered until you edit it.
-        </p>
-        <p v-if="matchNote" class="m-0 mt-2 text-xs text-dim" role="status" data-testid="match-note">{{ matchNote }}</p>
-      </div>
 
       <div v-if="!abx.running" class="grid grid-cols-1 gap-3 min-[900px]:grid-cols-2" data-testid="slots">
         <div

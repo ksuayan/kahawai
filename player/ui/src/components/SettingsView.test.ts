@@ -287,15 +287,15 @@ describe("Settings: Advanced", () => {
 });
 
 describe("Settings: Experimental", () => {
-  it("is collapsed by default and holds Analog Warmth", async () => {
+  it("is collapsed by default and holds Analog warmth", async () => {
     const w = await mountSettings();
     const box = w.get('[data-testid="experimental"]');
     expect(box.attributes("open")).toBeUndefined();
     expect(box.find("summary").text()).toContain("Experimental");
-    expect(box.text()).toContain("Analog Warmth");
-    expect(box.text()).toContain("Disabled when Best quality is on.");
-    // Not a top-level section any more.
-    const top = w.findAll(":scope > section").filter((s) => s.text().includes("Analog Warmth"));
+    expect(box.text()).toContain("Analog warmth");
+    // Not a top-level section any more (mentions of it elsewhere, e.g. the
+    // keyboard-shortcuts list, don't count).
+    const top = w.findAll(":scope > section").filter((s) => s.find("h3").text() === "Analog warmth");
     expect(top).toHaveLength(0);
   });
 
@@ -326,7 +326,7 @@ describe("Settings: section order", () => {
       "Loudness normalization",
       "Advanced",
       "Experimental",
-      "Analog Warmth (Experimental)",
+      "Analog warmth",
       "Library",
       "Album art cache",
     ];
@@ -337,7 +337,7 @@ describe("Settings: section order", () => {
     const present = seen.filter((i) => i >= 0);
     expect(present).toEqual([...present].sort((a, b) => a - b));
     // Listening suggestions is part of the Analog section, so it follows it.
-    const analog = titles.findIndex((x) => x.startsWith("Analog Warmth"));
+    const analog = titles.findIndex((x) => x.startsWith("Analog warmth"));
     const library = titles.findIndex((x) => x.startsWith("Library"));
     expect(analog).toBeLessThan(library);
   });
