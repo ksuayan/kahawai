@@ -405,6 +405,15 @@ impl ActiveStream {
         }
     }
 
+    /// The track the server already chained into this response after the
+    /// one being heard (gapless), if any.
+    fn chained_next_id(&self) -> Option<i64> {
+        match self {
+            ActiveStream::Pcm(a) => a.segments.get(a.seg_idx + 1).map(|t| t.id),
+            ActiveStream::Dop(a) => a.segments.get(a.seg_idx + 1).map(|t| t.id),
+        }
+    }
+
     fn display_track(&self) -> &Track {
         match self {
             ActiveStream::Pcm(a) => &a.segments[a.seg_idx],
@@ -941,11 +950,78 @@ impl Player {
         }
     }
 
+    /// After the queue changed under a playing stream: if the server already
+    /// chained a *different* next track into it (gapless), what would play next
+    /// is stale, so re-open once at the current position. Otherwise the stream
+    /// is left completely alone.
+    fn refresh_chain_if_stale(&mut self) {
+        let Some(chained) = self.active.as_ref().and_then(|a| a.chained_next_id()) else {
+            return;
+        };
+        if self.queue.peek_next().map(|t| t.id) != Some(chained) {
+            self.reopen_live();
+        }
+    }
+
+    /// Move a queue entry in place. Playback is not interrupted: the current
+    /// track keeps playing from where it is (no stream is re-opened unless a
+    /// gapless chain was invalidated).
+    pub fn move_queue_item(&mut self, from: usize, to: usize) {
+        if !self.queue.move_track(from, to) {
+            return;
+        }
+        self.persist_queue();
+        self.refresh_chain_if_stale();
+    }
+
+    /// Remove a queue entry in place. Removing the playing track moves on to
+    /// the one that slides into its place; removing anything else does not
+    /// disturb playback.
+    pub fn remove_queue_item(&mut self, index: usize) {
+        use crate::queue::Removed;
+        match self.queue.remove_at(index) {
+            None => {}
+            Some(Removed::Other) => {
+                self.persist_queue();
+                self.refresh_chain_if_stale();
+            }
+            Some(Removed::Current) => {
+                self.persist_queue();
+                if self.queue.current().is_some() {
+                    let paused = self.status == PlayerStatus::Paused;
+                    self.open_current(None);
+                    if paused && self.status == PlayerStatus::Playing {
+                        self.status = PlayerStatus::Paused;
+                        let _ = self.sink.pause();
+                    }
+                } else {
+                    self.stop();
+                }
+            }
+        }
+    }
+
+    /// Re-open the loaded track at its current position (paused stays paused)
+    /// so a change to how it is streamed takes effect now, not at the next open.
+    fn reopen_live(&mut self) {
+        let live = self.active.is_some()
+            && matches!(self.status, PlayerStatus::Playing | PlayerStatus::Paused);
+        if live {
+            let pos = self.position_ms();
+            self.seek_ms(pos);
+        }
+    }
+
     pub fn set_global_format(&mut self, fmt: Option<StreamFormat>) {
+        if fmt == self.global_format {
+            return;
+        }
         self.global_format = fmt;
+        self.reopen_live();
     }
 
     pub fn set_track_format(&mut self, track_id: i64, fmt: Option<StreamFormat>) {
+        let before = self.track_formats.get(&track_id).copied();
         match fmt {
             Some(f) => {
                 self.track_formats.insert(track_id, f);
@@ -953,6 +1029,10 @@ impl Player {
             None => {
                 self.track_formats.remove(&track_id);
             }
+        }
+        // Only the track that is loaded can be affected right now.
+        if before != fmt && self.queue.current().map(|t| t.id) == Some(track_id) {
+            self.reopen_live();
         }
     }
 
@@ -1091,10 +1171,10 @@ impl Player {
     /// been released and nothing is playing.
     fn try_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
         if !self.sink.supports_dop() {
-            return Err("this output has no exclusive DoP path".into());
+            return Err("this output can't play DSD natively".into());
         }
         if self.dop_capable_rate(track).is_none() {
-            return Err("the output device doesn't offer the DoP rate this track needs".into());
+            return Err("your DAC doesn't accept the sample rate this DSD file needs".into());
         }
         self.sink.select_output_path(OutputPath::Dop);
         self.output_path = OutputPath::Dop;
@@ -1125,7 +1205,7 @@ impl Player {
     fn open_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
         let dop_rate = match self.dop_capable_rate(track) {
             Some(r) => r,
-            None => return Err("DoP rate not available for this track/device".into()),
+            None => return Err("your DAC doesn't accept the sample rate this DSD file needs".into()),
         };
         let next_id = self.queue.peek_next().map(|t| t.id);
         let opts = StreamOptions {
@@ -1136,7 +1216,10 @@ impl Player {
         };
         let info = match self.transport.open_stream(track.id, &opts) {
             Ok(i) => i,
-            Err(e) => return Err(format!("stream failed: {e}")),
+            Err(e) => {
+                tracing::warn!(error = %e, "DoP stream request failed");
+                return Err("the server couldn't provide the DSD stream".into());
+            }
         };
         let gapless_mode = info.gapless_mode.clone();
         let progress = info.progress.clone();
@@ -1144,7 +1227,10 @@ impl Player {
         let established = self.dop_spec;
         let stream = match DopStream::new(info.reader, dop_rate, established, chained) {
             Ok(s) => s,
-            Err(e) => return Err(format!("DoP stream failed: {e}")),
+            Err(e) => {
+                tracing::warn!(error = %e, "DoP stream unreadable");
+                return Err("the DSD stream couldn't be read".into());
+            }
         };
         let spec = stream.spec();
         // Remember the established format for seek continuations.
@@ -1164,10 +1250,12 @@ impl Player {
         }
 
         if let Err(e) = self.sink.open(track) {
-            return Err(format!("the device refused DoP: {e}"));
+            tracing::warn!(error = %e, "DoP sink open failed");
+            return Err("your DAC couldn't be set up for native DSD (another app may be using it)".into());
         }
         if let Err(e) = self.sink.play() {
-            return Err(format!("the device would not start: {e}"));
+            tracing::warn!(error = %e, "DoP sink start failed");
+            return Err("your DAC didn't start".into());
         }
 
         let base_frames = seek.unwrap_or(0) * spec.dop_rate_hz as u64 / 1000;
@@ -1228,7 +1316,8 @@ impl Player {
         let info = match self.transport.open_stream(track.id, &opts) {
             Ok(i) => i,
             Err(e) => {
-                self.fail(&format!("stream failed: {e}"));
+                tracing::warn!(error = %e, "stream request failed");
+                self.fail("Couldn't get the stream from the server.");
                 return;
             }
         };
@@ -1238,7 +1327,8 @@ impl Player {
         let decoder = match StreamDecoder::new(info.reader, expect_chained) {
             Ok(d) => d,
             Err(e) => {
-                self.fail(&format!("decode failed: {e}"));
+                tracing::warn!(error = %e, "decode failed");
+                self.fail("Couldn't decode this file.");
                 return;
             }
         };
@@ -1294,7 +1384,7 @@ impl Player {
                             error = %e,
                             "bit-perfect: could not open the exclusive device; using shared output"
                         );
-                        why = Some(format!("the device couldn't be opened exclusively: {e}"));
+                        why = Some("your DAC couldn't be opened for exclusive use (another app may be using it)".into());
                     }
                 }
             }
@@ -1318,7 +1408,7 @@ impl Player {
             sink_rate = spec.sample_rate;
             resampler = None;
             if self.sink.play().is_err() {
-                self.fail("audio sink failed to start");
+                self.fail("Couldn't start the audio output.");
                 return;
             }
         } else {
@@ -1326,7 +1416,7 @@ impl Player {
             // negotiates the device rate in open(), so the query below sees
             // the real rate (native when the device takes it).
             if self.sink.open(track).is_err() {
-                self.fail("audio sink failed to open");
+                self.fail("Couldn't open the audio output.");
                 return;
             }
             (resampler, sink_rate) = match self.sink.preferred_sample_rate() {
@@ -1341,7 +1431,7 @@ impl Player {
                 _ => (None, spec.sample_rate),
             };
             if self.sink.play().is_err() {
-                self.fail("audio sink failed to start");
+                self.fail("Couldn't start the audio output.");
                 return;
             }
         }
@@ -1421,7 +1511,8 @@ impl Player {
             match active.decoder.decode_interleaved(&mut pcm) {
                 Ok(n) => n,
                 Err(e) => {
-                    self.fail(&format!("decode failed: {e}"));
+                    tracing::warn!(error = %e, "decode failed");
+                self.fail("Couldn't decode this file.");
                     return;
                 }
             }
@@ -1435,7 +1526,7 @@ impl Player {
             if never_decoded {
                 self.empty_streak += 1;
                 if self.empty_streak > self.queue.len().max(1) as u32 {
-                    self.fail("stream produced no audio");
+                    self.fail("This file produced no audio.");
                     return;
                 }
             }
@@ -1535,7 +1626,7 @@ impl Player {
             })
             .is_err()
         {
-            self.fail("audio sink write failed");
+            self.fail("The audio output stopped responding.");
             return;
         }
         let active = match self.active.as_mut() {
@@ -1564,7 +1655,8 @@ impl Player {
             match active.stream.read_frames(&mut buf) {
                 Ok(n) => n,
                 Err(e) => {
-                    self.fail(&format!("DoP read failed: {e}"));
+                    tracing::warn!(error = %e, "DoP read failed");
+                    self.fail("Couldn't read the DSD stream.");
                     return;
                 }
             }
@@ -1575,7 +1667,7 @@ impl Player {
             if never_produced {
                 self.empty_streak += 1;
                 if self.empty_streak > self.queue.len().max(1) as u32 {
-                    self.fail("DoP stream produced no audio");
+                    self.fail("The DSD stream contained no audio.");
                     return;
                 }
             }
@@ -1725,6 +1817,10 @@ fn expected_frames(track: &Track, rate: u32) -> u64 {
 #[derive(Debug)]
 pub enum EngineCommand {
     PlayQueue(Vec<Track>, usize),
+    /// Move a queue entry (list positions) without interrupting playback.
+    MoveQueueItem(usize, usize),
+    /// Remove a queue entry (list position); moves on only if it was playing.
+    RemoveQueueItem(usize),
     Pause,
     Resume,
     Toggle,
@@ -2009,6 +2105,14 @@ impl EngineController {
 
     pub fn play_queue(&self, tracks: Vec<Track>, index: usize) {
         self.send(EngineCommand::PlayQueue(tracks, index));
+    }
+    /// Reorder the queue in place; playback continues uninterrupted.
+    pub fn move_queue_item(&self, from: usize, to: usize) {
+        self.send(EngineCommand::MoveQueueItem(from, to));
+    }
+    /// Remove a queue entry in place; playback continues unless it was playing.
+    pub fn remove_queue_item(&self, index: usize) {
+        self.send(EngineCommand::RemoveQueueItem(index));
     }
     pub fn pause(&self) {
         self.send(EngineCommand::Pause);
@@ -2319,6 +2423,8 @@ fn snapshot_key(
 fn apply_command(player: &mut Player, cmd: EngineCommand) {
     match cmd {
         EngineCommand::PlayQueue(tracks, index) => player.play_queue(tracks, index),
+        EngineCommand::MoveQueueItem(from, to) => player.move_queue_item(from, to),
+        EngineCommand::RemoveQueueItem(i) => player.remove_queue_item(i),
         EngineCommand::Pause => player.pause(),
         EngineCommand::Resume => player.resume(),
         EngineCommand::Toggle => player.toggle(),

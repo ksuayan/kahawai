@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { makeAlbum, mockFetch } from "../test/fixtures";
 import { $$, mountApp, openSelect, options, pick, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
+import { useAnalogStore } from "../stores/analog";
 import { useDspStore } from "../stores/dsp";
 import { useJobsStore } from "../stores/jobs";
 import { useSettingsStore } from "../stores/settings";
@@ -278,6 +279,37 @@ describe("Settings: bit-perfect output", () => {
   });
 });
 
+describe("Settings: Advanced", () => {
+  it("stays editable when Best quality is on, so it carries no such note", async () => {
+    const w = await mountSettings();
+    expect(w.get('[data-testid="advanced"]').text()).not.toContain("Disabled when");
+  });
+});
+
+describe("Settings: Experimental", () => {
+  it("is collapsed by default and holds Analog Warmth", async () => {
+    const w = await mountSettings();
+    const box = w.get('[data-testid="experimental"]');
+    expect(box.attributes("open")).toBeUndefined();
+    expect(box.find("summary").text()).toContain("Experimental");
+    expect(box.text()).toContain("Analog Warmth");
+    expect(box.text()).toContain("Disabled when Best quality is on.");
+    // Not a top-level section any more.
+    const top = w.findAll(":scope > section").filter((s) => s.text().includes("Analog Warmth"));
+    expect(top).toHaveLength(0);
+  });
+
+  it("says in the collapsed header when analog warmth is on, so an active effect is never hidden", async () => {
+    const w = await mountSettings();
+    expect(w.find('[data-testid="experimental-active"]').exists()).toBe(false);
+    useAnalogStore().a = { ...useAnalogStore().a, enabled: true };
+    useAnalogStore().active = "a";
+    await settle();
+    expect(w.get('[data-testid="experimental-active"]').text()).toContain("Analog warmth on");
+    expect(w.get('[data-testid="experimental"]').attributes("open")).toBeUndefined();
+  });
+});
+
 describe("Settings: section order", () => {
   it("follows the agreed sequence", async () => {
     const w = await mountSettings();
@@ -293,6 +325,7 @@ describe("Settings: section order", () => {
       "Parametric EQ",
       "Loudness normalization",
       "Advanced",
+      "Experimental",
       "Analog Warmth (Experimental)",
       "Library",
       "Album art cache",

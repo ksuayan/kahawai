@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { makeAlbum, makeState, makeTrack } from "../test/fixtures";
-import { mountApp, options, openSelect, pick, settle } from "../test/helpers";
+import { mountApp, settle } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
@@ -115,70 +115,10 @@ describe("NowPlayingBar", () => {
     expect(tauri.callsTo("set_volume")).toEqual([{ v: 0.51 }]);
   });
 
-  it("shows Auto until this track is overridden, even though it plays as PASSTHROUGH", async () => {
-    const w = await boot(makeState({ status: "playing", track: makeTrack({ format: "flac" }), format: "passthrough", chain: "flac->passthrough" }));
-    const trigger = w.get('[aria-label="Stream format for this track"]');
-    expect(trigger.text()).toContain("Auto");
-    expect(trigger.text()).not.toContain("PASSTHROUGH");
-    // The tooltip says what Auto means and what it is doing right now.
-    expect(trigger.attributes("title")).toContain("default from Settings");
-    expect(trigger.attributes("title")).toContain("playing as PASSTHROUGH");
-  });
-
-  it("lists valid per-track formats, forces the chosen one, and then shows it", async () => {
-    const track = makeTrack({ format: "flac" });
-    const w = await boot(makeState({ status: "playing", track, format: "passthrough" }));
-    const trigger = w.get('[aria-label="Stream format for this track"]');
-    await openSelect(trigger.element as HTMLElement);
-    expect(options().map((o) => o.textContent?.trim())).toEqual(["Auto", "PASSTHROUGH", "FLAC", "OPUS", "MP3"]);
-    pick(options()[2]); // FLAC
-    await settle();
-    expect(tauri.callsTo("set_track_format")).toEqual([{ track_id: track.id, fmt: "flac" }]);
-    expect(trigger.text()).toContain("FLAC");
-    expect(trigger.attributes("title")).toContain("forced to FLAC");
-  });
-
-  it("remembers an override per track, not globally", async () => {
-    const t1 = makeTrack({ format: "flac" });
-    const t2 = makeTrack({ format: "flac" });
-    const w = await boot(makeState({ status: "playing", track: t1 }));
-    await openSelect(w.get('[aria-label="Stream format for this track"]').element as HTMLElement);
-    pick(options()[3]); // OPUS for t1
-    await settle();
-    tauri.emit("player-state", makeState({ status: "playing", track: t2 }));
-    await settle();
-    expect(w.get('[aria-label="Stream format for this track"]').text()).toContain("Auto");
-    tauri.emit("player-state", makeState({ status: "playing", track: t1 }));
-    await settle();
-    expect(w.get('[aria-label="Stream format for this track"]').text()).toContain("OPUS");
-  });
-
-  it("offers Auto as a real choice (null format)", async () => {
-    const track = makeTrack({ format: "flac" });
-    const w = await boot(makeState({ status: "playing", track, format: "flac" }));
-    const trigger = w.get('[aria-label="Stream format for this track"]');
-    await openSelect(trigger.element as HTMLElement);
-    pick(options()[2]); // force FLAC first
-    await settle();
-    await openSelect(trigger.element as HTMLElement);
-    pick(options()[0]); // back to Auto
-    await settle();
-    expect(tauri.callsTo("set_track_format").at(-1)).toEqual({ track_id: track.id, fmt: null });
-    expect(trigger.text()).toContain("Auto");
-  });
-
-  it("only offers FLAC/DoP for DSD tracks", async () => {
-    const w = await boot(makeState({ status: "playing", track: makeTrack({ format: "dsf" }), format: "flac" }));
-    await openSelect(w.get('[aria-label="Stream format for this track"]').element as HTMLElement);
-    expect(options().map((o) => o.textContent?.trim())).toEqual(["Auto", "FLAC", "DOP"]);
-  });
-
-  it("disables the format picker for an undecodable track and says why", async () => {
-    const track = makeTrack({ decodable: false, format: "sacd_iso" });
-    const w = await boot(makeState({ status: "stopped", track }));
-    const trigger = w.get('[aria-label="Stream format for this track"]');
-    expect(trigger.attributes("disabled")).toBeDefined();
-    expect(trigger.attributes("title")).toMatch(/extraction/i);
+  it("has no format picker in the bar: the per-track override lives in the track's ⋯ menu", async () => {
+    const w = await boot(makeState({ status: "playing", track: makeTrack({ format: "flac" }), format: "passthrough" }));
+    expect(w.find('[aria-label="Stream format for this track"]').exists()).toBe(false);
+    expect(w.find("button[aria-label^='Actions for']").exists()).toBe(true);
   });
 
   it("has no gear/settings popover in the bar: the default format lives in Settings", async () => {

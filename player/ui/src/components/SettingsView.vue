@@ -10,6 +10,7 @@ import {
   setDsdDeviceConfirmed,
   type ArtworkCacheStats,
 } from "../tauri";
+import { useAnalogStore } from "../stores/analog";
 import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
 import { useJobsStore } from "../stores/jobs";
@@ -130,6 +131,10 @@ const dsdGoesNative = computed(
 const formatIgnoredForDsd = computed(() => settings.globalFormat !== null && dsdGoesNative.value);
 
 const player = usePlayerStore();
+const analogStore = useAnalogStore();
+
+/** Analog warmth is switched on: the collapsed Experimental section says so. */
+const analogOn = computed(() => analogStore.current.enabled);
 
 /** The Advanced section starts open only when something in it overrides the mode. */
 const overrides = computed(() => [
@@ -258,7 +263,7 @@ const dopRates = computed(() =>
           data-testid="server-light"
         >●</span>
       </template>
-      <UiHint>The music server this client browses. Saved through the Rust core.</UiHint>
+      <UiHint>The music server this client browses.</UiHint>
       <div class="flex gap-2">
         <UiInput
           v-model="urlInput"
@@ -317,7 +322,7 @@ const dopRates = computed(() =>
       </UiHint>
       <UiHint v-if="!dsp.devices.length">No output devices reported.</UiHint>
       <UiHint>
-        PCM plays in shared mode. On macOS, DSD tracks can use exclusive hog-mode DoP output instead — bit-perfect,
+        PCM plays in shared mode. On macOS, DSD tracks can use exclusive DoP output instead — bit-perfect,
         bypassing the EQ, loudness, and volume below.
       </UiHint>
       <UiHint>
@@ -341,7 +346,7 @@ const dopRates = computed(() =>
       </p>
       <div :class="bypassed ? 'pointer-events-none opacity-40 grayscale' : ''" :inert="bypassed || undefined">
       <UiHint>
-        Up to 8 bands, applied to PCM only (DoP bypasses EQ). Changes apply live and are saved through the Rust core.
+        Up to 8 bands, applied to PCM only (DoP bypasses EQ). Changes apply live.
       </UiHint>
       <UiSwitch :model-value="dsp.eqEnabled" label="EQ enabled" @update:model-value="(v) => dsp.saveEqEnabled(v)" />
       <StateMessage v-if="dsp.rowError" kind="error" class="mt-2">{{ dsp.rowError }}</StateMessage>
@@ -456,7 +461,7 @@ const dopRates = computed(() =>
       <UiHint>
         What to do with DSD tracks (DSF/DFF). <strong class="font-semibold text-fg">Auto</strong> plays them natively
         (DoP) on DACs known to decode it and converts to FLAC everywhere else, so an unfamiliar device never gets a
-        DoP stream it might play as noise. Saved through the Rust core and restored on launch.
+        DoP stream it might play as noise.
       </UiHint>
       <UiSelect
         aria-label="DSD handling"
@@ -480,15 +485,26 @@ const dopRates = computed(() =>
         every other track.
       </UiHint>
       <UiHint spaced>
-        Native requests DoP from the server; on macOS it plays through the exclusive hog-mode path (bit-perfect,
-        bypasses EQ/loudness/volume). Without a DoP-capable device the core falls back to the FLAC transcode and logs
-        why.
+        Native plays DSD as DoP; on macOS it uses exclusive output (bit-perfect, bypasses EQ/loudness/volume). If the
+        device can't play DoP, the track plays as FLAC instead and the player says why.
       </UiHint>
     </SettingsSection>
       </div>
     </details>
 
-    <AnalogSection />
+    <details class="mb-7 rounded-lg border border-line" data-testid="experimental">
+      <summary class="heading-3 cursor-pointer select-none px-3 py-2">
+        Experimental
+        <UiBadge v-if="analogOn" variant="accent" class="ml-1" data-testid="experimental-active">Analog warmth on</UiBadge>
+      </summary>
+      <div class="px-3 pt-1">
+        <UiHint>
+          Work in progress: these may change or be removed, and are off unless you turn them on.
+          Disabled when Best quality is on.
+        </UiHint>
+        <AnalogSection />
+      </div>
+    </details>
 
     <SettingsSection title="Library">
       <UiHint>

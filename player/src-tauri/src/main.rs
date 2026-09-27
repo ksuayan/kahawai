@@ -293,6 +293,20 @@ fn queue_play(
     Ok(())
 }
 
+/// Move a queue entry (list positions) without interrupting playback. No
+/// `emit_state`: the playback thread emits the new queue itself once applied.
+#[tauri::command]
+fn queue_move(state: State<'_, AppState>, from: usize, to: usize) {
+    state.engine.move_queue_item(from, to);
+}
+
+/// Remove a queue entry (list position). Playback carries on unless it was the
+/// playing track. Same emit rule as `queue_move`.
+#[tauri::command]
+fn queue_remove(state: State<'_, AppState>, index: usize) {
+    state.engine.remove_queue_item(index);
+}
+
 #[tauri::command]
 fn pause(app: AppHandle, state: State<'_, AppState>) {
     state.engine.pause();
@@ -817,6 +831,8 @@ fn main() {
             set_server_url,
             play_track,
             queue_play,
+            queue_move,
+            queue_remove,
             pause,
             resume,
             toggle,

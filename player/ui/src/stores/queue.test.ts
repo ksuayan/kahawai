@@ -161,7 +161,9 @@ describe("queue store", () => {
       expect(q.current?.title).toBe("B");
       expect(q.index).toBe(0);
       await flushPromises();
-      expect(tauri.callsTo("queue_play")).toHaveLength(1);
+      // Applied in place in the core: nothing restarts.
+      expect(tauri.callsTo("queue_move")).toEqual([{ from: 0, to: 3 }]);
+      expect(tauri.callsTo("queue_play")).toHaveLength(0);
     });
 
     it("reorder ignores a no-op or out-of-range move", async () => {
@@ -170,6 +172,7 @@ describe("queue store", () => {
       await q.reorder(-1, 2);
       await q.reorder(0, 9);
       expect(titles(q)).toEqual(["A", "B", "C", "D"]);
+      expect(tauri.callsTo("queue_move")).toHaveLength(0);
       expect(tauri.callsTo("queue_play")).toHaveLength(0);
     });
 
@@ -195,13 +198,21 @@ describe("queue store", () => {
       expect(q.index).toBe(0);
     });
 
-    it("removing the only track stops playback", async () => {
+    it("removing the only track leaves the core to stop playback", async () => {
       const q = useQueueStore();
       q.tracks = [a];
       q.index = 0;
       await q.removeAt(0);
       expect(q.index).toBeNull();
-      expect(tauri.callsTo("queue_play")[0]).toMatchObject({ tracks: [] });
+      expect(tauri.callsTo("queue_remove")).toEqual([{ index: 0 }]);
+    });
+
+    it("removing sends the list position to the core without restarting anything", async () => {
+      const q = await withQueue(2);
+      await q.removeAt(0);
+      expect(tauri.callsTo("queue_remove")).toEqual([{ index: 0 }]);
+      expect(tauri.callsTo("queue_play")).toHaveLength(0);
+      expect(tauri.callsTo("seek_ms")).toHaveLength(0);
     });
 
     it("ignores an out-of-range remove", async () => {
@@ -220,15 +231,14 @@ describe("queue store", () => {
       expect(tauri.callsTo("queue_play")).toEqual([{ tracks: [], index: 0 }]);
     });
 
-    it("re-sync preserves the playhead after a reorder", async () => {
+    it("a reorder does not restart or seek the playing track", async () => {
       tauri.on("get_state", makeState({ status: "playing", position_ms: 45_000 }));
       const player = usePlayerStore();
       await player.init();
       const q = await withQueue();
       await q.reorder(2, 3);
-      const seeks = tauri.callsTo("seek_ms") as { ms: number }[];
-      expect(seeks).toHaveLength(1);
-      expect(seeks[0].ms).toBeGreaterThanOrEqual(45_000);
+      expect(tauri.callsTo("queue_play")).toHaveLength(0);
+      expect(tauri.callsTo("seek_ms")).toHaveLength(0);
     });
   });
 });

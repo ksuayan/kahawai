@@ -53,6 +53,7 @@ there always beats the mode, and the section shows an "N overrides" badge when i
 | **Sound quality** | The one choice: *Best quality* or *Compatible*. A live status line says what is happening now ("Ready", "Playing bit-perfect at 96 kHz", "Paused: EQ is on"). A legend shows EQ, Loudness, Analog and Volume as on, off or bypassed. |
 | **Parametric EQ** and **Loudness normalization** | Your own processing. Both are bypassed, and shown dimmed, while exclusive output plays. |
 | **Advanced** *(collapsed)* | Stream format, Bit-perfect output and DSD handling. Each defaults to *Auto (follows Sound quality)*. |
+| **Experimental** *(collapsed)* | Work-in-progress features, currently Analog Warmth. The collapsed header shows "Analog warmth on" while the effect is active, so it is never hidden. |
 
 The library is mostly FLAC, AAC and MP3, so the ordinary PCM path matters most. DSD is the special case, and it is
 gated more strictly because getting it wrong is louder.

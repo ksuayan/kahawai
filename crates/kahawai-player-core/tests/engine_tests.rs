@@ -705,7 +705,7 @@ fn dop_without_a_dsd_capable_sink_falls_back_to_flac_with_a_notice() {
     assert!(snap.error.is_none(), "not an error: {:?}", snap.error);
     assert_eq!(snap.format, Some(StreamFormat::Flac));
     assert!(
-        snap.notice.as_deref().unwrap_or("").contains("DoP"),
+        snap.notice.as_deref().unwrap_or("").contains("DSD"),
         "notice: {:?}",
         snap.notice
     );
@@ -723,8 +723,8 @@ fn dop_open_failure_falls_back_to_flac_and_releases_the_sink() {
     assert_eq!(snap.format, Some(StreamFormat::Flac));
     assert!(snap.error.is_none());
     assert!(
-        snap.notice.as_deref().unwrap_or("").contains("hog mode refused"),
-        "notice carries the device's reason: {:?}",
+        snap.notice.as_deref().unwrap_or("").contains("couldn't be set up for native DSD"),
+        "notice says why in plain words: {:?}",
         snap.notice
     );
     h.pump_until_done(60);
@@ -2361,4 +2361,166 @@ fn loudness_gain_is_reduced_so_the_eq_boosted_peak_cannot_clip() {
     let steady = &s[s.len() / 2..];
     let peak = steady.iter().fold(0.0f32, |a, x| a.max(x.abs()));
     assert!(peak < 0.95, "planned to stay under full scale before any guard: {peak}");
+}
+
+// ---------------------------------------------------------------------------
+// Format overrides apply to the playing track immediately
+// ---------------------------------------------------------------------------
+
+fn playing_mid_track() -> Harness {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.stub.add(2, &[(440.0, 44100 * 4)]);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000), track(2, AudioFormat::Wav, 4000)], 0);
+    for _ in 0..12 {
+        h.player.pump();
+    }
+    h
+}
+
+#[test]
+fn a_track_format_override_re_opens_the_playing_track_at_the_same_position() {
+    let mut h = playing_mid_track();
+    let before = h.player.snapshot();
+    assert_eq!(before.format, Some(StreamFormat::Passthrough));
+    assert!(before.position_ms > 100, "mid-track: {}", before.position_ms);
+
+    h.player.set_track_format(1, Some(StreamFormat::Flac));
+    let after = h.player.snapshot();
+    assert_eq!(after.format, Some(StreamFormat::Flac), "applied now, not at the next open");
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+    assert!(after.position_ms + 250 >= before.position_ms, "resumes near where it was: {} vs {}", after.position_ms, before.position_ms);
+
+    // Clearing it (Auto) goes back, again immediately.
+    h.player.set_track_format(1, None);
+    assert_eq!(h.player.snapshot().format, Some(StreamFormat::Passthrough));
+}
+
+#[test]
+fn an_override_for_another_track_or_an_unchanged_one_does_not_disturb_playback() {
+    let mut h = playing_mid_track();
+    let opens = h.stub.opened.lock().unwrap().len();
+    h.player.set_track_format(2, Some(StreamFormat::Flac)); // not the loaded track
+    assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "no re-open for a different track");
+    h.player.set_track_format(1, Some(StreamFormat::Flac));
+    let opens = h.stub.opened.lock().unwrap().len();
+    h.player.set_track_format(1, Some(StreamFormat::Flac)); // same value again
+    assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "no re-open when nothing changed");
+    // But it is remembered for when track 2 comes up.
+    h.player.next();
+    assert_eq!(h.player.snapshot().format, Some(StreamFormat::Flac));
+}
+
+#[test]
+fn a_global_format_change_re_opens_the_playing_track() {
+    let mut h = playing_mid_track();
+    h.player.set_global_format(Some(StreamFormat::Flac));
+    assert_eq!(h.player.snapshot().format, Some(StreamFormat::Flac));
+    h.player.set_global_format(None);
+    assert_eq!(h.player.snapshot().format, Some(StreamFormat::Passthrough));
+}
+
+#[test]
+fn a_paused_track_stays_paused_when_its_format_changes() {
+    let mut h = playing_mid_track();
+    h.player.pause();
+    h.player.set_track_format(1, Some(StreamFormat::Flac));
+    assert_eq!(h.player.status(), PlayerStatus::Paused);
+    assert_eq!(h.player.snapshot().format, Some(StreamFormat::Flac));
+}
+
+// ---------------------------------------------------------------------------
+// In-place queue edits: reordering or removing must not restart playback
+// ---------------------------------------------------------------------------
+
+fn three_track_queue(chain_mode: Option<&str>) -> Harness {
+    let mut h = Harness::new(chain_mode);
+    for id in 1..=3 {
+        h.stub.add(id, &[(440.0 + id as f32 * 110.0, 44100 * 4)]);
+    }
+    h.player.play_queue((1..=3).map(|id| track(id, AudioFormat::Wav, 4000)).collect(), 0);
+    for _ in 0..12 {
+        h.player.pump();
+    }
+    h
+}
+
+#[test]
+fn moving_a_queue_entry_does_not_touch_the_playing_stream() {
+    let mut h = three_track_queue(None);
+    let opens = h.stub.opened.lock().unwrap().len();
+    let before = h.player.snapshot();
+    h.player.move_queue_item(2, 1);
+    let after = h.player.snapshot();
+    assert_eq!(after.queue_ids, vec![1, 3, 2]);
+    assert_eq!(after.current_id, Some(1), "still on the same track");
+    assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "no stream was re-opened");
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+    assert!(after.position_ms >= before.position_ms, "the playhead did not restart");
+}
+
+#[test]
+fn moving_the_playing_track_keeps_it_playing() {
+    let mut h = three_track_queue(None);
+    let opens = h.stub.opened.lock().unwrap().len();
+    h.player.move_queue_item(0, 2);
+    let s = h.player.snapshot();
+    assert_eq!(s.queue_ids, vec![2, 3, 1]);
+    assert_eq!(s.current_id, Some(1));
+    assert_eq!(s.queue_index, Some(2), "the UI's highlight follows it");
+    assert_eq!(h.stub.opened.lock().unwrap().len(), opens);
+}
+
+#[test]
+fn removing_another_entry_does_not_touch_the_playing_stream() {
+    let mut h = three_track_queue(None);
+    let opens = h.stub.opened.lock().unwrap().len();
+    h.player.remove_queue_item(2);
+    let s = h.player.snapshot();
+    assert_eq!(s.queue_ids, vec![1, 2]);
+    assert_eq!(s.current_id, Some(1));
+    assert_eq!(h.stub.opened.lock().unwrap().len(), opens);
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+}
+
+#[test]
+fn removing_the_playing_track_moves_on_to_the_next() {
+    let mut h = three_track_queue(None);
+    h.player.remove_queue_item(0);
+    let s = h.player.snapshot();
+    assert_eq!(s.queue_ids, vec![2, 3]);
+    assert_eq!(s.current_id, Some(2), "the next track took over");
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+}
+
+#[test]
+fn removing_the_last_remaining_track_stops_playback() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    h.player.pump();
+    h.player.remove_queue_item(0);
+    assert_eq!(h.player.status(), PlayerStatus::Stopped);
+    assert!(h.player.snapshot().queue_ids.is_empty());
+}
+
+#[test]
+fn out_of_range_edits_are_ignored() {
+    let mut h = three_track_queue(None);
+    h.player.move_queue_item(0, 9);
+    h.player.remove_queue_item(9);
+    assert_eq!(h.player.snapshot().queue_ids, vec![1, 2, 3]);
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+}
+
+#[test]
+fn reordering_the_next_track_refreshes_a_stale_gapless_chain() {
+    // The server already chained track 2 after track 1. If the user moves
+    // track 3 in front of it, that chained audio would play the wrong track, so
+    // the stream is re-opened once at the current position.
+    let mut h = three_track_queue(Some("chained"));
+    let opens = h.stub.opened.lock().unwrap().len();
+    h.player.move_queue_item(2, 1); // [1,3,2]: what follows track 1 changed
+    assert!(h.stub.opened.lock().unwrap().len() > opens, "re-opened to chain the right track");
+    assert_eq!(h.player.snapshot().current_id, Some(1));
 }

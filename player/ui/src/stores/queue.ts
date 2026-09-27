@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { getQueueTracks, queuePlay, seekMs } from "../tauri";
+import { getQueueTracks, queueMove, queuePlay, queueRemove } from "../tauri";
 import { useLibraryStore } from "./library";
 import { usePlayerStore } from "./player";
 import type { PlayerState, Track } from "../types";
@@ -14,9 +14,8 @@ import type { PlayerState, Track } from "../types";
  * ids through the library cache — so core-side mutations (append,
  * play-next, launch restore) show up here without a restart.
  *
- * Local reorder/remove still re-sync via `queue_play` (the core has no
- * in-place reorder command): this restarts the current track and
- * re-seeks as an approximation.
+ * Reorder and remove are applied to the core in place (`queue_move`,
+ * `queue_remove`), so playback is never restarted by an edit.
  */
 export const useQueueStore = defineStore("queue", () => {
   const tracks = ref<Track[]>([]);
@@ -29,11 +28,27 @@ export const useQueueStore = defineStore("queue", () => {
 
   let syncSeq = 0;
 
+  /** After a local edit the core will echo this exact order once it has applied
+   *  it. A state event emitted *before* that (still carrying the old order)
+   *  must not revert the edit, so it is ignored until the echo arrives. Times out
+   *  so a command that never lands can't leave the queue frozen. */
+  let awaiting: { ids: number[]; until: number } | null = null;
+  const AWAIT_ECHO_MS = 3000;
+
+  function expectEcho(): void {
+    awaiting = { ids: tracks.value.map((t) => t.id), until: Date.now() + AWAIT_ECHO_MS };
+  }
+
   /** Reconcile with the core: adopt its queue order, hydrate unknown ids,
    *  and move the index. Never invents state — the core is the truth. */
   async function syncFromState(s: PlayerState): Promise<void> {
     const seq = ++syncSeq;
     const ids = s.queue_ids;
+    if (awaiting) {
+      const arrived = ids.length === awaiting.ids.length && ids.every((id, i) => id === awaiting!.ids[i]);
+      if (arrived || Date.now() > awaiting.until) awaiting = null;
+      else return; // an echo from before the core applied our edit
+    }
     const localIds = tracks.value.map((t) => t.id);
     const same =
       ids.length === localIds.length && ids.every((id, i) => id === localIds[i]);
@@ -112,15 +127,6 @@ export const useQueueStore = defineStore("queue", () => {
     }
   }
 
-  /** Re-sync the core after a local mutation (see C1 note above). */
-  async function resync(preservePosition: boolean): Promise<void> {
-    const player = usePlayerStore();
-    const pos = player.positionMs;
-    const cur = index.value ?? 0;
-    await queuePlay(tracks.value, cur);
-    if (preservePosition && pos > 1000) await seekMs(pos);
-  }
-
   async function reorder(from: number, to: number): Promise<void> {
     if (from === to) return;
     if (from < 0 || to < 0 || from >= tracks.value.length || to >= tracks.value.length) return;
@@ -132,7 +138,9 @@ export const useQueueStore = defineStore("queue", () => {
       const ni = tracks.value.findIndex((t) => t.id === currentId);
       if (ni >= 0) index.value = ni;
     }
-    await resync(true);
+    // In place in the core: the playing track is not restarted.
+    expectEcho();
+    await queueMove(from, to);
   }
 
   async function moveUp(i: number): Promise<void> {
@@ -147,15 +155,14 @@ export const useQueueStore = defineStore("queue", () => {
     if (i < 0 || i >= tracks.value.length) return;
     tracks.value.splice(i, 1);
     if (index.value != null) {
-      if (tracks.value.length === 0) {
-        index.value = null;
-        await emptyCore();
-        return;
-      }
-      if (i < index.value) index.value -= 1;
+      if (tracks.value.length === 0) index.value = null;
+      else if (i < index.value) index.value -= 1;
       else if (i === index.value) index.value = Math.min(index.value, tracks.value.length - 1);
     }
-    await resync(true);
+    // In place in the core: removing another entry does not touch playback;
+    // removing the playing one moves on to the next.
+    expectEcho();
+    await queueRemove(i);
   }
 
   /** `stop` alone leaves the core's queue intact, and `syncFromState` would

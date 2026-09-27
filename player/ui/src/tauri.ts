@@ -74,6 +74,16 @@ export async function queuePlay(tracks: Track[], index: number): Promise<void> {
   await cmd("queue_play", { tracks: plain(tracks), index });
 }
 
+/** Reorder the core's queue in place; playback is not interrupted. */
+export async function queueMove(from: number, to: number): Promise<void> {
+  await cmd("queue_move", { from, to });
+}
+
+/** Remove a queue entry in place; playback carries on unless it was playing. */
+export async function queueRemove(index: number): Promise<void> {
+  await cmd("queue_remove", { index });
+}
+
 export async function playTrackById(id: number): Promise<void> {
   await cmd("play_track", { id });
 }

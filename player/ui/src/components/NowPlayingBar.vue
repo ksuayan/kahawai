@@ -4,12 +4,11 @@ import { computed } from "vue";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
-import { isPlayable, trackTitle, unplayableReason } from "../types";
+import { trackTitle } from "../types";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
 import Artwork from "./Artwork.vue";
 import SeekBar from "./SeekBar.vue";
-import TrackFormatSelect from "./TrackFormatSelect.vue";
 import TrackMenu from "./TrackMenu.vue";
 import TransportControls from "./TransportControls.vue";
 import VolumeSlider from "./VolumeSlider.vue";
@@ -19,12 +18,6 @@ const lib = useLibraryStore();
 const nav = useNavStore();
 
 const track = computed(() => player.currentTrack);
-const trackPlayable = computed(() => (track.value ? isPlayable(track.value) : false));
-
-const formatTitle = computed(() =>
-  !track.value ? "No track playing" : !trackPlayable.value ? unplayableReason(track.value) : undefined,
-);
-
 const artworkHash = computed(() => {
   const t = track.value;
   if (!t?.album_id) return null;
@@ -101,14 +94,8 @@ function goNowPlaying(): void {
         <SeekBar :disabled="!track" />
       </div>
 
-      <!-- right: format, volume, extras -->
+      <!-- right: volume, extras -->
       <div class="flex items-center justify-end gap-2.5">
-        <TrackFormatSelect
-          :track="track"
-          :disabled="!trackPlayable"
-          :title="formatTitle"
-          trigger-class="w-[140px]"
-        />
         <VolumeSlider class="w-[100px]" />
         <UiButton variant="icon" title="Queue" aria-label="Queue" @click="nav.go('queue')"><ListOrdered /></UiButton>
         <TrackMenu v-if="track" :track="track" />

@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { ChevronRight, Disc3, Ellipsis, ListMusic, ListPlus, ListStart, Plus } from "lucide-vue-next";
+import { Check, ChevronRight, Disc3, Ellipsis, ListMusic, ListPlus, ListStart, Plus, Radio } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuItemIndicator,
   DropdownMenuPortal,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuRoot,
   DropdownMenuSeparator,
   DropdownMenuSub,
@@ -13,10 +16,11 @@ import {
   DropdownMenuTrigger,
 } from "reka-ui";
 import { useJobsStore } from "../stores/jobs";
+import { usePlayerStore } from "../stores/player";
 import { usePlaylistsStore } from "../stores/playlists";
 import { useQueueStore } from "../stores/queue";
 import { useToastsStore } from "../stores/toasts";
-import { isPlayable, trackTitle, type Track } from "../types";
+import { isPlayable, trackTitle, validFormatsFor, type StreamFormat, type Track } from "../types";
 import PromptDialog from "../ui/PromptDialog.vue";
 import UiButton from "../ui/UiButton.vue";
 
@@ -40,6 +44,7 @@ const props = withDefaults(
 const queue = useQueueStore();
 const playlists = usePlaylistsStore();
 const jobs = useJobsStore();
+const player = usePlayerStore();
 const toasts = useToastsStore();
 
 const busy = ref(false);
@@ -102,6 +107,30 @@ async function createAndAdd(name: string): Promise<void> {
   } finally {
     busy.value = false;
   }
+}
+
+// --- "Stream as…": a one-track format override, an escape hatch ---------------
+// Auto (the default) lets the player negotiate with the output device. Forcing a
+// format overrides all of that for this track, and lossy ones cost quality.
+const FORMAT_LABELS: Record<StreamFormat, string> = {
+  passthrough: "Original file",
+  flac: "FLAC",
+  opus: "Opus (lossy)",
+  mp3: "MP3 (lossy)",
+  dop: "DSD over PCM (DoP)",
+};
+
+const streamOptions = computed(() => [
+  { value: "auto", label: "Auto (recommended)" },
+  ...(props.track ? validFormatsFor(props.track) : []).map((f) => ({ value: f, label: FORMAT_LABELS[f] })),
+]);
+
+/** The radio value: the forced format, or "auto" when nothing is forced. */
+const streamValue = computed(() => player.formatOverride(props.track?.id) ?? "auto");
+
+function chooseStream(v: string): void {
+  if (!props.track) return;
+  void player.changeTrackFormat(props.track.id, v === "auto" ? null : (v as StreamFormat));
 }
 
 function extractIso(): void {
@@ -183,6 +212,25 @@ const menuLabel = computed(() => {
           <DropdownMenuItem v-if="canExtractIso" :class="itemClass" :disabled="busy" @select="extractIso">
             <span class="flex items-center gap-2"><Disc3 class="size-4 text-dim" />Extract to DSF</span>
           </DropdownMenuItem>
+          <DropdownMenuSub v-if="track">
+            <DropdownMenuSubTrigger :class="itemClass" :disabled="!isPlayable(track)" data-testid="stream-as">
+              <span class="flex items-center gap-2">
+                <Radio class="size-4 text-dim" />Stream as…
+                <span v-if="streamValue !== 'auto'" class="text-[11px] text-accent">{{ FORMAT_LABELS[streamValue as StreamFormat] }}</span>
+              </span>
+              <ChevronRight class="size-3.5 text-faint" />
+            </DropdownMenuSubTrigger>
+            <DropdownMenuPortal>
+              <DropdownMenuSubContent :class="contentClass" data-kw-fade :side-offset="6">
+                <DropdownMenuRadioGroup :model-value="streamValue" @update:model-value="(v) => chooseStream(String(v))">
+                  <DropdownMenuRadioItem v-for="o in streamOptions" :key="o.value" :value="o.value" :class="itemClass" :data-testid="`stream-${o.value}`">
+                    <span>{{ o.label }}</span>
+                    <DropdownMenuItemIndicator><Check class="size-4 text-accent" /></DropdownMenuItemIndicator>
+                  </DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuPortal>
+          </DropdownMenuSub>
         </DropdownMenuContent>
       </DropdownMenuPortal>
     </DropdownMenuRoot>

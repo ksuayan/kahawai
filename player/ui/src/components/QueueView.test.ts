@@ -161,7 +161,7 @@ describe("QueueView", () => {
       expect(rows(w)[2].get('button[aria-label="Move down"]').attributes("disabled")).toBeDefined();
     });
 
-    it("moves a track down and re-syncs the engine, keeping the playing track current", async () => {
+    it("moves a track down in place, keeping the playing track current and playing", async () => {
       tauri.on("get_state", makeState({ status: "playing", position_ms: 30_000 }));
       const w = await mountQueue([a, b, c], 0);
       await usePlayerStore().init();
@@ -170,14 +170,12 @@ describe("QueueView", () => {
       const q = useQueueStore();
       expect(q.tracks.map((t) => t.title)).toEqual(["Beta", "Alpha", "Gamma"]);
       expect(q.index).toBe(1); // Alpha is still the one playing
-      expect(tauri.callsTo("queue_play")).toHaveLength(1);
-      const seeks = tauri.callsTo("seek_ms") as { ms: number }[];
-      expect(seeks).toHaveLength(1);
-      expect(seeks[0].ms).toBeGreaterThanOrEqual(30_000); // resumes near where it was
-      expect(seeks[0].ms).toBeLessThan(31_000);
+      expect(tauri.callsTo("queue_move")).toEqual([{ from: 0, to: 1 }]);
+      expect(tauri.callsTo("queue_play")).toHaveLength(0); // nothing restarts
+      expect(tauri.callsTo("seek_ms")).toHaveLength(0);
     });
 
-    it("removes a track; removing the last one stops playback", async () => {
+    it("removes a track in place; removing the last one leaves the core to stop", async () => {
       const w = await mountQueue([a, b], 0);
       await rows(w)[1].get('button[aria-label="Remove from queue"]').trigger("click");
       await settle();
@@ -185,7 +183,8 @@ describe("QueueView", () => {
       await rows(w)[0].get('button[aria-label="Remove from queue"]').trigger("click");
       await settle();
       expect(useQueueStore().tracks).toEqual([]);
-      expect(tauri.callsTo("queue_play").at(-1)).toMatchObject({ tracks: [] });
+      expect(tauri.callsTo("queue_remove")).toEqual([{ index: 1 }, { index: 0 }]);
+      expect(tauri.callsTo("queue_play")).toHaveLength(0);
     });
 
     it("keeps the playing track current when an earlier row is removed", async () => {

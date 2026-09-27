@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { makeTrack, mockFetch } from "../test/fixtures";
 import { $$, bodyOf, dialog, key, menuItems, mountApp, openMenu, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
+import { usePlayerStore } from "../stores/player";
 import { usePlaylistsStore } from "../stores/playlists";
 import { useQueueStore } from "../stores/queue";
 import { useToastsStore } from "../stores/toasts";
@@ -27,6 +28,74 @@ async function openSubmenu() {
   await settle();
 }
 
+async function openStreamAs() {
+  const sub = item("Stream as");
+  sub.dispatchEvent(new PointerEvent("pointermove", { pointerType: "mouse", bubbles: true }));
+  key(sub, "ArrowRight");
+  await settle();
+}
+const radios = () => $$('[role="menuitemradio"]');
+
+describe("TrackMenu: Stream as…", () => {
+  it("is the last item in the flyout", async () => {
+    const { open } = await setup();
+    await open();
+    expect(menuItems().at(-1)!.textContent).toContain("Stream as");
+  });
+
+  it("is not offered for a list of tracks (an album), only for a single track", async () => {
+    const { open } = await setup({ tracks: [makeTrack()], albumId: 3 });
+    await open();
+    expect(menuItems().some((e) => (e.textContent ?? "").includes("Stream as"))).toBe(false);
+  });
+
+  it("offers Auto plus the valid formats, labelling the lossy ones", async () => {
+    const { open } = await setup({ track: makeTrack({ format: "flac", title: "Grenade" }) });
+    await open();
+    await openStreamAs();
+    expect(radios().map((e) => e.textContent?.trim())).toEqual([
+      "Auto (recommended)",
+      "Original file",
+      "FLAC",
+      "Opus (lossy)",
+      "MP3 (lossy)",
+    ]);
+  });
+
+  it("only offers FLAC and DoP for a DSD track", async () => {
+    const { open } = await setup({ track: makeTrack({ format: "dsf" }) });
+    await open();
+    await openStreamAs();
+    expect(radios().map((e) => e.textContent?.trim())).toEqual(["Auto (recommended)", "FLAC", "DSD over PCM (DoP)"]);
+  });
+
+  it("forces the chosen format for this track, shows it, and Auto clears it", async () => {
+    const track = makeTrack({ format: "flac", title: "Grenade" });
+    const { open } = await setup({ track });
+    await open();
+    await openStreamAs();
+    key(radios().find((e) => e.textContent?.includes("FLAC"))!, "Enter");
+    await settle();
+    expect(tauri.callsTo("set_track_format")).toEqual([{ track_id: track.id, fmt: "flac" }]);
+    expect(usePlayerStore().formatOverride(track.id)).toBe("flac");
+
+    await open();
+    expect(item("Stream as").textContent).toContain("FLAC");
+    await openStreamAs();
+    expect(radios().find((e) => e.getAttribute("aria-checked") === "true")!.textContent).toContain("FLAC");
+    key(radios().find((e) => e.textContent?.includes("Auto"))!, "Enter");
+    await settle();
+    expect(tauri.callsTo("set_track_format").at(-1)).toEqual({ track_id: track.id, fmt: null });
+    expect(usePlayerStore().formatOverride(track.id)).toBeNull();
+  });
+
+  it("is disabled for a track that can't be played, since there is nothing to stream", async () => {
+    const { open } = await setup({ track: makeTrack({ decodable: false, format: "sacd_iso" }) });
+    await open();
+    expect(item("Stream as").getAttribute("aria-disabled") ?? item("Stream as").getAttribute("data-disabled")).not.toBeNull();
+  });
+});
+
 describe("TrackMenu", () => {
   it("names the trigger after the track", async () => {
     const { trigger } = await setup();
@@ -39,7 +108,7 @@ describe("TrackMenu", () => {
     const { open } = await setup();
     expect(menuItems()).toHaveLength(0);
     await open();
-    expect(menuItems().map((e) => e.textContent?.replace(/[^\w ]/g, "").trim())).toEqual(["Play next", "Add to queue", "Add to playlist"]);
+    expect(menuItems().map((e) => e.textContent?.replace(/[^\w ]/g, "").trim())).toEqual(["Play next", "Add to queue", "Add to playlist", "Stream as"]);
   });
 
   it("Play next inserts after the current track and confirms with a toast", async () => {

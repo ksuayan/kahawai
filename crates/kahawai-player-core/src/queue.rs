@@ -15,8 +15,18 @@ pub enum RepeatMode {
     One,
 }
 
+/// What removing a queue entry did to the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removed {
+    /// Some other entry: the current track is unaffected.
+    Other,
+    /// The current track was removed: whatever now sits at the cursor (or
+    /// nothing, if the queue ran out) is what should play.
+    Current,
+}
+
 /// A playback queue: an ordered list plus a cursor.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Queue {
     tracks: Vec<Track>,
     /// Index into `tracks` of the currently playing item.
@@ -234,6 +244,77 @@ impl Queue {
         self.order.splice(at..at, insert_at..insert_at + n);
     }
 
+    /// Where the track at stable index `j` ends up after moving `from` -> `to`.
+    fn moved_index(j: usize, from: usize, to: usize) -> usize {
+        if j == from {
+            to
+        } else if from < to && j > from && j <= to {
+            j - 1
+        } else if to < from && j >= to && j < from {
+            j + 1
+        } else {
+            j
+        }
+    }
+
+    /// Move the track at list position `from` to list position `to`. The
+    /// current track stays current and keeps playing; shuffle order (who plays
+    /// after whom) is preserved. Returns false when either index is out of range.
+    pub fn move_track(&mut self, from: usize, to: usize) -> bool {
+        let n = self.tracks.len();
+        if from >= n || to >= n {
+            return false;
+        }
+        if from == to {
+            return true;
+        }
+        let item = self.tracks.remove(from);
+        self.tracks.insert(to, item);
+        for j in self.order.iter_mut() {
+            *j = Self::moved_index(*j, from, to);
+        }
+        // Without shuffle the cursor is a list position; with shuffle it is a
+        // position in `order`, whose entries were just remapped.
+        if !self.shuffle {
+            if let Some(c) = self.cursor {
+                self.cursor = Some(Self::moved_index(c, from, to));
+            }
+        }
+        true
+    }
+
+    /// Remove the track at list position `i`. Returns what happened to the
+    /// cursor, or `None` when `i` is out of range.
+    pub fn remove_at(&mut self, i: usize) -> Option<Removed> {
+        if i >= self.tracks.len() {
+            return None;
+        }
+        // Playback position of the removed track, before anything shifts.
+        let removed_pos = self.playback_pos_of(i);
+        self.tracks.remove(i);
+        self.order.retain(|&j| j != i);
+        for j in self.order.iter_mut() {
+            if *j > i {
+                *j -= 1;
+            }
+        }
+        let Some(cursor) = self.cursor else {
+            return Some(Removed::Other);
+        };
+        if removed_pos < cursor {
+            self.cursor = Some(cursor - 1);
+            Some(Removed::Other)
+        } else if removed_pos > cursor {
+            Some(Removed::Other)
+        } else if cursor < self.tracks.len() {
+            // The current track went: the one after it slides into its place.
+            Some(Removed::Current)
+        } else {
+            self.cursor = None; // it was the last one
+            Some(Removed::Current)
+        }
+    }
+
     /// Playback-order position of the stable track index `stable`, i.e. the
     /// cursor value that would make it current.
     fn playback_pos_of(&self, stable: usize) -> usize {
@@ -429,5 +510,106 @@ mod tests {
         q.insert_after_current(vec![track(5)]);
         assert_eq!(ids(&q), vec![5]);
         assert_eq!(q.current().unwrap().id, 5);
+    }
+
+    #[test]
+    fn move_keeps_the_current_track_current_without_shuffle() {
+        let mut q = Queue::new();
+        q.set_tracks((1..=5).map(track).collect());
+        q.next_track(); // current = 2
+        assert!(q.move_track(3, 0)); // [4,1,2,3,5]
+        assert_eq!(q.ordered_ids(), [4, 1, 2, 3, 5]);
+        assert_eq!(q.current().unwrap().id, 2);
+        assert!(q.move_track(0, 4)); // [1,2,3,5,4]
+        assert_eq!(q.ordered_ids(), [1, 2, 3, 5, 4]);
+        assert_eq!(q.current().unwrap().id, 2);
+        assert!(q.move_track(1, 3)); // move the current one itself: [1,3,5,2,4]
+        assert_eq!(q.ordered_ids(), [1, 3, 5, 2, 4]);
+        assert_eq!(q.current().unwrap().id, 2, "moving the playing track keeps it playing");
+    }
+
+    #[test]
+    fn move_keeps_the_current_track_and_the_play_order_with_shuffle() {
+        let mut q = Queue::new();
+        q.set_tracks((1..=6).map(track).collect());
+        q.set_shuffle(true);
+        q.next_track();
+        let current = q.current().unwrap().id;
+        let upcoming = |q: &Queue| {
+            let mut c = q.clone();
+            let mut v = Vec::new();
+            while let Some(t) = c.next_track() {
+                v.push(t.id);
+            }
+            v
+        };
+        let before = upcoming(&q);
+        assert!(q.move_track(5, 0));
+        assert_eq!(q.current().unwrap().id, current);
+        assert_eq!(upcoming(&q), before, "the shuffled sequence is untouched by a reorder of the list");
+    }
+
+    #[test]
+    fn move_rejects_out_of_range_and_treats_same_position_as_a_no_op() {
+        let mut q = Queue::new();
+        q.set_tracks((1..=3).map(track).collect());
+        assert!(!q.move_track(3, 0));
+        assert!(!q.move_track(0, 3));
+        assert!(q.move_track(1, 1));
+        assert_eq!(q.ordered_ids(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn removing_other_tracks_keeps_the_current_one() {
+        let mut q = Queue::new();
+        q.set_tracks((1..=5).map(track).collect());
+        q.next_track();
+        q.next_track(); // current = 3
+        assert_eq!(q.remove_at(0), Some(Removed::Other)); // [2,3,4,5]
+        assert_eq!(q.current().unwrap().id, 3);
+        assert_eq!(q.remove_at(3), Some(Removed::Other)); // after the current
+        assert_eq!(q.current().unwrap().id, 3);
+        assert_eq!(q.ordered_ids(), [2, 3, 4]);
+    }
+
+    #[test]
+    fn removing_the_current_track_hands_over_to_the_next() {
+        let mut q = Queue::new();
+        q.set_tracks((1..=3).map(track).collect());
+        q.next_track(); // current = 2
+        assert_eq!(q.remove_at(1), Some(Removed::Current));
+        assert_eq!(q.ordered_ids(), [1, 3]);
+        assert_eq!(q.current().unwrap().id, 3, "the next track slid into place");
+    }
+
+    #[test]
+    fn removing_the_last_and_current_track_ends_the_queue() {
+        let mut q = Queue::new();
+        q.set_tracks((1..=2).map(track).collect());
+        q.next_track(); // current = 2, the last
+        assert_eq!(q.remove_at(1), Some(Removed::Current));
+        assert!(q.current().is_none());
+        assert_eq!(q.remove_at(0), Some(Removed::Other));
+        assert!(q.is_empty());
+        assert_eq!(q.remove_at(0), None, "out of range");
+    }
+
+    #[test]
+    fn removal_with_shuffle_keeps_the_current_track_and_the_sequence() {
+        let mut q = Queue::new();
+        q.set_tracks((1..=6).map(track).collect());
+        q.set_shuffle(true);
+        q.next_track();
+        let current = q.current().unwrap().id;
+        let victim = q.ordered_ids().iter().position(|&id| id != current).unwrap();
+        let victim_id = q.ordered_ids()[victim];
+        assert_eq!(q.remove_at(victim), Some(Removed::Other));
+        assert_eq!(q.current().unwrap().id, current);
+        assert!(!q.ordered_ids().contains(&victim_id));
+        let mut seen = vec![current];
+        while let Some(t) = q.next_track() {
+            seen.push(t.id);
+        }
+        assert!(!seen.contains(&victim_id));
     }
 }
