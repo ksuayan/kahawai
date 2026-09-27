@@ -10,6 +10,7 @@ import type {
   BitPerfectMode,
   DsdStory,
   DopStatus,
+  QualityMode,
   DspSettings,
   EqBand,
   OutputDevice,
@@ -167,6 +168,32 @@ export async function setBitPerfect(mode: BitPerfectMode): Promise<void> {
 
 export async function setDsdStory(story: DsdStory): Promise<void> {
   await cmd("set_dsd_story", { story });
+}
+
+/** What the output device is doing right now, read from the OS. */
+export interface OutputLive {
+  name: string;
+  rate_hz: number;
+  /** 0 when unknown. */
+  bit_depth: number;
+  /** The stream format is floating point (the shared mixer's). */
+  float: boolean;
+  /** This app holds the device exclusively. */
+  exclusive: boolean;
+}
+
+export async function outputLiveState(): Promise<OutputLive | undefined> {
+  return cmd<OutputLive | null>("output_live_state").then((v) => v ?? undefined);
+}
+
+/** Top-level quality mode: "best" | "compatible". */
+export async function setQualityMode(mode: QualityMode): Promise<void> {
+  await cmd("set_quality_mode", { mode });
+}
+
+/** Tell "Auto" DSD handling that the current output decodes DoP (or not). */
+export async function setDsdDeviceConfirmed(confirmed: boolean): Promise<void> {
+  await cmd("set_dsd_device_confirmed", { confirmed });
 }
 
 // --- C2: audio devices, DSP, DoP -------------------------------------------

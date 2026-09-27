@@ -201,7 +201,7 @@ describe("queue store", () => {
       q.index = 0;
       await q.removeAt(0);
       expect(q.index).toBeNull();
-      expect(tauri.callsTo("stop")).toHaveLength(1);
+      expect(tauri.callsTo("queue_play")[0]).toMatchObject({ tracks: [] });
     });
 
     it("ignores an out-of-range remove", async () => {
@@ -211,12 +211,13 @@ describe("queue store", () => {
       expect(q.tracks).toHaveLength(4);
     });
 
-    it("clear empties the queue and stops", async () => {
+    it("clear empties the queue in the core too, so the next sync can't restore it", async () => {
       const q = await withQueue();
+      tauri.reset?.();
       await q.clear();
       expect(q.tracks).toEqual([]);
       expect(q.current).toBeNull();
-      expect(tauri.callsTo("stop")).toHaveLength(1);
+      expect(tauri.callsTo("queue_play")).toEqual([{ tracks: [], index: 0 }]);
     });
 
     it("re-sync preserves the playhead after a reorder", async () => {

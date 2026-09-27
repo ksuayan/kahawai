@@ -109,6 +109,7 @@ export const usePlayerStore = defineStore("player", () => {
   const isExclusive = computed(() => isDopExclusive.value || isBitPerfect.value);
   const volume = computed(() => raw.value?.volume ?? 1);
   const error = computed(() => raw.value?.error ?? null);
+  const notice = computed(() => raw.value?.notice ?? null);
   const repeat = computed<RepeatMode>(() => raw.value?.repeat ?? "off");
   const shuffle = computed(() => raw.value?.shuffle ?? false);
 
@@ -204,6 +205,7 @@ export const usePlayerStore = defineStore("player", () => {
     isExclusive,
     volume,
     error,
+    notice,
     repeat,
     shuffle,
     init,

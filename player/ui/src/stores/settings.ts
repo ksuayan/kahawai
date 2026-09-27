@@ -6,20 +6,23 @@ import {
   getServerUrl,
   setBitPerfect,
   setDsdStory,
+  setQualityMode,
   setFormat,
   setServerUrl,
 } from "../tauri";
-import type { BitPerfectMode, DsdStory, StreamFormat } from "../types";
+import type { BitPerfectMode, DsdStory, QualityMode, StreamFormat } from "../types";
 
 export const DEFAULT_SERVER_URL = "http://localhost:8080";
 
 export const useSettingsStore = defineStore("settings", () => {
   const serverUrl = ref(DEFAULT_SERVER_URL);
   const globalFormat = ref<StreamFormat | null>(null);
-  /** DSD handling: "native" (DoP when nothing overrides) or "convert". */
-  const dsdStory = ref<DsdStory>("convert");
-  /** Exclusive bit-perfect output: off (default) | mqa (MQA files only) | all. */
-  const bitPerfect = ref<BitPerfectMode>("off");
+  /** DSD handling: "auto" (native on known DoP DACs), "native" or "convert". */
+  const dsdStory = ref<DsdStory>("auto");
+  /** Top-level quality mode: the Auto settings below follow it. */
+  const qualityMode = ref<QualityMode>("best");
+  /** Exclusive bit-perfect output: auto (follows the quality mode, default) | off | mqa | all. */
+  const bitPerfect = ref<BitPerfectMode>("auto");
   const loaded = ref(false);
 
   /** On boot: server URL + persisted playback prefs from the Rust core. */
@@ -33,7 +36,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (prefs) {
       dsdStory.value = prefs.dsd_story;
       globalFormat.value = prefs.global_format;
-      bitPerfect.value = prefs.bit_perfect ?? "off";
+      bitPerfect.value = prefs.bit_perfect ?? "auto";
+      qualityMode.value = prefs.quality_mode ?? "best";
     }
     loaded.value = true;
   }
@@ -51,6 +55,11 @@ export const useSettingsStore = defineStore("settings", () => {
     await setFormat(fmt);
   }
 
+  async function saveQualityMode(mode: QualityMode): Promise<void> {
+    qualityMode.value = mode;
+    await setQualityMode(mode);
+  }
+
   async function saveDsdStory(story: DsdStory): Promise<void> {
     dsdStory.value = story;
     await setDsdStory(story);
@@ -65,12 +74,14 @@ export const useSettingsStore = defineStore("settings", () => {
     serverUrl,
     globalFormat,
     dsdStory,
+    qualityMode,
     bitPerfect,
     loaded,
     init,
     saveServerUrl,
     saveGlobalFormat,
     saveDsdStory,
+    saveQualityMode,
     saveBitPerfect,
   };
 });

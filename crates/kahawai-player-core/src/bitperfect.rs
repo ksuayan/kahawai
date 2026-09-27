@@ -17,8 +17,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BitPerfect {
-    /// Always shared-mode output with the DSP chain (default).
+    /// Follow the quality mode (default): exclusive on an external DAC in
+    /// Best quality when nothing of the user's would be bypassed, shared
+    /// output otherwise. The engine resolves this before asking
+    /// [`applies_to`](Self::applies_to).
     #[default]
+    Auto,
+    /// Always shared-mode output with the DSP chain.
     Off,
     /// Only for MQA-encoded files (so an MQA DAC can decode them).
     Mqa,
@@ -30,7 +35,8 @@ impl BitPerfect {
     /// Does this preference select bit-perfect output for a track?
     pub fn applies_to(self, is_mqa: bool) -> bool {
         match self {
-            BitPerfect::Off => false,
+            // Unresolved Auto is the safe choice: shared output.
+            BitPerfect::Auto | BitPerfect::Off => false,
             BitPerfect::Mqa => is_mqa,
             BitPerfect::All => true,
         }
@@ -74,7 +80,7 @@ mod tests {
         assert!(!BitPerfect::Mqa.applies_to(false));
         assert!(BitPerfect::All.applies_to(true));
         assert!(BitPerfect::All.applies_to(false));
-        assert_eq!(BitPerfect::default(), BitPerfect::Off);
+        assert_eq!(BitPerfect::default(), BitPerfect::Auto);
     }
 
     #[test]

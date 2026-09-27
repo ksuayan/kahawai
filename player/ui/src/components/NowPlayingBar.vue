@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ListOrdered, TriangleAlert } from "lucide-vue-next";
+import { Info, ListOrdered, TriangleAlert } from "lucide-vue-next";
 import { computed } from "vue";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
@@ -46,6 +46,16 @@ function goNowPlaying(): void {
     >
       <TriangleAlert class="size-3.5 shrink-0" />
       <span class="truncate">{{ player.error }}</span>
+    </div>
+    <div
+      v-else-if="player.notice"
+      class="flex items-center gap-1.5 bg-accent/10 px-4 py-1.5 text-xs text-dim"
+      role="status"
+      data-testid="playback-notice"
+      :title="player.notice"
+    >
+      <Info class="size-3.5 shrink-0" />
+      <span class="truncate">{{ player.notice }}</span>
     </div>
     <div class="grid min-h-[68px] grid-cols-[1fr_1.4fr_1fr] items-center gap-4 px-4 py-2">
       <!-- left: identity (click → full now-playing view) -->

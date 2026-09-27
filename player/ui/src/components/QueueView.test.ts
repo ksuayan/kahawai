@@ -185,7 +185,7 @@ describe("QueueView", () => {
       await rows(w)[0].get('button[aria-label="Remove from queue"]').trigger("click");
       await settle();
       expect(useQueueStore().tracks).toEqual([]);
-      expect(tauri.callsTo("stop")).toHaveLength(1);
+      expect(tauri.callsTo("queue_play").at(-1)).toMatchObject({ tracks: [] });
     });
 
     it("keeps the playing track current when an earlier row is removed", async () => {
@@ -201,7 +201,7 @@ describe("QueueView", () => {
       await btn(w, "Clear").trigger("click");
       await settle();
       expect(useQueueStore().tracks).toEqual([]);
-      expect(tauri.callsTo("stop")).toHaveLength(1);
+      expect(tauri.callsTo("queue_play").at(-1)).toMatchObject({ tracks: [] });
       expect(w.text()).toContain("Queue is empty");
     });
   });

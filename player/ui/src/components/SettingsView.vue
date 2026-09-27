@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { Plus, RefreshCw, X } from "lucide-vue-next";
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { checkHealth } from "../api";
-import { artworkCacheStats, clearArtworkCache, inTauri, type ArtworkCacheStats } from "../tauri";
+import {
+  artworkCacheStats,
+  clearArtworkCache,
+  dopStatus,
+  inTauri,
+  setDsdDeviceConfirmed,
+  type ArtworkCacheStats,
+} from "../tauri";
 import { useDspStore } from "../stores/dsp";
+import { usePlayerStore } from "../stores/player";
 import { useJobsStore } from "../stores/jobs";
 import { useLibraryStore } from "../stores/library";
 import { usePlaylistsStore } from "../stores/playlists";
@@ -16,6 +24,9 @@ import {
   type EqBandType,
   type StreamFormat,
 } from "../types";
+import DeviceCapabilities from "./DeviceCapabilities.vue";
+import SignalPathPanel from "./SignalPathPanel.vue";
+import SoundQualitySection from "./SoundQualitySection.vue";
 import StateMessage from "../ui/StateMessage.vue";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
@@ -48,6 +59,9 @@ watch(
 async function probe(): Promise<void> {
   online.value = await checkHealth();
 }
+
+// Check as soon as Settings opens, so the light is meaningful without a click.
+onMounted(() => void probe());
 
 async function save(): Promise<void> {
   const url = urlInput.value.trim();
@@ -90,15 +104,48 @@ const formatOptions: UiSelectOption[] = [
 ];
 
 const bitPerfectOptions: UiSelectOption[] = [
+  { value: "auto", label: "Auto (follows Sound quality)" },
   { value: "off", label: "Off (shared output; EQ and volume work)" },
   { value: "mqa", label: "MQA files only" },
   { value: "all", label: "All tracks" },
 ];
 
 const dsdOptions: UiSelectOption[] = [
+  { value: "auto", label: "Auto (follows Sound quality)" },
   { value: "convert", label: "Convert to PCM (FLAC transcode)" },
   { value: "native", label: "Native DoP (needs a DSD-capable DAC)" },
 ];
+
+/** Does the DSD setting effectively use native DoP for the current output? */
+const dsdGoesNative = computed(
+  () =>
+    settings.dsdStory === "native" ||
+    (settings.dsdStory === "auto" &&
+      settings.qualityMode === "best" &&
+      !!dsp.dop?.known_dsd_device &&
+      !!dsp.dop?.capabilities?.external_dac),
+);
+
+/** A global format that would otherwise look like it governs DSD tracks. */
+const formatIgnoredForDsd = computed(() => settings.globalFormat !== null && dsdGoesNative.value);
+
+const player = usePlayerStore();
+
+/** The Advanced section starts open only when something in it overrides the mode. */
+const overrides = computed(() => [
+  ...(settings.globalFormat !== null ? ["Stream format"] : []),
+  ...(settings.bitPerfect !== "auto" ? ["Bit-perfect"] : []),
+  ...(settings.dsdStory !== "auto" ? ["DSD handling"] : []),
+]);
+const advancedOpen = ref(overrides.value.length > 0);
+
+/** Exclusive output is playing: your EQ, loudness and volume are bypassed. */
+const bypassed = computed(() => player.isExclusive);
+
+async function onConfirmDsdDevice(on: boolean): Promise<void> {
+  await setDsdDeviceConfirmed(on);
+  dsp.dop = (await dopStatus()) ?? dsp.dop;
+}
 
 // --- Album-art cache ---------------------------------------------------------
 
@@ -197,7 +244,20 @@ const dopRates = computed(() =>
 
 <template>
   <ViewShell title="Settings" width="narrow">
+    <SignalPathPanel />
+
     <SettingsSection title="Server">
+      <template #aside>
+        <span
+          class="text-[13px] leading-none"
+          :class="online === true ? 'text-ok' : online === false ? 'text-danger' : 'text-faint'"
+          role="img"
+          :aria-label="online === true ? 'Connected' : online === false ? 'Offline' : 'Checking connection'"
+          :title="online === true ? 'Connected' : online === false ? 'Offline' : 'Checking connection…'"
+          :data-state="online === true ? 'connected' : online === false ? 'offline' : 'unknown'"
+          data-testid="server-light"
+        >●</span>
+      </template>
       <UiHint>The music server this client browses. Saved through the Rust core.</UiHint>
       <div class="flex gap-2">
         <UiInput
@@ -222,6 +282,140 @@ const dopRates = computed(() =>
       </p>
     </SettingsSection>
 
+    <SettingsSection title="Audio output">
+      <UiHint>
+        Choose the speaker or DAC to play through. Changing it while music is playing moves the track over and
+        continues from the same position. DSD played through exclusive DoP uses the same device.
+      </UiHint>
+      <div class="flex gap-2">
+        <UiSelect
+          aria-label="Output device"
+          trigger-class="flex-1"
+          :model-value="dsp.outputDevice"
+          :options="deviceOptions"
+          @update:model-value="(v) => dsp.chooseOutputDevice(v)"
+        />
+        <UiButton variant="icon" title="Rescan output devices" aria-label="Rescan output devices" @click="dsp.refreshDevices()"><RefreshCw /></UiButton>
+      </div>
+      <DeviceCapabilities
+        v-if="dsp.dop?.capabilities"
+        :caps="dsp.dop.capabilities"
+        :known-dsd="dsp.dop.known_dsd_device"
+      />
+      <div v-if="dsp.dop?.exclusive_available && dsp.dop.device" class="mb-2 flex items-center gap-2">
+        <UiSwitch
+          :model-value="dsp.dop.user_confirmed ?? false"
+          :disabled="!!dsp.dop.known_dsd_device && !dsp.dop.user_confirmed"
+          label="This output decodes DoP"
+          data-testid="dsd-device-confirm"
+          @update:model-value="(v) => onConfirmDsdDevice(v)"
+        />
+      </div>
+      <UiHint v-if="dsp.outputDeviceMissing" tone="warn" data-testid="device-missing">
+        “{{ dsp.outputDevice }}” is not connected, so the system default is being used. It is selected again
+        automatically when it reappears (press the rescan button).
+      </UiHint>
+      <UiHint v-if="!dsp.devices.length">No output devices reported.</UiHint>
+      <UiHint>
+        PCM plays in shared mode. On macOS, DSD tracks can use exclusive hog-mode DoP output instead — bit-perfect,
+        bypassing the EQ, loudness, and volume below.
+      </UiHint>
+      <UiHint>
+        <template v-if="dsp.dop?.exclusive_available">
+          Exclusive DoP is available on this Mac.
+          <template v-if="dopRates">Device accepts DoP at {{ dopRates }}.</template>
+          <template v-else>
+            The current output device reports no DoP-capable rate — DSD falls back to the FLAC transcode and the
+            reason is logged.
+          </template>
+        </template>
+        <template v-else>Exclusive DoP output is macOS-only.</template>
+      </UiHint>
+    </SettingsSection>
+
+    <SoundQualitySection />
+
+    <SettingsSection title="Parametric EQ">
+      <p v-if="bypassed" class="m-0 mb-2 text-sm text-dim" role="status" data-testid="eq-bypassed">
+        Bypassed while exclusive output is playing. Switch Sound quality to Compatible to use it.
+      </p>
+      <div :class="bypassed ? 'pointer-events-none opacity-40 grayscale' : ''" :inert="bypassed || undefined">
+      <UiHint>
+        Up to 8 bands, applied to PCM only (DoP bypasses EQ). Changes apply live and are saved through the Rust core.
+      </UiHint>
+      <UiSwitch :model-value="dsp.eqEnabled" label="EQ enabled" @update:model-value="(v) => dsp.saveEqEnabled(v)" />
+      <StateMessage v-if="dsp.rowError" kind="error" class="mt-2">{{ dsp.rowError }}</StateMessage>
+      <div class="my-2.5 flex flex-col gap-1.5">
+        <div
+          v-for="(b, i) in dsp.rows"
+          :key="i"
+          class="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-2"
+          :class="!b.enabled && 'opacity-50'"
+          data-testid="eq-band"
+        >
+          <UiSwitch :model-value="b.enabled" aria-label="Enable this band" @update:model-value="dsp.toggleRow(i)" />
+          <UiSelect
+            aria-label="Band type"
+            trigger-class="min-w-[130px]"
+            :model-value="b.band_type"
+            :options="bandTypeOptions"
+            @update:model-value="(v) => dsp.updateRow(i, { band_type: v as EqBandType })"
+          />
+          <label class="flex items-center gap-1 text-dim" title="Frequency (Hz)">
+            Hz
+            <UiInput class="w-[76px]" type="number" :model-value="String(b.freq)" min="10" max="24000" step="1" @change="onBandNum(i, 'freq', $event)" />
+          </label>
+          <label class="flex items-center gap-1 text-dim" title="Gain (dB)">
+            dB
+            <UiInput class="w-[64px]" type="number" :model-value="String(b.gain_db)" min="-24" max="24" step="0.5" @change="onBandNum(i, 'gain_db', $event)" />
+          </label>
+          <label class="flex items-center gap-1 text-dim" title="Q (shelf slope for shelves)">
+            Q
+            <UiInput class="w-[60px]" type="number" :model-value="String(b.q)" min="0.1" max="18" step="0.1" @change="onBandNum(i, 'q', $event)" />
+          </label>
+          <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="dsp.removeBand(i)"><X /></UiButton>
+        </div>
+      </div>
+      <UiButton variant="icon" :disabled="!dsp.canAddBand" @click="dsp.addBand()"><Plus /> Add band</UiButton>
+      </div>
+    </SettingsSection>
+
+    <SettingsSection title="Loudness normalization">
+      <p v-if="bypassed" class="m-0 mb-2 text-sm text-dim" role="status" data-testid="loudness-bypassed">
+        Bypassed while exclusive output is playing. Switch Sound quality to Compatible to use it.
+      </p>
+      <div :class="bypassed ? 'pointer-events-none opacity-40 grayscale' : ''" :inert="bypassed || undefined">
+      <UiHint>
+        EBU R128-style loudness matching for PCM only (DoP bypasses it). The first play of each track does a fast
+        pre-scan — one extra stream, roughly double the bandwidth — then the measured gain is cached.
+      </UiHint>
+      <UiSwitch
+        :model-value="dsp.loudnessEnabled"
+        label="Loudness normalization enabled"
+        @update:model-value="(v) => dsp.saveLoudnessEnabled(v)"
+      />
+      <div class="mt-2.5 flex">
+        <label class="flex items-center gap-2 text-dim">
+          Target
+          <UiInput v-model="loudnessInput" class="w-[76px]" type="number" min="-40" max="-1" step="0.5" @change="onLoudnessTarget" />
+          LUFS
+        </label>
+      </div>
+      <StateMessage v-if="loudnessError" kind="error" class="mt-2">{{ loudnessError }}</StateMessage>
+      </div>
+    </SettingsSection>
+
+    <details class="mb-7 rounded-lg border border-line" data-testid="advanced" :open="advancedOpen" @toggle="advancedOpen = ($event.target as HTMLDetailsElement).open">
+      <summary class="heading-3 cursor-pointer select-none px-3 py-2">
+        Advanced
+        <UiBadge v-if="overrides.length" variant="accent" class="ml-1" data-testid="advanced-overrides">
+          {{ overrides.length }} override{{ overrides.length === 1 ? "" : "s" }}
+        </UiBadge>
+      </summary>
+      <div class="px-3 pt-1">
+        <UiHint>
+          Fine controls. Each defaults to Auto, which follows Sound quality above; choose a value here only to override it.
+        </UiHint>
     <SettingsSection title="Stream format">
       <UiHint>
         How music is sent to this player. <strong class="font-semibold text-fg">Auto</strong> is best for most people: it plays
@@ -236,10 +430,33 @@ const dopRates = computed(() =>
       />
     </SettingsSection>
 
+    <SettingsSection title="Bit-perfect output">
+      <template v-if="dsp.dop?.exclusive_available">
+        <UiHint>
+          Sends a file's samples to your DAC <strong class="font-semibold text-fg">untouched</strong>, at the file's own
+          sample rate, with exclusive control of the device. EQ, loudness, volume and format conversion are bypassed.
+          This is what a DAC that decodes <strong class="font-semibold text-fg">MQA</strong> needs to see the MQA signal.
+        </UiHint>
+        <UiSelect
+          aria-label="Bit-perfect output"
+          :model-value="settings.bitPerfect"
+          :options="bitPerfectOptions"
+          @update:model-value="(v) => settings.saveBitPerfect((v ?? 'off') as BitPerfectMode)"
+        />
+        <UiHint v-if="settings.bitPerfect === 'mqa' || settings.bitPerfect === 'all'" spaced data-testid="bit-perfect-notes">
+          Use your DAC's own volume control. Other apps can't play through the device while a track is playing, and
+          tracks play one at a time, with a brief gap between them. If the device can't take a file's sample rate, that
+          track plays normally instead.
+        </UiHint>
+      </template>
+      <UiHint v-else>Bit-perfect output is macOS-only.</UiHint>
+    </SettingsSection>
+
     <SettingsSection title="DSD handling">
       <UiHint>
-        What to do with DSD tracks (DSF/DFF) when no explicit format override applies. Saved through the Rust core
-        and restored on launch.
+        What to do with DSD tracks (DSF/DFF). <strong class="font-semibold text-fg">Auto</strong> plays them natively
+        (DoP) on DACs known to decode it and converts to FLAC everywhere else, so an unfamiliar device never gets a
+        DoP stream it might play as noise. Saved through the Rust core and restored on launch.
       </UiHint>
       <UiSelect
         aria-label="DSD handling"
@@ -247,12 +464,31 @@ const dopRates = computed(() =>
         :options="dsdOptions"
         @update:model-value="(v) => settings.saveDsdStory(v as DsdStory)"
       />
+      <UiHint v-if="settings.dsdStory === 'auto' && dsp.dop?.device" data-testid="dsd-auto-note">
+        Output: “{{ dsp.dop.device.trim() }}” —
+        <template v-if="settings.qualityMode === 'compatible'">Compatible mode converts DSD to FLAC.</template>
+        <template v-else-if="dsp.dop.known_dsd_device">
+          {{ dsp.dop.user_confirmed ? "confirmed by you" : "a known DSD DAC" }}, so DSD plays natively (unless your
+          EQ, loudness or volume is on).
+        </template>
+        <template v-else>
+          not a known DSD DAC, so DSD is converted to FLAC. If it decodes DoP, confirm it under Audio output.
+        </template>
+      </UiHint>
+      <UiHint v-if="formatIgnoredForDsd" tone="warn" data-testid="dsd-format-ignored">
+        The Stream format above is set, but it does not apply to DSD tracks while DSD plays natively. It still applies to
+        every other track.
+      </UiHint>
       <UiHint spaced>
         Native requests DoP from the server; on macOS it plays through the exclusive hog-mode path (bit-perfect,
         bypasses EQ/loudness/volume). Without a DoP-capable device the core falls back to the FLAC transcode and logs
         why.
       </UiHint>
     </SettingsSection>
+      </div>
+    </details>
+
+    <AnalogSection />
 
     <SettingsSection title="Library">
       <UiHint>
@@ -292,127 +528,6 @@ const dopRates = computed(() =>
       <UiButton variant="icon" :disabled="artClearing || !artStats?.files" @click="onClearArt">
         {{ artClearing ? "Clearing…" : "Clear cache" }}
       </UiButton>
-    </SettingsSection>
-
-    <SettingsSection title="Audio output">
-      <UiHint>
-        Choose the speaker or DAC to play through. Changing it while music is playing moves the track over and
-        continues from the same position. DSD played through exclusive DoP uses the same device.
-      </UiHint>
-      <div class="flex gap-2">
-        <UiSelect
-          aria-label="Output device"
-          trigger-class="flex-1"
-          :model-value="dsp.outputDevice"
-          :options="deviceOptions"
-          @update:model-value="(v) => dsp.chooseOutputDevice(v)"
-        />
-        <UiButton variant="icon" title="Rescan output devices" aria-label="Rescan output devices" @click="dsp.refreshDevices()"><RefreshCw /></UiButton>
-      </div>
-      <UiHint v-if="dsp.outputDeviceMissing" tone="warn" data-testid="device-missing">
-        “{{ dsp.outputDevice }}” is not connected, so the system default is being used. It is selected again
-        automatically when it reappears (press the rescan button).
-      </UiHint>
-      <UiHint v-if="!dsp.devices.length">No output devices reported.</UiHint>
-      <UiHint>
-        PCM plays in shared mode. On macOS, DSD tracks can use exclusive hog-mode DoP output instead — bit-perfect,
-        bypassing the EQ, loudness, and volume below.
-      </UiHint>
-      <UiHint>
-        <template v-if="dsp.dop?.exclusive_available">
-          Exclusive DoP is available on this Mac.
-          <template v-if="dopRates">Device accepts DoP at {{ dopRates }}.</template>
-          <template v-else>
-            The current output device reports no DoP-capable rate — DSD falls back to the FLAC transcode and the
-            reason is logged.
-          </template>
-        </template>
-        <template v-else>Exclusive DoP output is macOS-only.</template>
-      </UiHint>
-    </SettingsSection>
-
-    <SettingsSection title="Bit-perfect output">
-      <template v-if="dsp.dop?.exclusive_available">
-        <UiHint>
-          Sends a file's samples to your DAC <strong class="font-semibold text-fg">untouched</strong>, at the file's own
-          sample rate, with exclusive control of the device. EQ, loudness, volume and format conversion are bypassed.
-          This is what a DAC that decodes <strong class="font-semibold text-fg">MQA</strong> needs to see the MQA signal.
-        </UiHint>
-        <UiSelect
-          aria-label="Bit-perfect output"
-          :model-value="settings.bitPerfect"
-          :options="bitPerfectOptions"
-          @update:model-value="(v) => settings.saveBitPerfect((v ?? 'off') as BitPerfectMode)"
-        />
-        <UiHint v-if="settings.bitPerfect !== 'off'" spaced data-testid="bit-perfect-notes">
-          Use your DAC's own volume control. Other apps can't play through the device while a track is playing, and
-          tracks play one at a time, with a brief gap between them. If the device can't take a file's sample rate, that
-          track plays normally instead.
-        </UiHint>
-      </template>
-      <UiHint v-else>Bit-perfect output is macOS-only.</UiHint>
-    </SettingsSection>
-
-    <SettingsSection title="Parametric EQ">
-      <UiHint>
-        Up to 8 bands, applied to PCM only (DoP bypasses EQ). Changes apply live and are saved through the Rust core.
-      </UiHint>
-      <UiSwitch :model-value="dsp.eqEnabled" label="EQ enabled" @update:model-value="(v) => dsp.saveEqEnabled(v)" />
-      <StateMessage v-if="dsp.rowError" kind="error" class="mt-2">{{ dsp.rowError }}</StateMessage>
-      <div class="my-2.5 flex flex-col gap-1.5">
-        <div
-          v-for="(b, i) in dsp.rows"
-          :key="i"
-          class="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-2"
-          :class="!b.enabled && 'opacity-50'"
-          data-testid="eq-band"
-        >
-          <UiSwitch :model-value="b.enabled" aria-label="Enable this band" @update:model-value="dsp.toggleRow(i)" />
-          <UiSelect
-            aria-label="Band type"
-            trigger-class="min-w-[130px]"
-            :model-value="b.band_type"
-            :options="bandTypeOptions"
-            @update:model-value="(v) => dsp.updateRow(i, { band_type: v as EqBandType })"
-          />
-          <label class="flex items-center gap-1 text-dim" title="Frequency (Hz)">
-            Hz
-            <UiInput class="w-[76px]" type="number" :model-value="String(b.freq)" min="10" max="24000" step="1" @change="onBandNum(i, 'freq', $event)" />
-          </label>
-          <label class="flex items-center gap-1 text-dim" title="Gain (dB)">
-            dB
-            <UiInput class="w-[64px]" type="number" :model-value="String(b.gain_db)" min="-24" max="24" step="0.5" @change="onBandNum(i, 'gain_db', $event)" />
-          </label>
-          <label class="flex items-center gap-1 text-dim" title="Q (shelf slope for shelves)">
-            Q
-            <UiInput class="w-[60px]" type="number" :model-value="String(b.q)" min="0.1" max="18" step="0.1" @change="onBandNum(i, 'q', $event)" />
-          </label>
-          <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="dsp.removeBand(i)"><X /></UiButton>
-        </div>
-      </div>
-      <UiButton variant="icon" :disabled="!dsp.canAddBand" @click="dsp.addBand()"><Plus /> Add band</UiButton>
-    </SettingsSection>
-
-    <AnalogSection />
-
-    <SettingsSection title="Loudness normalization">
-      <UiHint>
-        EBU R128-style loudness matching for PCM only (DoP bypasses it). The first play of each track does a fast
-        pre-scan — one extra stream, roughly double the bandwidth — then the measured gain is cached.
-      </UiHint>
-      <UiSwitch
-        :model-value="dsp.loudnessEnabled"
-        label="Loudness normalization enabled"
-        @update:model-value="(v) => dsp.saveLoudnessEnabled(v)"
-      />
-      <div class="mt-2.5 flex">
-        <label class="flex items-center gap-2 text-dim">
-          Target
-          <UiInput v-model="loudnessInput" class="w-[76px]" type="number" min="-40" max="-1" step="0.5" @change="onLoudnessTarget" />
-          LUFS
-        </label>
-      </div>
-      <StateMessage v-if="loudnessError" kind="error" class="mt-2">{{ loudnessError }}</StateMessage>
     </SettingsSection>
 
     <SettingsSection title="Keyboard shortcuts">

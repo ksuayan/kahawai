@@ -11,8 +11,10 @@ pub mod artwork;
 pub mod bitperfect;
 pub mod decode;
 pub mod dop;
+pub mod dsd_devices;
 pub mod dsp;
 pub mod engine;
+pub mod quality;
 pub mod queue;
 pub mod resample;
 pub mod sink;
@@ -25,9 +27,10 @@ pub use analog::{
 pub use artwork::{fetch_from_server as fetch_artwork, ArtworkCache, CachedArt};
 pub use bitperfect::{f32_to_i24_le, BitPerfect};
 pub use decode::{DecodedSpec, StreamDecoder};
+pub use dsd_devices::is_known_dsd_device;
 pub use dop::{dop_pcm_rate, parse_wav_header, DopSpec, DopStream, DOP_BITS_PER_SAMPLE};
 pub use dsp::{
-    integrated_lufs, DspStage, LoudnessMeter, scan_track_lufs, usable_freq, validate_bands, EqBand, EqBandType, GainRamp, LoudnessNorm,
+    headroom_guard, integrated_lufs, DspStage, LoudnessMeter, scan_track_levels, scan_track_lufs, max_boost_db, plan_gain_db, usable_freq, validate_bands, EqBand, EqBandType, GainRamp, LoudnessNorm,
     ParametricEq, DEFAULT_LOUDNESS_TARGET, MAX_EQ_BANDS, MAX_LOUDNESS_GAIN_DB,
     MIN_LOUDNESS_GAIN_DB, NYQUIST_FRACTION,
 };
@@ -36,6 +39,7 @@ pub use engine::{
     resolve_format, valid_formats, DsdStory, DspSettings, EngineCommand, EngineController, Player,
     PlayerEvent, PlayerSnapshot, PlayerStatus, DEFAULT_SERVER_URL,
 };
+pub use quality::QualityMode;
 pub use queue::{Queue, RepeatMode};
 pub use resample::CubicResampler;
 pub use sink::{AudioSink, NullSink, OutputPath, PcmChunk, SinkRouter, SinkState, VecSink};

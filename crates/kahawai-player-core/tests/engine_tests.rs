@@ -133,6 +133,9 @@ impl AudioSink for SharedSink {
     fn exclusive_pcm_rate(&self, rate_hz: u32) -> Option<u32> {
         self.0.lock().unwrap().exclusive_pcm_rate(rate_hz)
     }
+    fn output_is_external_dac(&self) -> bool {
+        self.0.lock().unwrap().external
+    }
     fn open_exclusive_pcm(&mut self, rate_hz: u32, channels: u16) -> Result<(), MusicError> {
         self.0.lock().unwrap().open_exclusive_pcm(rate_hz, channels)
     }
@@ -593,20 +596,37 @@ fn resolve_format_dsd_story_matrix() {
         resolve_format(&mp3, None, None, DsdStory::Native),
         StreamFormat::Passthrough
     );
-    // Explicit choices still win over the story.
+    // Under Native, DSD tracks ignore a *global* format — a stray
+    // "Passthrough" must not silently defeat the DSD setting...
     assert_eq!(
-        resolve_format(&dsf, Some(StreamFormat::Flac), None, DsdStory::Native),
-        StreamFormat::Flac,
-        "global override wins over the DSD story"
+        resolve_format(&dsf, Some(StreamFormat::Passthrough), None, DsdStory::Native),
+        StreamFormat::Dop,
+        "global format does not apply to DSD under Native"
     );
+    // ...while non-DSD tracks still honor it.
+    assert_eq!(
+        resolve_format(&mp3, Some(StreamFormat::Flac), None, DsdStory::Native),
+        StreamFormat::Flac
+    );
+    // A per-track choice always wins.
     assert_eq!(
         resolve_format(&dsf, None, Some(StreamFormat::Flac), DsdStory::Native),
         StreamFormat::Flac,
         "per-track override wins over the DSD story"
     );
-    // Convert (default) preserves pre-C3 behavior.
+    // Convert honors the global format for DSD too.
+    assert_eq!(
+        resolve_format(&dsf, Some(StreamFormat::Opus), None, DsdStory::Convert),
+        StreamFormat::Opus
+    );
     assert_eq!(
         resolve_format(&dsf, None, None, DsdStory::Convert),
+        StreamFormat::Flac
+    );
+    // Auto is resolved by the engine from the device; unresolved it is the
+    // safe conversion.
+    assert_eq!(
+        resolve_format(&dsf, None, None, DsdStory::Auto),
         StreamFormat::Flac
     );
 }
@@ -635,23 +655,95 @@ fn valid_formats_per_source() {
 }
 
 #[test]
-fn dop_is_refused_without_a_dsd_capable_sink() {
+fn auto_goes_native_on_a_known_dsd_dac_and_converts_elsewhere() {
+    // Default story is Auto: no explicit setting anywhere.
+    let mut known = DopHarness::new(Some(DOP_RATE));
+    known.sink.0.lock().unwrap().device = Some("FIIO K15 ".into());
+    known.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    let snap = known.player.snapshot();
+    assert_eq!(snap.format, Some(StreamFormat::Dop), "known DAC: native DoP");
+    assert_eq!(snap.output_path, OutputPath::Dop);
+
+    let mut unknown = DopHarness::new(Some(DOP_RATE));
+    unknown.sink.0.lock().unwrap().device = Some("MacBook Pro Speakers".into());
+    unknown.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(unknown.player.snapshot().format, Some(StreamFormat::Flac));
+    assert!(unknown.player.snapshot().notice.is_none(), "a choice, not a failure");
+
+    let mut none = DopHarness::new(Some(DOP_RATE));
+    none.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(none.player.snapshot().format, Some(StreamFormat::Flac), "unknown device is safe");
+}
+
+#[test]
+fn auto_honors_a_device_the_user_confirmed() {
+    let mut h = DopHarness::new(Some(DOP_RATE));
+    h.sink.0.lock().unwrap().device = Some("Topping D90".into());
+    h.player.set_dsd_devices(vec!["topping d90".into()]);
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(h.player.snapshot().format, Some(StreamFormat::Dop));
+}
+
+#[test]
+fn a_stray_global_format_does_not_defeat_native_dsd() {
+    let mut h = DopHarness::new(Some(DOP_RATE));
+    h.player.set_dsd_story(kahawai_player_core::DsdStory::Native);
+    h.player.set_global_format(Some(StreamFormat::Passthrough));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(h.player.snapshot().format, Some(StreamFormat::Dop));
+}
+
+#[test]
+fn dop_without_a_dsd_capable_sink_falls_back_to_flac_with_a_notice() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 22050)]);
     h.player.set_track_format(1, Some(StreamFormat::Dop));
     h.player
         .play_queue(vec![track(1, AudioFormat::Dsf, 500)], 0);
-    assert_eq!(h.player.status(), PlayerStatus::Stopped);
+    assert_eq!(h.player.status(), PlayerStatus::Playing, "plays as PCM");
     let snap = h.player.snapshot();
+    assert!(snap.error.is_none(), "not an error: {:?}", snap.error);
+    assert_eq!(snap.format, Some(StreamFormat::Flac));
     assert!(
-        snap.error.as_deref().unwrap_or("").contains("DoP"),
-        "error: {:?}",
-        snap.error
+        snap.notice.as_deref().unwrap_or("").contains("DoP"),
+        "notice: {:?}",
+        snap.notice
     );
+}
+
+#[test]
+fn dop_open_failure_falls_back_to_flac_and_releases_the_sink() {
+    let mut h = DopHarness::new(Some(DOP_RATE));
+    h.sink.0.lock().unwrap().fail_open = true;
+    h.player.set_global_format(Some(StreamFormat::Dop));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+    let snap = h.player.snapshot();
+    assert_eq!(snap.output_path, OutputPath::Pcm, "back on the shared path");
+    assert_eq!(snap.format, Some(StreamFormat::Flac));
+    assert!(snap.error.is_none());
     assert!(
-        h.stub.opened.lock().unwrap().is_empty(),
-        "no request was made"
+        snap.notice.as_deref().unwrap_or("").contains("hog mode refused"),
+        "notice carries the device's reason: {:?}",
+        snap.notice
     );
+    h.pump_until_done(60);
+    assert!(h.dop_bytes().is_empty(), "no DoP bytes reached the device");
+    assert!(h.pcm_writes() > 0);
+}
+
+#[test]
+fn the_fallback_notice_clears_on_the_next_track() {
+    let mut h = DopHarness::new(Some(DOP_RATE));
+    h.sink.0.lock().unwrap().fail_open = true;
+    h.player.set_global_format(Some(StreamFormat::Dop));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert!(h.player.snapshot().notice.is_some());
+    h.sink.0.lock().unwrap().fail_open = false;
+    h.player.play_queue(vec![dsd_track(2, DSD64, 1000)], 0);
+    let snap = h.player.snapshot();
+    assert_eq!(snap.output_path, OutputPath::Dop);
+    assert!(snap.notice.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -940,6 +1032,15 @@ struct DopSink {
     /// What `dop_output_rate` reports; `None` = device refuses the rate.
     dop_rate: Option<u32>,
     path: OutputPath,
+    /// `open` fails, like a device whose hog mode is held or that refuses
+    /// the stream format.
+    fail_open: bool,
+    /// What the sink says it would open (for `Auto` DSD handling).
+    device: Option<String>,
+    /// Reports an external DAC (Best quality goes exclusive / native).
+    external: bool,
+    /// `write_dop` fails, like a DAC that was unplugged mid-track.
+    fail_write: bool,
 }
 
 #[derive(Clone)]
@@ -947,6 +1048,9 @@ struct SharedDopSink(Arc<Mutex<DopSink>>);
 
 impl AudioSink for SharedDopSink {
     fn open(&mut self, _track: &Track) -> Result<(), MusicError> {
+        if self.0.lock().unwrap().fail_open && self.0.lock().unwrap().path == OutputPath::Dop {
+            return Err(MusicError::Audio("hog mode refused".into()));
+        }
         Ok(())
     }
     fn write(&mut self, chunk: PcmChunk) -> Result<(), MusicError> {
@@ -973,6 +1077,12 @@ impl AudioSink for SharedDopSink {
     fn supports_dop(&self) -> bool {
         true
     }
+    fn output_device_name(&self) -> Option<String> {
+        self.0.lock().unwrap().device.clone()
+    }
+    fn output_is_external_dac(&self) -> bool {
+        self.0.lock().unwrap().external
+    }
     fn dop_output_rate(&self, _dsd_rate_hz: u32) -> Option<u32> {
         self.0.lock().unwrap().dop_rate
     }
@@ -980,7 +1090,11 @@ impl AudioSink for SharedDopSink {
         self.0.lock().unwrap().path = path;
     }
     fn write_dop(&mut self, frames: &[u8]) -> Result<(), MusicError> {
-        self.0.lock().unwrap().dop.extend_from_slice(frames);
+        let mut s = self.0.lock().unwrap();
+        if s.fail_write {
+            return Err(MusicError::Audio("device gone".into()));
+        }
+        s.dop.extend_from_slice(frames);
         Ok(())
     }
 }
@@ -1041,6 +1155,10 @@ impl DopHarness {
             dop: Vec::new(),
             dop_rate,
             path: OutputPath::Pcm,
+            fail_open: false,
+            device: None,
+            external: true,
+            fail_write: false,
         })));
         struct Wrap(Arc<DopTransport>);
         impl Transport for Wrap {
@@ -1132,6 +1250,7 @@ fn eq_is_tuned_to_the_device_rate_when_the_stream_is_resampled() {
     // and miss the tone.
     let run = |eq: bool| {
         let mut h = Harness::new(None);
+        h.player.set_volume(0.2); // after the EQ: keeps the boosted tone under the headroom guard
         h.sink.0.lock().unwrap().demand_rate = Some(48_000);
         h.stub.add(1, &[(440.0, 44100)]);
         if eq {
@@ -1304,7 +1423,10 @@ fn dop_unsupported_rate_falls_back_to_flac() {
 
 #[test]
 fn eq_peaking_band_applies_on_pcm_path() {
+    // Volume comes after the EQ, so at 0.2 the x4 boosted tone stays below the
+    // headroom guard and the comparison is of the EQ alone.
     let mut h = Harness::new(None);
+    h.player.set_volume(0.2);
     h.stub.add(1, &[(440.0, 44100)]);
     h.player
         .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
@@ -1312,6 +1434,7 @@ fn eq_peaking_band_applies_on_pcm_path() {
     let base = rms(&h.samples());
 
     let mut h2 = Harness::new(None);
+    h2.player.set_volume(0.2);
     h2.stub.add(1, &[(440.0, 44100)]);
     h2.player
         .set_eq_bands(vec![EqBand {
@@ -1630,7 +1753,7 @@ fn append_and_insert_next_do_not_disturb_playback() {
 fn dsd_story_pref_round_trips_through_settings_file() {
     let (ctl, dir) = stub_controller("dsd", vec![]);
     let (story, fmt) = ctl.playback_prefs();
-    assert_eq!(story, DsdStory::Convert, "default preserves old behavior");
+    assert_eq!(story, DsdStory::Auto, "default: native on known DACs, convert elsewhere");
     assert_eq!(fmt, None);
     ctl.set_dsd_story(DsdStory::Native);
     std::thread::sleep(Duration::from_millis(100));
@@ -1640,6 +1763,21 @@ fn dsd_story_pref_round_trips_through_settings_file() {
     let (story2, fmt2) = ctl.playback_prefs();
     assert_eq!(story2, DsdStory::Native);
     assert_eq!(fmt2, Some(kahawai_core::api::StreamFormat::Opus));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn confirmed_dsd_devices_persist_and_toggle() {
+    let (ctl, dir) = stub_controller("dsd-dev", vec![]);
+    assert!(ctl.dsd_devices().is_empty());
+    ctl.set_dsd_device_confirmed("Topping D90", true);
+    ctl.set_dsd_device_confirmed("topping d90 ", true); // same device: no duplicate
+    assert_eq!(ctl.dsd_devices(), vec!["topping d90".to_string()]);
+    std::thread::sleep(Duration::from_millis(100));
+    let saved = std::fs::read_to_string(dir.join("settings.json")).expect("settings saved");
+    assert!(saved.contains("topping d90"), "{saved}");
+    ctl.set_dsd_device_confirmed("Topping D90", false);
+    assert!(ctl.dsd_devices().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1953,15 +2091,25 @@ fn a_paused_track_stays_paused_when_the_preference_changes() {
 }
 
 #[test]
-fn a_write_failure_on_the_exclusive_device_stops_playback_with_an_error() {
+fn a_write_failure_on_the_exclusive_device_continues_on_shared_output_with_a_notice() {
     let mut h = bp_harness(BitPerfect::All, &[RATE]);
     h.stub.add(1, &[(440.0, 44100)]);
     h.player
         .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
     h.sink.0.lock().unwrap().exclusive_open = None; // device vanished
     h.player.pump();
-    assert_eq!(h.player.status(), PlayerStatus::Stopped);
-    assert!(h.player.snapshot().error.is_some());
+    assert_eq!(h.player.status(), PlayerStatus::Playing, "carries on rather than stopping");
+    let snap = h.player.snapshot();
+    assert!(snap.error.is_none());
+    assert_eq!(snap.output_path, OutputPath::Pcm, "on shared output now");
+    assert!(
+        snap.notice.as_deref().unwrap_or("").contains("exclusive output stopped"),
+        "{:?}",
+        snap.notice
+    );
+    // It does not keep retrying exclusive for this track.
+    h.player.pump();
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
 }
 
 #[test]
@@ -1971,7 +2119,7 @@ fn the_preference_persists_across_controllers() {
     let path = dir.join("engine-settings.json");
     {
         let c = EngineController::new(Box::new(VecSink::new()), path.clone());
-        assert_eq!(c.bit_perfect(), BitPerfect::Off, "off by default");
+        assert_eq!(c.bit_perfect(), BitPerfect::Auto, "follows the quality mode by default");
         c.set_bit_perfect(BitPerfect::Mqa);
         assert_eq!(c.bit_perfect(), BitPerfect::Mqa);
     }
@@ -1983,4 +2131,234 @@ fn the_preference_persists_across_controllers() {
         BitPerfect::All
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---------------------------------------------------------------------------
+// Quality mode: Best quality / Compatible
+// ---------------------------------------------------------------------------
+
+fn best_harness(mode: kahawai_player_core::QualityMode, external: bool) -> Harness {
+    let mut h = bp_harness(BitPerfect::Auto, &[RATE]);
+    h.sink.0.lock().unwrap().external = external;
+    h.player.set_quality_mode(mode);
+    h
+}
+
+fn play_one(h: &mut Harness) {
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    h.pump_until_done(100);
+}
+
+#[test]
+fn best_quality_goes_exclusive_on_an_external_dac() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    play_one(&mut h);
+    assert!(h.sink.0.lock().unwrap().exclusive_open.is_some(), "rate-matched exclusive output");
+    assert!(h.player.snapshot().notice.is_none());
+}
+
+#[test]
+fn best_quality_stays_shared_on_built_in_output() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, false);
+    play_one(&mut h);
+    assert_eq!(h.sink.0.lock().unwrap().exclusive_open, None, "never hog the built-in output");
+    assert!(h.player.snapshot().notice.is_none(), "a choice, not something to explain");
+}
+
+#[test]
+fn compatible_mode_never_goes_exclusive() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Compatible, true);
+    play_one(&mut h);
+    assert_eq!(h.sink.0.lock().unwrap().exclusive_open, None);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
+}
+
+#[test]
+fn best_quality_yields_to_the_users_own_processing_and_says_so() {
+    for (name, setup) in [
+        ("EQ", Box::new(|h: &mut Harness| {
+            h.player.set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db: 3.0, q: 1.0 }]).unwrap();
+            h.player.set_eq_enabled(true);
+        }) as Box<dyn Fn(&mut Harness)>),
+        ("Loudness", Box::new(|h: &mut Harness| h.player.set_loudness_enabled(true))),
+        ("Analog", Box::new(|h: &mut Harness| {
+            h.player.set_analog(AnalogSettings { enabled: true, ..Default::default() });
+        })),
+        ("Volume", Box::new(|h: &mut Harness| h.player.set_volume(0.5))),
+    ] {
+        let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+        setup(&mut h);
+        h.stub.add(1, &[(440.0, 4410)]);
+        h.player.play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+        let snap = h.player.snapshot();
+        assert_eq!(snap.output_path, OutputPath::Pcm, "{name}: shared output");
+        assert!(snap.exclusive_blockers.iter().any(|b| b == name), "{name}: {:?}", snap.exclusive_blockers);
+        let notice = snap.notice.unwrap_or_default();
+        assert!(notice.contains(name) && notice.contains("Best quality is paused"), "{name}: {notice}");
+    }
+}
+
+#[test]
+fn best_quality_resumes_once_the_processing_is_switched_off() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.player.set_volume(0.5);
+    play_one(&mut h);
+    assert_eq!(h.sink.0.lock().unwrap().exclusive_open, None);
+    h.player.set_volume(1.0);
+    play_one(&mut h);
+    assert!(h.sink.0.lock().unwrap().exclusive_open.is_some());
+    assert!(h.player.snapshot().exclusive_blockers.is_empty());
+}
+
+#[test]
+fn an_explicit_bit_perfect_choice_overrides_the_quality_mode() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Compatible, true);
+    h.player.set_bit_perfect(BitPerfect::All);
+    play_one(&mut h);
+    assert!(h.sink.0.lock().unwrap().exclusive_open.is_some(), "Advanced override wins");
+}
+
+#[test]
+fn best_quality_plays_dsd_natively_only_on_a_known_dac_without_processing() {
+    let mut h = DopHarness::new(Some(DOP_RATE));
+    h.sink.0.lock().unwrap().device = Some("FIIO K15 ".into());
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(h.player.snapshot().format, Some(StreamFormat::Dop));
+
+    // The user's EQ is on: convert to PCM so it can apply, and say why.
+    let mut eq = DopHarness::new(Some(DOP_RATE));
+    eq.sink.0.lock().unwrap().device = Some("FIIO K15 ".into());
+    eq.player.set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db: 3.0, q: 1.0 }]).unwrap();
+    eq.player.set_eq_enabled(true);
+    eq.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    let snap = eq.player.snapshot();
+    assert_eq!(snap.format, Some(StreamFormat::Flac));
+    assert!(snap.notice.unwrap_or_default().contains("EQ"));
+
+    // Compatible: always converted.
+    let mut c = DopHarness::new(Some(DOP_RATE));
+    c.sink.0.lock().unwrap().device = Some("FIIO K15 ".into());
+    c.player.set_quality_mode(kahawai_player_core::QualityMode::Compatible);
+    c.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(c.player.snapshot().format, Some(StreamFormat::Flac));
+}
+
+#[test]
+fn settings_from_before_the_quality_mode_are_reset_to_auto_once() {
+    let dir = std::env::temp_dir().join(format!("kahawai-qm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("engine-settings.json");
+    // An old file: explicit choices made while troubleshooting.
+    std::fs::write(
+        &path,
+        r#"{"server_url":"http://x:1","dsp":{"eq_bands":[],"eq_enabled":true,"loudness_enabled":false,"loudness_target":-14.0},"dsd_story":"native","global_format":"passthrough","output_device":"FIIO K15 ","bit_perfect":"off"}"#,
+    )
+    .unwrap();
+    let c = EngineController::new(Box::new(VecSink::new()), path.clone());
+    assert_eq!(c.quality_mode(), kahawai_player_core::QualityMode::Best);
+    assert_eq!(c.bit_perfect(), BitPerfect::Auto);
+    let (story, fmt) = c.playback_prefs();
+    assert_eq!(story, DsdStory::Auto);
+    assert_eq!(fmt, None);
+    assert_eq!(c.output_device().as_deref(), Some("FIIO K15 "), "the device choice is kept");
+    // Once migrated, explicit choices stick.
+    c.set_bit_perfect(BitPerfect::All);
+    let c2 = EngineController::new(Box::new(VecSink::new()), path);
+    assert_eq!(c2.bit_perfect(), BitPerfect::All);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn best_quality_says_why_a_track_fell_back_to_shared_output() {
+    // The device is an external DAC but doesn't offer this file's rate.
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.sink.0.lock().unwrap().exclusive_rates = vec![48000];
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    let snap = h.player.snapshot();
+    assert_eq!(snap.output_path, OutputPath::Pcm);
+    let notice = snap.notice.unwrap_or_default();
+    assert!(notice.contains("44.1 kHz") && notice.contains("shared output"), "{notice}");
+}
+
+#[test]
+fn a_missing_chosen_device_is_named_in_a_notice() {
+    let mut h = DopHarness::new(Some(DOP_RATE));
+    h.sink.0.lock().unwrap().device = Some("MacBook Pro Speakers".into());
+    h.player.set_output_device(Some("FIIO K15 ".into()));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    let notice = h.player.snapshot().notice.unwrap_or_default();
+    assert!(
+        notice.contains("FIIO K15") && notice.contains("isn't connected") && notice.contains("MacBook Pro Speakers"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn no_notice_when_the_chosen_device_is_the_one_in_use() {
+    let mut h = DopHarness::new(Some(DOP_RATE));
+    h.sink.0.lock().unwrap().device = Some("fiio k15".into()); // case and padding differ
+    h.player.set_output_device(Some("FIIO K15 ".into()));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert!(h.player.snapshot().notice.is_none());
+}
+
+#[test]
+fn losing_the_dac_during_native_dsd_continues_on_shared_output() {
+    let mut h = DopHarness::new(Some(DOP_RATE));
+    h.sink.0.lock().unwrap().device = Some("FIIO K15 ".into());
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(h.player.snapshot().output_path, OutputPath::Dop);
+    h.sink.0.lock().unwrap().fail_write = true; // unplugged
+    h.player.pump();
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+    let snap = h.player.snapshot();
+    assert_eq!(snap.output_path, OutputPath::Pcm);
+    assert_eq!(snap.format, Some(StreamFormat::Flac));
+    assert!(snap.error.is_none());
+    assert!(
+        snap.notice.unwrap_or_default().contains("exclusive output stopped"),
+        "says what happened"
+    );
+    h.pump_until_done(100);
+    assert!(h.pcm_writes() > 0, "audio continues through the shared path");
+}
+
+#[test]
+fn nothing_the_shared_path_emits_exceeds_full_scale() {
+    // +12 dB on a 0.7-amplitude tone is about 2.8 full scale. The device would
+    // hard-clip that; the headroom guard is the last line of defence and keeps
+    // every sample within +-1.0.
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100)]);
+    h.player
+        .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 12.0, q: 1.0 }])
+        .unwrap();
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.pump_until_done(100);
+    let peak = h.samples().iter().fold(0.0f32, |a, x| a.max(x.abs()));
+    assert!(peak <= 1.0, "peak {peak}");
+    assert!(peak > 0.95, "still loud, just bounded: {peak}");
+}
+
+#[test]
+fn loudness_gain_is_reduced_so_the_eq_boosted_peak_cannot_clip() {
+    // A 0.7 FS tone that loudness normalization wants to lift a long way, plus
+    // a +6 dB EQ boost: the planned gain must leave the final peak below full
+    // scale, with no guard needed.
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 3)]);
+    h.player
+        .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 6.0, q: 1.0 }])
+        .unwrap();
+    h.player.set_loudness_target(-6.0); // asks for a big lift
+    h.player.set_loudness_enabled(true);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 3000)], 0);
+    h.pump_until_done(300);
+    let s = h.samples();
+    let steady = &s[s.len() / 2..];
+    let peak = steady.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+    assert!(peak < 0.95, "planned to stay under full scale before any guard: {peak}");
 }

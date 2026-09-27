@@ -102,6 +102,21 @@ pub trait AudioSink: Send {
     /// the system default rather than failing playback.
     fn set_output_device(&mut self, _name: Option<&str>) {}
 
+    /// Name of the device this sink would actually open (the chosen one, or
+    /// what the system default resolves to), for matching against known
+    /// DSD-capable DACs. `None` when unknown.
+    fn output_device_name(&self) -> Option<String> {
+        None
+    }
+
+    /// Is the output an external DAC (USB / Thunderbolt / FireWire) rather
+    /// than built-in speakers, Bluetooth, AirPlay or a virtual device? Best
+    /// quality only takes exclusive control of a device like that: hogging
+    /// the built-in output would silence system sounds for no benefit.
+    fn output_is_external_dac(&self) -> bool {
+        false
+    }
+
     /// The exact rate the sink can output *exclusively* for ordinary PCM
     /// (bit-perfect mode), or `None` when it cannot — the engine then falls
     /// back to shared-mode output. Capability query only: no device changes.
@@ -221,6 +236,8 @@ pub struct VecSink {
     pub device: Option<String>,
     /// Sample rates this sink pretends to output exclusively (bit-perfect).
     pub exclusive_rates: Vec<u32>,
+    /// Pretend the output is an external DAC (Best quality goes exclusive).
+    pub external: bool,
     /// `(rate, channels)` of the currently open exclusive PCM stream.
     pub exclusive_open: Option<(u32, u16)>,
     /// Every packed 24-bit byte pushed through `write_dop`.
@@ -300,6 +317,10 @@ impl AudioSink for VecSink {
 
     fn exclusive_pcm_rate(&self, rate_hz: u32) -> Option<u32> {
         self.exclusive_rates.contains(&rate_hz).then_some(rate_hz)
+    }
+
+    fn output_is_external_dac(&self) -> bool {
+        self.external
     }
 
     fn open_exclusive_pcm(&mut self, rate_hz: u32, channels: u16) -> Result<(), MusicError> {
@@ -435,10 +456,19 @@ impl AudioSink for SinkRouter {
 
     fn select_output_path(&mut self, path: OutputPath) {
         // Never select an exclusive path that doesn't exist.
-        self.active = match path {
+        let next = match path {
             OutputPath::Dop | OutputPath::PcmExclusive if self.dop.is_none() => OutputPath::Pcm,
             p => p,
         };
+        // The exclusive sink keeps its device hogged (and streaming) between
+        // tracks so consecutive DSD tracks and seeks stay seamless. Going back
+        // to shared PCM must give the device back.
+        if next == OutputPath::Pcm && self.active != OutputPath::Pcm {
+            if let Some(d) = self.dop.as_mut() {
+                let _ = d.stop();
+            }
+        }
+        self.active = next;
     }
 
     fn write_dop(&mut self, bytes: &[u8]) -> Result<(), MusicError> {
@@ -459,6 +489,20 @@ impl AudioSink for SinkRouter {
             Some(d) => d.open_exclusive_pcm(rate_hz, channels),
             None => Err(MusicError::BadRequest("no exclusive sink installed".into())),
         }
+    }
+
+    fn output_is_external_dac(&self) -> bool {
+        self.dop
+            .as_ref()
+            .map(|d| d.output_is_external_dac())
+            .unwrap_or(false)
+    }
+
+    fn output_device_name(&self) -> Option<String> {
+        self.dop
+            .as_ref()
+            .and_then(|d| d.output_device_name())
+            .or_else(|| self.pcm.output_device_name())
     }
 
     fn set_output_device(&mut self, name: Option<&str>) {
@@ -641,6 +685,28 @@ mod tests {
                 channels: 2,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn leaving_an_exclusive_path_for_shared_pcm_releases_the_exclusive_sink() {
+        let mut router = SinkRouter::new(
+            Box::new(NullSink::new()),
+            Some(Box::new(FakeDopSink {
+                bytes: Vec::new(),
+                state: SinkState::Stopped,
+            })),
+        );
+        router.select_output_path(OutputPath::Dop);
+        router.open(&track(1)).unwrap();
+        router.play().unwrap();
+        assert_eq!(router.state(), SinkState::Playing);
+        // Staying on the exclusive path keeps it running (seamless handoff).
+        router.select_output_path(OutputPath::Dop);
+        assert_eq!(router.state(), SinkState::Playing);
+        // Back to shared PCM: the exclusive device is given back.
+        router.select_output_path(OutputPath::Pcm);
+        router.select_output_path(OutputPath::Dop);
+        assert_eq!(router.state(), SinkState::Stopped);
     }
 
     #[test]

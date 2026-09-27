@@ -31,9 +31,10 @@ use serde::{Deserialize, Serialize};
 use crate::bitperfect::{f32_to_i24_le, BitPerfect};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
+use crate::quality::{QualityMode, BLOCKER_ANALOG, BLOCKER_EQ, BLOCKER_LOUDNESS, BLOCKER_VOLUME};
 use crate::analog::{AnalogSettings, AnalogStage};
-use crate::dsp::{DspStage, LoudnessMeter, 
-    scan_track_lufs, EqBand, GainRamp, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
+use crate::dsp::{headroom_guard, DspStage, LoudnessMeter, 
+    scan_track_levels, EqBand, GainRamp, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
 };
 use crate::queue::{Queue, RepeatMode};
 use crate::resample::CubicResampler;
@@ -57,20 +58,27 @@ pub const DEFAULT_SERVER_URL: &str = "http://localhost:8080";
 /// applies. The server cannot know the client's DAC, so this is a client
 /// preference (Settings → DSD handling): `Native` requests DoP (bit-perfect
 /// to a DSD-capable DAC, falls back to FLAC when the device can't take the
-/// DoP rate); `Convert` transcodes to PCM/FLAC.
+/// DoP rate); `Convert` transcodes to PCM/FLAC; `Auto` (default) is `Native`
+/// for output devices known to decode DoP (see [`crate::dsd_devices`]) and
+/// `Convert` for everything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DsdStory {
     Native,
-    #[default]
     Convert,
+    #[default]
+    Auto,
 }
 
-/// Resolve the rendition for a track: per-track override wins, then the
-/// global preference, then the DSD story (native DoP for DSD tracks when
-/// the user opted in), then the desktop ladder (passthrough when the source
-/// is directly streamable, else FLAC). Mirrors the server's default ladder;
-/// an explicit choice is always honored as-is (including `dop`).
+/// Resolve the rendition for a track: per-track override wins; then, for DSD
+/// tracks under the `Native` story, DoP (a *global* format does not apply to
+/// DSD there — otherwise a stray "Passthrough" would silently defeat the DSD
+/// setting); then the global preference; then the desktop ladder
+/// (passthrough when the source is directly streamable, else FLAC). Mirrors
+/// the server's default ladder; an explicit per-track choice is always
+/// honored as-is (including `dop`). `Auto` must be resolved to `Native` or
+/// `Convert` by the caller (the engine does, from the output device); here
+/// it is treated as `Convert`.
 pub fn resolve_format(
     track: &Track,
     global: Option<StreamFormat>,
@@ -80,12 +88,12 @@ pub fn resolve_format(
     if let Some(f) = per_track {
         return f;
     }
+    let is_dsd = matches!(track.format, AudioFormat::Dsf | AudioFormat::Dff);
+    if dsd_story == DsdStory::Native && is_dsd {
+        return StreamFormat::Dop;
+    }
     if let Some(f) = global {
         return f;
-    }
-    if dsd_story == DsdStory::Native && matches!(track.format, AudioFormat::Dsf | AudioFormat::Dff)
-    {
-        return StreamFormat::Dop;
     }
     transcode_ladder(
         track.format,
@@ -181,6 +189,14 @@ pub struct PlayerSnapshot {
     pub output_path: OutputPath,
     pub volume: f32,
     pub error: Option<String>,
+    /// A non-fatal explanation for this track, e.g. why DSD played as FLAC
+    /// instead of native DoP. Cleared on the next track.
+    #[serde(default)]
+    pub notice: Option<String>,
+    /// The user's own processing (EQ, Loudness, Analog, Volume) that
+    /// exclusive output would bypass right now.
+    #[serde(default)]
+    pub exclusive_blockers: Vec<String>,
     /// Playback modes, mirrored to the UI so it never invents them.
     pub repeat: RepeatMode,
     pub shuffle: bool,
@@ -205,6 +221,8 @@ impl Default for PlayerSnapshot {
             output_path: OutputPath::Pcm,
             volume: 1.0,
             error: None,
+            notice: None,
+            exclusive_blockers: Vec::new(),
             repeat: RepeatMode::Off,
             shuffle: false,
         }
@@ -451,12 +469,26 @@ pub struct Player {
     /// Client DSD preference (Settings → DSD handling); consulted by
     /// [`resolve_format`] when no explicit override applies.
     dsd_story: DsdStory,
+    /// Output devices the user confirmed as DoP-capable (for `Auto`).
+    dsd_devices: Vec<String>,
+    /// The top-level quality mode; Auto settings follow it.
+    quality: QualityMode,
+    /// The output device the user chose (`None` = system default), to tell
+    /// when the sink had to fall back because it isn't connected.
+    chosen_device: Option<String>,
+    /// A notice to show once the next open starts (set by recovery paths,
+    /// because opening a track clears the notice).
+    pending_notice: Option<String>,
+    /// After an exclusive output was lost mid-track, this track re-opens on
+    /// shared output instead of trying exclusive again.
+    skip_exclusive_track: Option<i64>,
     /// When to use the exclusive, untouched PCM path (see `bitperfect`).
     bit_perfect: BitPerfect,
     track_formats: HashMap<i64, StreamFormat>,
     volume: f32,
     active: Option<ActiveStream>,
     error: Option<String>,
+    notice: Option<String>,
     /// Where the queue (tracks + cursor + modes) is persisted. `None`
     /// disables persistence (some tests).
     queue_path: Option<PathBuf>,
@@ -493,11 +525,17 @@ impl Player {
             status: PlayerStatus::Stopped,
             global_format: None,
             dsd_story: DsdStory::default(),
+            dsd_devices: Vec::new(),
+            quality: QualityMode::default(),
+            chosen_device: None,
+            pending_notice: None,
+            skip_exclusive_track: None,
             bit_perfect: BitPerfect::default(),
             track_formats: HashMap::new(),
             volume: 1.0,
             active: None,
             error: None,
+            notice: None,
             queue_path: None,
             resume_at_ms: None,
             empty_streak: 0,
@@ -622,12 +660,154 @@ impl Player {
     fn wants_bit_perfect(&self, track: &Track, fmt: StreamFormat) -> bool {
         use kahawai_core::format::AudioFormat as F;
         fmt == StreamFormat::Passthrough
-            && self.bit_perfect.applies_to(track.mqa)
+            && self.skip_exclusive_track != Some(track.id)
+            && self.effective_bit_perfect().applies_to(track.mqa)
             && !matches!(track.format, F::Dsf | F::Dff | F::SacdIso | F::Unknown)
     }
 
     pub fn set_dsd_story(&mut self, story: DsdStory) {
         self.dsd_story = story;
+    }
+
+    pub fn set_dsd_devices(&mut self, devices: Vec<String>) {
+        self.dsd_devices = devices;
+    }
+
+    pub fn set_quality_mode(&mut self, mode: QualityMode) {
+        if mode == self.quality {
+            return;
+        }
+        self.quality = mode;
+        // A track that is loaded is re-opened so the mode applies now.
+        let live = self.active.is_some()
+            && matches!(self.status, PlayerStatus::Playing | PlayerStatus::Paused);
+        if live {
+            let pos = self.position_ms();
+            self.seek_ms(pos);
+        }
+    }
+
+    /// The user's own processing that exclusive output would bypass right
+    /// now (names for the UI). Empty means exclusive output costs nothing.
+    pub fn exclusive_blockers(&self) -> Vec<&'static str> {
+        let mut b = Vec::new();
+        // An enabled EQ with only flat bands changes nothing, so it does not
+        // count.
+        if self.eq.enabled() && self.eq.bands().iter().any(|band| band.gain_db.abs() > 0.05) {
+            b.push(BLOCKER_EQ);
+        }
+        if self.loudness.enabled() {
+            b.push(BLOCKER_LOUDNESS);
+        }
+        if self.analog.settings().enabled {
+            b.push(BLOCKER_ANALOG);
+        }
+        if self.volume < 0.999 {
+            b.push(BLOCKER_VOLUME);
+        }
+        b
+    }
+
+    /// Should an *Auto* setting go for the exclusive / native path right
+    /// now? Only in Best quality, on an external DAC, with none of the
+    /// user's processing that it would bypass.
+    fn auto_wants_exclusive(&self) -> bool {
+        self.quality == QualityMode::Best
+            && self.sink.output_is_external_dac()
+            && self.exclusive_blockers().is_empty()
+    }
+
+    /// The story actually applied. `Auto` follows the quality mode: native
+    /// DoP only in Best quality, for a device known (built in, or confirmed
+    /// by the user) to decode DoP, when nothing of the user's would be
+    /// bypassed; otherwise the FLAC conversion.
+    fn effective_dsd_story(&self) -> DsdStory {
+        match self.dsd_story {
+            DsdStory::Auto => {
+                let known = self
+                    .sink
+                    .output_device_name()
+                    .map(|n| crate::dsd_devices::is_known_dsd_device(&n, &self.dsd_devices))
+                    .unwrap_or(false);
+                if known && self.auto_wants_exclusive() {
+                    DsdStory::Native
+                } else {
+                    DsdStory::Convert
+                }
+            }
+            s => s,
+        }
+    }
+
+    /// The bit-perfect mode actually applied (`Auto` resolved as above).
+    fn effective_bit_perfect(&self) -> BitPerfect {
+        match self.bit_perfect {
+            BitPerfect::Auto if self.auto_wants_exclusive() => BitPerfect::All,
+            BitPerfect::Auto => BitPerfect::Off,
+            m => m,
+        }
+    }
+
+    /// Add a line to this track's notice (they can stack: a missing device
+    /// and a DoP fallback are both worth saying).
+    fn add_notice(&mut self, msg: String) {
+        self.notice = Some(match self.notice.take() {
+            Some(prev) => format!("{prev} {msg}"),
+            None => msg,
+        });
+    }
+
+    /// The chosen output device isn't connected and the sink fell back to
+    /// another one: say so, so audio doesn't just move to other speakers.
+    fn missing_device_notice(&self) -> Option<String> {
+        let chosen = self.chosen_device.as_deref()?;
+        let actual = self.sink.output_device_name()?;
+        (chosen.trim().to_lowercase() != actual.trim().to_lowercase()).then(|| {
+            format!(
+                "“{}” isn't connected, so this is playing on “{}”.",
+                chosen.trim(),
+                actual.trim()
+            )
+        })
+    }
+
+    /// An exclusive output failed mid-track (the device went away, or stopped
+    /// draining). Carry on from the same spot on shared output rather than
+    /// stopping, and say what happened.
+    fn recover_from_exclusive_loss(&mut self, what: &str) {
+        let Some(id) = self.queue.current().map(|t| t.id) else {
+            self.fail(what);
+            return;
+        };
+        let pos = self.position_ms();
+        tracing::warn!(track_id = id, %what, "exclusive output lost; continuing on shared output");
+        self.pending_notice = Some(format!(
+            "The exclusive output stopped ({what}); continuing on shared output."
+        ));
+        self.skip_exclusive_track = Some(id);
+        self.active = None;
+        let _ = self.sink.stop();
+        self.open_current(Some(pos));
+    }
+
+    /// Why a Best-quality Auto setting stayed on shared output for this
+    /// track, if it did: an external DAC is selected but the user's own
+    /// processing is on.
+    fn yielded_to_processing(&self) -> Option<String> {
+        let auto_involved =
+            self.bit_perfect == BitPerfect::Auto || self.dsd_story == DsdStory::Auto;
+        let blockers = self.exclusive_blockers();
+        (self.quality == QualityMode::Best
+            && auto_involved
+            && self.sink.output_is_external_dac()
+            && !blockers.is_empty())
+        .then(|| {
+            format!(
+                "Best quality is paused: {} on. Turn {} off for bit-perfect output.",
+                blockers.join(" and "),
+                if blockers.len() == 1 { "it" } else { "them" }
+            )
+        })
     }
 
     /// Playhead worth remembering: the live one, or the restored one not yet
@@ -701,6 +881,7 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
+        self.skip_exclusive_track = None;
         self.status = PlayerStatus::Stopped;
         self.active = None;
         self.resume_at_ms = None;
@@ -783,6 +964,7 @@ impl Player {
     /// track is loaded the stream is re-opened on the new device at the
     /// current audible position, keeping paused/playing as it was.
     pub fn set_output_device(&mut self, name: Option<String>) {
+        self.chosen_device = name.clone();
         self.sink.set_output_device(name.as_deref());
         let live = self.active.is_some()
             && matches!(self.status, PlayerStatus::Playing | PlayerStatus::Paused);
@@ -866,45 +1048,61 @@ impl Player {
         };
         self.status = PlayerStatus::Loading;
         self.error = None;
+        self.notice = self.pending_notice.take();
+        if let Some(m) = self.missing_device_notice() {
+            self.add_notice(m);
+        }
+        if let Some(m) = self.yielded_to_processing() {
+            self.add_notice(m);
+        }
 
         let mut fmt = resolve_format(
             &track,
             self.global_format,
             self.track_formats.get(&track.id).copied(),
-            self.dsd_story,
+            self.effective_dsd_story(),
         );
 
-        // DoP capability check: the device must take the exact DoP rate
-        // for this track's DSD rate. Otherwise fall back to DSD→PCM/FLAC
-        // per the dsd_story resolution — playback never fails outright
-        // for a capable-of-PCM device.
+        // DoP fallback chain: any reason DoP can't start (no exclusive sink,
+        // rate refused, hog mode taken, format refused, stream error) drops
+        // this track to the FLAC transcode and says why. Playback never
+        // fails outright for a device that can do PCM.
+        if fmt == StreamFormat::Dop && self.skip_exclusive_track == Some(track.id) {
+            fmt = StreamFormat::Flac;
+        }
         if fmt == StreamFormat::Dop {
-            if !self.sink.supports_dop() {
-                self.fail("DoP needs a DSD-capable sink");
-                return;
-            }
-            if self.dop_capable_rate(&track).is_none() {
-                tracing::warn!(
-                    track_id = track.id,
-                    "DoP rate not supported by the output device; falling back to FLAC"
-                );
-                fmt = StreamFormat::Flac;
+            match self.try_dop(&track, seek) {
+                Ok(()) => return,
+                Err(why) => {
+                    tracing::warn!(track_id = track.id, %why, "DoP unavailable; falling back to FLAC");
+                    self.add_notice(format!("Played as PCM (FLAC): {why}."));
+                    self.active = None;
+                    fmt = StreamFormat::Flac;
+                }
             }
         }
 
-        let path = if fmt == StreamFormat::Dop {
-            OutputPath::Dop
-        } else {
-            OutputPath::Pcm
-        };
-        self.sink.select_output_path(path);
-        self.output_path = path;
+        self.sink.select_output_path(OutputPath::Pcm);
+        self.output_path = OutputPath::Pcm;
+        self.open_pcm(&track, seek, fmt);
+    }
 
-        if fmt == StreamFormat::Dop {
-            self.open_dop(&track, seek);
-        } else {
-            self.open_pcm(&track, seek, fmt);
+    /// Start DoP for `track`, or say why it cannot. On `Err` the sink has
+    /// been released and nothing is playing.
+    fn try_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
+        if !self.sink.supports_dop() {
+            return Err("this output has no exclusive DoP path".into());
         }
+        if self.dop_capable_rate(track).is_none() {
+            return Err("the output device doesn't offer the DoP rate this track needs".into());
+        }
+        self.sink.select_output_path(OutputPath::Dop);
+        self.output_path = OutputPath::Dop;
+        let result = self.open_dop(track, seek);
+        if result.is_err() {
+            let _ = self.sink.stop();
+        }
+        result
     }
 
     /// DoP rate this track needs *and* the sink confirmed, or `None` when
@@ -924,13 +1122,10 @@ impl Player {
     /// Open a `?format=dop` response: parse the WAV header (fresh play) or
     /// continue raw frames under the established spec (seek), then hand
     /// the bytes to the DoP sink untouched. No DSP, no volume, no resample.
-    fn open_dop(&mut self, track: &Track, seek: Option<u64>) {
+    fn open_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
         let dop_rate = match self.dop_capable_rate(track) {
             Some(r) => r,
-            None => {
-                self.fail("DoP rate not available for this track/device");
-                return;
-            }
+            None => return Err("DoP rate not available for this track/device".into()),
         };
         let next_id = self.queue.peek_next().map(|t| t.id);
         let opts = StreamOptions {
@@ -941,10 +1136,7 @@ impl Player {
         };
         let info = match self.transport.open_stream(track.id, &opts) {
             Ok(i) => i,
-            Err(e) => {
-                self.fail(&format!("stream failed: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("stream failed: {e}")),
         };
         let gapless_mode = info.gapless_mode.clone();
         let progress = info.progress.clone();
@@ -952,10 +1144,7 @@ impl Player {
         let established = self.dop_spec;
         let stream = match DopStream::new(info.reader, dop_rate, established, chained) {
             Ok(s) => s,
-            Err(e) => {
-                self.fail(&format!("DoP stream failed: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("DoP stream failed: {e}")),
         };
         let spec = stream.spec();
         // Remember the established format for seek continuations.
@@ -974,9 +1163,11 @@ impl Player {
             }
         }
 
-        if self.sink.open(track).is_err() || self.sink.play().is_err() {
-            self.fail("DoP sink failed to open");
-            return;
+        if let Err(e) = self.sink.open(track) {
+            return Err(format!("the device refused DoP: {e}"));
+        }
+        if let Err(e) = self.sink.play() {
+            return Err(format!("the device would not start: {e}"));
         }
 
         let base_frames = seek.unwrap_or(0) * spec.dop_rate_hz as u64 / 1000;
@@ -993,6 +1184,7 @@ impl Player {
             progress,
         }));
         self.status = PlayerStatus::Playing;
+        Ok(())
     }
 
     fn open_pcm(&mut self, track: &Track, seek: Option<u64>, fmt: StreamFormat) {
@@ -1014,8 +1206,11 @@ impl Player {
         let loudness_gain_db = if self.loudness.enabled() && !want_bp {
             let track_id = track.id;
             let transport = &*self.transport;
+            // Plan the gain against the track's peak and the EQ's worst-case
+            // boost, so the result cannot clip at the output.
+            let eq_boost = self.eq.max_boost_db();
             self.loudness
-                .gain_for(track_id, fmt, || scan_track_lufs(transport, track_id, fmt))
+                .gain_for_levels(track_id, fmt, eq_boost, || scan_track_levels(transport, track_id, fmt))
         } else {
             0.0
         };
@@ -1069,6 +1264,7 @@ impl Player {
         let mut bit_perfect = false;
         if want_bp {
             self.sink.select_output_path(OutputPath::PcmExclusive);
+            let mut why: Option<String> = None;
             let rate_ok = self.sink.exclusive_pcm_rate(spec.sample_rate) == Some(spec.sample_rate);
             if !rate_ok {
                 tracing::warn!(
@@ -1076,26 +1272,37 @@ impl Player {
                     rate = spec.sample_rate,
                     "bit-perfect: output device cannot take this rate exclusively; using shared output"
                 );
+                why = Some(format!(
+                    "the output device doesn't offer {} kHz",
+                    spec.sample_rate as f64 / 1000.0
+                ));
             } else if spec.channels == 0 || spec.channels > 8 {
                 tracing::warn!(
                     track_id = track.id,
                     "bit-perfect: unsupported channel count; using shared output"
                 );
+                why = Some("the channel count isn't supported for exclusive output".into());
             } else {
                 match self
                     .sink
                     .open_exclusive_pcm(spec.sample_rate, spec.channels as u16)
                 {
                     Ok(()) => bit_perfect = true,
-                    Err(e) => tracing::warn!(
-                        track_id = track.id,
-                        error = %e,
-                        "bit-perfect: could not open the exclusive device; using shared output"
-                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            track_id = track.id,
+                            error = %e,
+                            "bit-perfect: could not open the exclusive device; using shared output"
+                        );
+                        why = Some(format!("the device couldn't be opened exclusively: {e}"));
+                    }
                 }
             }
             if !bit_perfect {
                 self.sink.select_output_path(OutputPath::Pcm);
+                if let Some(w) = why {
+                    self.add_notice(format!("Played on shared output: {w}."));
+                }
             }
         }
         self.output_path = if bit_perfect {
@@ -1260,7 +1467,7 @@ impl Player {
             f32_to_i24_le(frames, &mut bytes);
             let written = (frames.len() / channels) as u64;
             if self.sink.write_dop(&bytes).is_err() {
-                self.fail("audio sink write failed");
+                self.recover_from_exclusive_loss("the device stopped accepting audio");
                 return;
             }
             if let Some(ActiveStream::Pcm(a)) = self.active.as_mut() {
@@ -1313,6 +1520,9 @@ impl Player {
                 *s *= vol;
             }
         }
+        // EQ boosts and loudness gain can lift peaks past full scale, which the
+        // output device would hard-clip; bend them instead.
+        headroom_guard(&mut chunk);
 
         let sink_rate = active.sink_rate;
         let ch = active.spec.channels;
@@ -1374,7 +1584,7 @@ impl Player {
         }
         self.empty_streak = 0;
         if self.sink.write_dop(&buf[..n]).is_err() {
-            self.fail("DoP sink write failed");
+            self.recover_from_exclusive_loss("the device stopped accepting DSD audio");
             return;
         }
         if let Some(ActiveStream::Dop(a)) = self.active.as_mut() {
@@ -1474,6 +1684,8 @@ impl Player {
             output_path: self.output_path,
             volume: self.volume,
             error: self.error.clone(),
+            notice: self.notice.clone(),
+            exclusive_blockers: self.exclusive_blockers().into_iter().map(String::from).collect(),
             repeat: self.queue.repeat,
             shuffle: self.queue.shuffle,
         }
@@ -1521,6 +1733,10 @@ pub enum EngineCommand {
     Next,
     Prev,
     SetGlobalFormat(Option<StreamFormat>),
+    /// Devices the user confirmed as DoP-capable (Settings).
+    SetDsdDevices(Vec<String>),
+    /// Top-level quality mode (Settings).
+    SetQualityMode(QualityMode),
     SetTrackFormat(i64, Option<StreamFormat>),
     /// DSD handling preference (Settings); see [`DsdStory`].
     SetDsdStory(DsdStory),
@@ -1568,10 +1784,17 @@ struct EngineSettings {
     /// settings files (server URL only) loadable.
     #[serde(default)]
     dsp: DspSettings,
-    /// Client DSD preference (Settings → DSD handling). Defaults to
-    /// `Convert`, preserving pre-C3 behavior.
+    /// Client DSD preference (Settings → DSD handling). Defaults to `Auto`:
+    /// native DoP on known DSD-capable DACs, FLAC conversion elsewhere.
     #[serde(default)]
     dsd_story: DsdStory,
+    /// Output devices the user confirmed as DoP-capable (used by `Auto`).
+    #[serde(default)]
+    dsd_devices: Vec<String>,
+    /// Top-level quality mode (Best quality / Compatible). The fine controls
+    /// below default to Auto, which follows it.
+    #[serde(default)]
+    quality_mode: QualityMode,
     /// Global format override (`None` = auto/ladder). Persisted so the
     /// S13 preference survives restarts.
     #[serde(default)]
@@ -1622,17 +1845,36 @@ fn queue_path_for(settings_path: &Path) -> PathBuf {
 
 impl EngineSettings {
     fn load(path: &PathBuf) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
+        let text = std::fs::read_to_string(path).ok();
+        let mut settings: Self = text
+            .as_deref()
+            .and_then(|t| serde_json::from_str(t).ok())
             .unwrap_or(Self {
                 server_url: DEFAULT_SERVER_URL.to_string(),
                 dsp: DspSettings::default(),
                 dsd_story: DsdStory::default(),
+                dsd_devices: Vec::new(),
+                quality_mode: QualityMode::default(),
                 global_format: None,
                 output_device: None,
                 bit_perfect: BitPerfect::default(),
-            })
+            });
+        // One-time migration: a file written before the quality mode existed
+        // carries the old individual defaults (or choices made while
+        // troubleshooting). Reset the fine controls to Auto so the mode
+        // governs them; explicit overrides can be set again in Advanced.
+        let pre_quality = text
+            .as_deref()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .map(|v| v.get("quality_mode").is_none())
+            .unwrap_or(false);
+        if pre_quality {
+            settings.dsd_story = DsdStory::Auto;
+            settings.bit_perfect = BitPerfect::Auto;
+            settings.global_format = None;
+            settings.save(path);
+        }
+        settings
     }
 
     fn save(&self, path: &PathBuf) {
@@ -1654,6 +1896,8 @@ pub struct EngineController {
     events: Arc<Mutex<Vec<PlayerEvent>>>,
     server_url: Arc<RwLock<String>>,
     dsd_story: Arc<RwLock<DsdStory>>,
+    dsd_devices: Arc<RwLock<Vec<String>>>,
+    quality_mode: Arc<RwLock<QualityMode>>,
     output_device: Arc<RwLock<Option<String>>>,
     bit_perfect: Arc<RwLock<BitPerfect>>,
     global_format: Arc<RwLock<Option<StreamFormat>>>,
@@ -1683,6 +1927,10 @@ impl EngineController {
         ctrl.send(EngineCommand::SetDsdStory(settings.dsd_story));
         ctrl.send(EngineCommand::SetGlobalFormat(settings.global_format));
         *ctrl.dsd_story.write().expect("dsd lock") = settings.dsd_story;
+        ctrl.send(EngineCommand::SetQualityMode(settings.quality_mode));
+        *ctrl.quality_mode.write().expect("quality lock") = settings.quality_mode;
+        ctrl.send(EngineCommand::SetDsdDevices(settings.dsd_devices.clone()));
+        *ctrl.dsd_devices.write().expect("dsd devices lock") = settings.dsd_devices.clone();
         // Output device (before any playback opens the sink).
         ctrl.send(EngineCommand::SetOutputDevice(
             settings.output_device.clone(),
@@ -1745,6 +1993,8 @@ impl EngineController {
             events,
             server_url,
             dsd_story: Arc::new(RwLock::new(DsdStory::default())),
+            dsd_devices: Arc::new(RwLock::new(Vec::new())),
+            quality_mode: Arc::new(RwLock::new(QualityMode::default())),
             output_device: Arc::new(RwLock::new(None)),
             bit_perfect: Arc::new(RwLock::new(BitPerfect::default())),
             global_format: Arc::new(RwLock::new(None)),
@@ -1797,6 +2047,44 @@ impl EngineController {
         settings.dsd_story = story;
         settings.save(&self.settings_path);
         self.send(EngineCommand::SetDsdStory(story));
+    }
+
+    /// Top-level quality mode. Persisted; a playing track re-opens under it.
+    pub fn set_quality_mode(&self, mode: QualityMode) {
+        *self.quality_mode.write().expect("quality lock") = mode;
+        let mut settings = EngineSettings::load(&self.settings_path);
+        settings.quality_mode = mode;
+        settings.save(&self.settings_path);
+        self.send(EngineCommand::SetQualityMode(mode));
+    }
+
+    pub fn quality_mode(&self) -> QualityMode {
+        *self.quality_mode.read().expect("quality lock")
+    }
+
+    /// Output devices the user confirmed as DoP-capable, for `Auto`.
+    pub fn dsd_devices(&self) -> Vec<String> {
+        self.dsd_devices.read().expect("dsd devices lock").clone()
+    }
+
+    /// Mark (or unmark) an output device as decoding DoP. Persisted; a
+    /// playing track keeps its current rendition until the next track.
+    pub fn set_dsd_device_confirmed(&self, device: &str, confirmed: bool) {
+        let device = device.trim().to_string();
+        if device.is_empty() {
+            return;
+        }
+        let mut list = self.dsd_devices.write().expect("dsd devices lock");
+        list.retain(|d| !d.trim().eq_ignore_ascii_case(&device));
+        if confirmed {
+            list.push(device);
+        }
+        let snapshot = list.clone();
+        drop(list);
+        let mut settings = EngineSettings::load(&self.settings_path);
+        settings.dsd_devices = snapshot.clone();
+        settings.save(&self.settings_path);
+        self.send(EngineCommand::SetDsdDevices(snapshot));
     }
 
     /// Choose the output device by name (`None` = system default).
@@ -2041,6 +2329,8 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
         EngineCommand::SetGlobalFormat(f) => player.set_global_format(f),
         EngineCommand::SetTrackFormat(id, f) => player.set_track_format(id, f),
         EngineCommand::SetDsdStory(s) => player.set_dsd_story(s),
+        EngineCommand::SetDsdDevices(d) => player.set_dsd_devices(d),
+        EngineCommand::SetQualityMode(m) => player.set_quality_mode(m),
         EngineCommand::SetRepeat(m) => player.set_repeat(m),
         EngineCommand::SetShuffle(b) => player.set_shuffle(b),
         EngineCommand::AppendTracks(t) => player.append_tracks(t),

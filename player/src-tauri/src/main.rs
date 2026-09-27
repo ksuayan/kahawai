@@ -19,11 +19,12 @@ use kahawai_core::{StreamFormat, Track};
 use kahawai_player_api::Client as ApiClient;
 use kahawai_player_audio::{
     dop_capable_rates, exclusive_dop_sink, list_output_devices as audio_list_output_devices,
-    CpalSink, SinkRouter,
+    device_capabilities, device_live_state, resolved_output_device_name, CpalSink, SinkRouter,
 };
 use kahawai_player_core::{
-    fetch_artwork, validate_bands, AnalogSettings, ArtworkCache, BitPerfect, DsdStory, DspSettings,
-    EngineController, EqBand, OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, RepeatMode,
+    fetch_artwork, is_known_dsd_device, validate_bands, AnalogSettings, ArtworkCache, BitPerfect, DsdStory, DspSettings,
+    EngineController, EqBand, OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, QualityMode,
+    RepeatMode,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -144,6 +145,10 @@ struct PlayerStateDto {
     output_path: &'static str,
     volume: f32,
     error: Option<String>,
+    /// Non-fatal explanation for this track (e.g. DSD played as FLAC, and why).
+    notice: Option<String>,
+    /// User processing (EQ, Loudness, Analog, Volume) exclusive output would bypass right now.
+    exclusive_blockers: Vec<String>,
     /// "off" | "all" | "one".
     repeat: &'static str,
     shuffle: bool,
@@ -208,6 +213,8 @@ impl From<PlayerSnapshot> for PlayerStateDto {
             output_path: output_path_str(s.output_path),
             volume: s.volume,
             error: s.error,
+            notice: s.notice,
+            exclusive_blockers: s.exclusive_blockers,
             repeat: repeat_str(s.repeat),
             shuffle: s.shuffle,
         }
@@ -406,15 +413,25 @@ fn queue_insert_next(app: AppHandle, state: State<'_, AppState>, tracks: Vec<Tra
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct PlaybackPrefsDto {
-    /// "native" | "convert".
+    /// "auto" | "native" | "convert".
     dsd_story: &'static str,
     global_format: Option<&'static str>,
-    /// "off" | "mqa" | "all" — exclusive bit-perfect output.
+    /// "auto" | "off" | "mqa" | "all" — exclusive bit-perfect output.
     bit_perfect: &'static str,
+    /// "best" | "compatible".
+    quality_mode: &'static str,
+}
+
+fn quality_str(m: QualityMode) -> &'static str {
+    match m {
+        QualityMode::Best => "best",
+        QualityMode::Compatible => "compatible",
+    }
 }
 
 fn bit_perfect_str(m: BitPerfect) -> &'static str {
     match m {
+        BitPerfect::Auto => "auto",
         BitPerfect::Off => "off",
         BitPerfect::Mqa => "mqa",
         BitPerfect::All => "all",
@@ -430,14 +447,16 @@ fn get_playback_prefs(state: State<'_, AppState>) -> PlaybackPrefsDto {
         dsd_story: match story {
             DsdStory::Native => "native",
             DsdStory::Convert => "convert",
+            DsdStory::Auto => "auto",
         },
         global_format: fmt.map(format_str),
         bit_perfect: bit_perfect_str(state.engine.bit_perfect()),
+        quality_mode: quality_str(state.engine.quality_mode()),
     }
 }
 
-/// DSD handling preference: "native" (request DoP when nothing overrides)
-/// or "convert" (DSD → PCM, the pre-C3 default). Persisted to the engine
+/// DSD handling preference: "auto" (native on known DoP DACs, else convert),
+/// "native" (request DoP when nothing overrides) or "convert" (DSD → PCM). Persisted to the engine
 /// settings file.
 /// Choose when to play through the exclusive bit-perfect path
 /// ("off" | "mqa" | "all"). Persisted; a playing track moves over at its
@@ -446,6 +465,7 @@ fn get_playback_prefs(state: State<'_, AppState>) -> PlaybackPrefsDto {
 #[tauri::command]
 fn set_bit_perfect(state: State<'_, AppState>, mode: String) -> Result<(), String> {
     let m = match mode.as_str() {
+        "auto" => BitPerfect::Auto,
         "off" => BitPerfect::Off,
         "mqa" => BitPerfect::Mqa,
         "all" => BitPerfect::All,
@@ -455,11 +475,25 @@ fn set_bit_perfect(state: State<'_, AppState>, mode: String) -> Result<(), Strin
     Ok(())
 }
 
+/// Top-level quality mode: "best" | "compatible". Persisted; a playing track
+/// re-opens under it at the same position.
+#[tauri::command]
+fn set_quality_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    let m = match mode.as_str() {
+        "best" => QualityMode::Best,
+        "compatible" => QualityMode::Compatible,
+        _ => return Err(format!("unknown quality mode: {mode}")),
+    };
+    state.engine.set_quality_mode(m);
+    Ok(())
+}
+
 #[tauri::command]
 fn set_dsd_story(app: AppHandle, state: State<'_, AppState>, story: String) -> Result<(), String> {
     let s = match story.as_str() {
         "native" => DsdStory::Native,
         "convert" => DsdStory::Convert,
+        "auto" => DsdStory::Auto,
         _ => return Err(format!("unknown DSD story: {story}")),
     };
     state.engine.set_dsd_story(s);
@@ -571,21 +605,128 @@ fn get_dsp_settings(state: State<'_, AppState>) -> Result<DspSettings, String> {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+struct DsdRateDto {
+    /// "DSD64" | "DSD128" | "DSD256".
+    name: &'static str,
+    /// DoP PCM rate this DSD rate needs (176400 / 352800 / 705600).
+    dop_rate: u32,
+    supported: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 struct DopStatusDto {
-    /// DoP PCM rates the default output device accepts right now
+    /// DoP PCM rates the output device accepts right now
     /// (176400 / 352800 / 705600). Empty on non-macOS.
     supported_rates: Vec<u32>,
+    /// The same, named by the DSD rate they carry (for the Settings probe).
+    dsd_rates: Vec<DsdRateDto>,
     /// True on macOS: the exclusive hog-mode path exists.
+    exclusive_available: bool,
+    /// The device output would use (the chosen one, or the system default's
+    /// real name); `None` when it can't be resolved.
+    device: Option<String>,
+    /// Built in, or confirmed by the user, as decoding DoP.
+    known_dsd_device: bool,
+    /// The user's own confirmation (Settings toggle) is what makes it known.
+    user_confirmed: bool,
+    /// What "Auto" resolves to right now: "native" | "convert".
+    auto_resolves_to: &'static str,
+    /// Everything the device reports it can carry (Settings shows it at a glance).
+    capabilities: Option<DeviceCapsDto>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DeviceCapsDto {
+    name: String,
+    /// "usb" | "thunderbolt" | "firewire" | "built-in" | "bluetooth" | "hdmi" | ...
+    transport: &'static str,
+    /// External DAC-class connection: Best quality may take it exclusively.
+    external_dac: bool,
+    sample_rates: Vec<u32>,
+    bit_depths: Vec<u32>,
+    float32: bool,
+    dop_rates: Vec<u32>,
     exclusive_available: bool,
 }
 
 #[tauri::command]
 fn dop_status(state: State<'_, AppState>) -> DopStatusDto {
-    let rates = dop_capable_rates(state.engine.output_device().as_deref());
+    let chosen = state.engine.output_device();
+    let rates = dop_capable_rates(chosen.as_deref());
+    let device = resolved_output_device_name(chosen.as_deref());
+    let confirmed = state.engine.dsd_devices();
+    let known = device
+        .as_deref()
+        .map(|d| is_known_dsd_device(d, &confirmed))
+        .unwrap_or(false);
+    let user_confirmed = device
+        .as_deref()
+        .map(|d| confirmed.iter().any(|c| c.trim().eq_ignore_ascii_case(d.trim())))
+        .unwrap_or(false);
+    let dsd_rates = [("DSD64", 176_400u32), ("DSD128", 352_800), ("DSD256", 705_600)]
+        .into_iter()
+        .map(|(name, dop_rate)| DsdRateDto {
+            name,
+            dop_rate,
+            supported: rates.contains(&dop_rate),
+        })
+        .collect();
     DopStatusDto {
         exclusive_available: cfg!(target_os = "macos"),
         supported_rates: rates,
+        dsd_rates,
+        device,
+        known_dsd_device: known,
+        user_confirmed,
+        auto_resolves_to: if known { "native" } else { "convert" },
+        capabilities: device_capabilities(chosen.as_deref()).map(|c| DeviceCapsDto {
+            name: c.name,
+            transport: c.transport,
+            external_dac: c.external_dac,
+            sample_rates: c.sample_rates,
+            bit_depths: c.bit_depths,
+            float32: c.float32,
+            dop_rates: c.dop_rates,
+            exclusive_available: c.exclusive_available,
+        }),
     }
+}
+
+/// What the output device is doing right now (its real rate and stream
+/// format, read from the OS), for the live signal-path panel in Settings.
+#[derive(Debug, Clone, serde::Serialize)]
+struct OutputLiveDto {
+    name: String,
+    rate_hz: u32,
+    /// 0 when unknown.
+    bit_depth: u32,
+    /// The stream format is floating point (the shared mixer's).
+    float: bool,
+    /// This app holds the device exclusively.
+    exclusive: bool,
+}
+
+#[tauri::command]
+fn output_live_state(state: State<'_, AppState>) -> Option<OutputLiveDto> {
+    let chosen = state.engine.output_device();
+    device_live_state(chosen.as_deref()).map(|l| OutputLiveDto {
+        name: l.name,
+        rate_hz: l.rate_hz,
+        bit_depth: l.bit_depth,
+        float: l.float,
+        exclusive: l.exclusive,
+    })
+}
+
+/// Mark the current output device as (not) decoding DoP, so "Auto" DSD
+/// handling goes native for it. Persisted.
+#[tauri::command]
+fn set_dsd_device_confirmed(state: State<'_, AppState>, confirmed: bool) -> Result<(), String> {
+    let chosen = state.engine.output_device();
+    let name = resolved_output_device_name(chosen.as_deref())
+        .ok_or_else(|| "output device unknown".to_string())?;
+    state.engine.set_dsd_device_confirmed(&name, confirmed);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +845,9 @@ fn main() {
             set_loudness_enabled,
             get_dsp_settings,
             dop_status,
+            set_dsd_device_confirmed,
+            set_quality_mode,
+            output_live_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

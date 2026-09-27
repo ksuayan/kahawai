@@ -25,7 +25,7 @@ describe("settings store", () => {
     await s.init();
     expect(s.loaded).toBe(true);
     expect(s.serverUrl).toBe(DEFAULT_SERVER_URL);
-    expect(s.dsdStory).toBe("convert");
+    expect(s.dsdStory).toBe("auto");
     expect(s.globalFormat).toBeNull();
   });
 
@@ -50,10 +50,11 @@ describe("settings store", () => {
     expect(tauri.callsTo("set_format").length).toBe(2);
   });
 
-  it("bit-perfect defaults to off, restores the saved mode, and saves changes through the core", async () => {
-    const off = useSettingsStore();
-    await off.init();
-    expect(off.bitPerfect).toBe("off");
+  it("bit-perfect defaults to auto, restores the saved mode, and saves changes through the core", async () => {
+    const auto = useSettingsStore();
+    await auto.init();
+    expect(auto.bitPerfect).toBe("auto");
+    expect(auto.qualityMode).toBe("best");
 
     setActivePinia(createPinia());
     tauri.on("get_playback_prefs", { dsd_story: "convert", global_format: null, bit_perfect: "mqa" });
@@ -68,10 +69,20 @@ describe("settings store", () => {
     expect(tauri.callsTo("set_bit_perfect").at(-1)).toEqual({ mode: "off" });
   });
 
-  it("an older core without the setting leaves it off", async () => {
+  it("an older core without the setting follows the quality mode", async () => {
     tauri.on("get_playback_prefs", { dsd_story: "native", global_format: "flac" });
     const s = useSettingsStore();
     await s.init();
-    expect(s.bitPerfect).toBe("off");
+    expect(s.bitPerfect).toBe("auto");
+  });
+
+  it("restores and saves the quality mode through the core", async () => {
+    tauri.on("get_playback_prefs", { dsd_story: "auto", global_format: null, bit_perfect: "auto", quality_mode: "compatible" });
+    const s = useSettingsStore();
+    await s.init();
+    expect(s.qualityMode).toBe("compatible");
+    await s.saveQualityMode("best");
+    expect(s.qualityMode).toBe("best");
+    expect(tauri.callsTo("set_quality_mode")).toEqual([{ mode: "best" }]);
   });
 });

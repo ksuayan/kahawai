@@ -15,16 +15,18 @@ const devices = [
   { name: "RØDE Connect System", is_default: false },
 ];
 
-function bootTauri(chosen: string | null = null) {
+const DEFAULT_DOP = { supported_rates: [176400, 352800], exclusive_available: true };
+
+function bootTauri(chosen: string | null = null, dop: Record<string, unknown> = DEFAULT_DOP) {
   tauri
     .on("get_dsp_settings", { eq_bands: [{ band_type: "peaking", freq: 1000, gain_db: 3, q: 1 }], eq_enabled: true, loudness_enabled: false, loudness_target: -14 })
     .on("get_output_devices", devices)
     .on("get_output_device", chosen)
-    .on("dop_status", { supported_rates: [176400, 352800], exclusive_available: true });
+    .on("dop_status", dop);
 }
 
-async function mountSettings(chosen: string | null = null) {
-  bootTauri(chosen);
+async function mountSettings(chosen: string | null = null, dop?: Record<string, unknown>) {
+  bootTauri(chosen, dop);
   const { wrapper } = mountApp(SettingsView);
   await useDspStore().init();
   await settle();
@@ -140,12 +142,70 @@ describe("Settings: playback preferences", () => {
 
   it("sets DSD handling", async () => {
     const w = await mountSettings();
-    expect(select(w, "DSD handling").textContent).toContain("Convert to PCM");
+    expect(select(w, "DSD handling").textContent).toContain("Auto");
     await openSelect(select(w, "DSD handling"));
-    pick(options()[1]);
+    pick(options()[2]);
     await settle();
     expect(tauri.callsTo("set_dsd_story")).toEqual([{ story: "native" }]);
     expect(select(w, "DSD handling").textContent).toContain("Native DoP");
+  });
+
+  it("says what Auto does for a known DSD DAC and for an unknown one", async () => {
+    const known = await mountSettings(null, {
+      supported_rates: [176400],
+      exclusive_available: true,
+      device: "FIIO K15 ",
+      known_dsd_device: true,
+      user_confirmed: false,
+      auto_resolves_to: "native",
+      capabilities: {
+        name: "FIIO K15 ",
+        transport: "usb",
+        external_dac: true,
+        sample_rates: [44100, 48000, 88200, 96000, 176400],
+        bit_depths: [16, 32],
+        float32: false,
+        dop_rates: [176400],
+        exclusive_available: true,
+      },
+    });
+    const note = known.get('[data-testid="dsd-auto-note"]').text();
+    expect(note).toContain("FIIO K15");
+    expect(note).toContain("known DSD DAC");
+    expect(known.get('[data-testid="dsd-rate-probe"]').text()).toContain("DSD64 ✓");
+    expect(known.get('[data-testid="dsd-rate-probe"]').text()).toContain("DSD128 ✗");
+
+    const unknown = await mountSettings(null, {
+      supported_rates: [176400],
+      exclusive_available: true,
+      device: "Some USB DAC",
+      known_dsd_device: false,
+      user_confirmed: false,
+      auto_resolves_to: "convert",
+    });
+    expect(unknown.get('[data-testid="dsd-auto-note"]').text()).toContain("converted to FLAC");
+  });
+
+  it("lets the user confirm an unlisted DAC decodes DoP", async () => {
+    const w = await mountSettings(null, {
+      supported_rates: [176400],
+      exclusive_available: true,
+      device: "Some USB DAC",
+      known_dsd_device: false,
+      user_confirmed: false,
+      auto_resolves_to: "convert",
+    });
+    await w.get('[data-testid="dsd-device-confirm"] [role="switch"]').trigger("click");
+    await settle();
+    expect(tauri.callsTo("set_dsd_device_confirmed")).toEqual([{ confirmed: true }]);
+  });
+
+  it("warns that a global stream format does not apply to natively-played DSD", async () => {
+    const w = await mountSettings();
+    useSettingsStore().dsdStory = "native";
+    useSettingsStore().globalFormat = "passthrough";
+    await settle();
+    expect(w.find('[data-testid="dsd-format-ignored"]').exists()).toBe(true);
   });
 });
 
@@ -161,24 +221,29 @@ describe("Settings: bit-perfect output", () => {
     expect(t).toContain("EQ, loudness, volume and format conversion are bypassed");
   });
 
-  it("is off by default and offers Off / MQA files only / All tracks", async () => {
+  it("follows the quality mode by default and offers Auto / Off / MQA files only / All tracks", async () => {
     const w = await mountSettings();
-    expect(select(w, "Bit-perfect output").textContent).toContain("Off");
+    expect(select(w, "Bit-perfect output").textContent).toContain("Auto");
     await openSelect(select(w, "Bit-perfect output"));
-    expect(optionLabels()).toEqual(["Off (shared output; EQ and volume work)", "MQA files only", "All tracks"]);
+    expect(optionLabels()).toEqual([
+      "Auto (follows Sound quality)",
+      "Off (shared output; EQ and volume work)",
+      "MQA files only",
+      "All tracks",
+    ]);
   });
 
   it("saves the chosen mode through the core", async () => {
     const w = await mountSettings();
     await openSelect(select(w, "Bit-perfect output"));
-    pick(options()[1]);
+    pick(options()[2]);
     await settle();
     expect(tauri.callsTo("set_bit_perfect")).toEqual([{ mode: "mqa" }]);
     expect(useSettingsStore().bitPerfect).toBe("mqa");
     expect(select(w, "Bit-perfect output").textContent).toContain("MQA files only");
 
     await openSelect(select(w, "Bit-perfect output"));
-    pick(options()[2]);
+    pick(options()[3]);
     await settle();
     expect(tauri.callsTo("set_bit_perfect").at(-1)).toEqual({ mode: "all" });
   });
@@ -193,7 +258,7 @@ describe("Settings: bit-perfect output", () => {
     expect(notes).toContain("Other apps can't play");
     expect(notes).toContain("one at a time");
     expect(notes).toContain("plays normally instead");
-    useSettingsStore().bitPerfect = "off";
+    useSettingsStore().bitPerfect = "auto";
     await settle();
     expect(w.find('[data-testid="bit-perfect-notes"]').exists()).toBe(false);
   });
@@ -210,6 +275,38 @@ describe("Settings: bit-perfect output", () => {
     const sec = wrapper.findAll("section").find((x) => x.find("h3").text() === "Bit-perfect output")!;
     expect(sec.text()).toContain("macOS-only");
     expect(sec.find('[role="combobox"]').exists()).toBe(false);
+  });
+});
+
+describe("Settings: section order", () => {
+  it("follows the agreed sequence", async () => {
+    const w = await mountSettings();
+    const titles = w
+      .findAll('[data-testid="signal-path"] h3, section > h3, summary, h3')
+      .map((e) => e.text().replace(/[●]/g, "").replace(/\s+/g, " ").trim());
+    const wanted = [
+      "Media file",
+      "Output device",
+      "Server",
+      "Audio output",
+      "Sound quality",
+      "Parametric EQ",
+      "Loudness normalization",
+      "Advanced",
+      "Analog Warmth (Experimental)",
+      "Library",
+      "Album art cache",
+    ];
+    const seen = wanted.map((t) => titles.findIndex((x) => x.startsWith(t)));
+    expect(seen.filter((i) => i < 0), "every section is present (album art needs Tauri)").toEqual(
+      seen.filter((i, n) => i < 0 && wanted[n] === "Album art cache"),
+    );
+    const present = seen.filter((i) => i >= 0);
+    expect(present).toEqual([...present].sort((a, b) => a - b));
+    // Listening suggestions is part of the Analog section, so it follows it.
+    const analog = titles.findIndex((x) => x.startsWith("Analog Warmth"));
+    const library = titles.findIndex((x) => x.startsWith("Library"));
+    expect(analog).toBeLessThan(library);
   });
 });
 
@@ -248,12 +345,31 @@ describe("Settings: server URL", () => {
   });
 
   it("checks the connection on demand", async () => {
+    const w = await mountSettings(); // fetch is offline in tests, so the on-open check fails
+    expect(w.get('[data-testid="connection-status"]').text()).toContain("Server unreachable");
     mockFetch({ "/api/health": { status: "ok" } });
-    const w = await mountSettings();
-    expect(w.get('[data-testid="connection-status"]').text()).toContain("not checked");
     await w.get('button[aria-label="Check connection"]').trigger("click");
     await settle();
     expect(w.get('[data-testid="connection-status"]').text()).toContain("Server reachable");
+  });
+
+  it("shows a green light next to the Server title when connected and a red one when offline", async () => {
+    mockFetch({ "/api/health": { status: "ok" } });
+    const on = await mountSettings();
+    const light = () => on.get('[data-testid="server-light"]');
+    expect(light().attributes("data-state")).toBe("connected");
+    expect(light().attributes("aria-label")).toBe("Connected");
+    expect(light().classes()).toContain("text-ok");
+    expect(on.findAll("section").find((x) => x.find("h3").text().startsWith("Server"))!.find("h3").text()).toContain("●");
+
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("offline");
+    });
+    const off = await mountSettings();
+    const dead = off.get('[data-testid="server-light"]');
+    expect(dead.attributes("data-state")).toBe("offline");
+    expect(dead.attributes("aria-label")).toBe("Offline");
+    expect(dead.classes()).toContain("text-danger");
   });
 });
 
@@ -310,11 +426,12 @@ describe("Settings: EQ and loudness", () => {
 
   it("toggles loudness normalisation and validates the target", async () => {
     const w = await mountSettings();
-    await sw(w).at(-1)!.trigger("click");
+    const loudness = w.findAll("section").find((x) => x.find("h3").text() === "Loudness normalization")!;
+    await loudness.get('[role="switch"]').trigger("click");
     await settle();
     expect(tauri.callsTo("set_loudness_enabled")).toEqual([{ enabled: true }]);
 
-    const target = w.findAll('input[type="number"]').at(-1)!.element as HTMLInputElement;
+    const target = loudness.get('input[type="number"]').element as HTMLInputElement;
     await typeInto(target, "-23"); // input event updates the model, change commits it
     target.dispatchEvent(new Event("change", { bubbles: true }));
     await settle();

@@ -5,7 +5,8 @@ import { useDspStore } from "../stores/dsp";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
-import { formatBadge, isPlayable, mqaLabel, mqaTitle, trackTitle, unplayableReason } from "../types";
+import { audioPathLabel } from "../signalPath";
+import { isPlayable, mqaLabel, mqaTitle, trackTitle, unplayableReason } from "../types";
 import StateMessage from "../ui/StateMessage.vue";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
@@ -20,26 +21,8 @@ const dsp = useDspStore();
 
 const track = computed(() => player.currentTrack);
 
-// --- composed audio-path badge ---
-/** e.g. "DSF DSD64 → DoP → Exclusive (bit-perfect)" or
- *  "FLAC 44.1k/16 → FLAC transcode → PCM shared · EQ on". */
-const audioPath = computed(() => {
-  const t = track.value;
-  if (!t) return "Nothing playing";
-  const src = formatBadge(t);
-  const stream = player.activeFormat ? player.activeFormat.toUpperCase() : "AUTO";
-  const out = player.isDopExclusive
-    ? "Exclusive DoP · bit-perfect"
-    : player.isBitPerfect
-      ? "Bit-perfect · exclusive"
-      : "PCM shared";
-  const dspBits: string[] = [];
-  if (!player.isExclusive) {
-    if (dsp.eqEnabled && dsp.activeBands.length > 0) dspBits.push(`EQ ${dsp.activeBands.length} bands`);
-    if (dsp.loudnessEnabled) dspBits.push(`Loudness ${dsp.loudnessTarget} LUFS`);
-  }
-  return `${src} → ${stream} → ${out}${dspBits.length ? ` · ${dspBits.join(" · ")}` : ""}`;
-});
+// --- composed audio-path badge (shared with the Settings signal-path panel) ---
+const audioPath = computed(() => audioPathLabel(track.value, player, dsp));
 
 const artworkHash = computed(() => {
   const t = track.value;

@@ -30,6 +30,37 @@ struct Biquad {
     a2: f64,
 }
 
+impl Biquad {
+    /// |H(e^jw)| at angular frequency `w` (a0 is 1).
+    fn magnitude(&self, w: f64) -> f64 {
+        let (c1, s1) = (w.cos(), w.sin());
+        let (c2, s2) = ((2.0 * w).cos(), (2.0 * w).sin());
+        let nr = self.b0 + self.b1 * c1 + self.b2 * c2;
+        let ni = -(self.b1 * s1 + self.b2 * s2);
+        let dr = 1.0 + self.a1 * c1 + self.a2 * c2;
+        let di = -(self.a1 * s1 + self.a2 * s2);
+        ((nr * nr + ni * ni) / (dr * dr + di * di)).sqrt()
+    }
+}
+
+/// The largest boost (dB, never below 0) the band set applies at any
+/// frequency: the worst case for headroom. Sampled on a log grid.
+pub fn max_boost_db(bands: &[EqBand], sample_rate: u32) -> f32 {
+    if bands.is_empty() || sample_rate == 0 {
+        return 0.0;
+    }
+    let designed: Vec<Biquad> = bands.iter().map(|b| design_band(b, sample_rate)).collect();
+    let top = (sample_rate as f64 * NYQUIST_FRACTION as f64).max(21.0);
+    let mut worst = 1.0f64;
+    for i in 0..512 {
+        let f = 20.0 * (top / 20.0).powf(i as f64 / 511.0);
+        let w = 2.0 * std::f64::consts::PI * f / sample_rate as f64;
+        let mag: f64 = designed.iter().map(|b| b.magnitude(w)).product();
+        worst = worst.max(mag);
+    }
+    (20.0 * worst.log10()) as f32
+}
+
 /// Direct Form II transposed state, one per channel.
 #[derive(Debug, Clone, Copy, Default)]
 struct BiquadState {
@@ -351,6 +382,15 @@ impl ParametricEq {
         Ok(())
     }
 
+    /// Worst-case boost of the live bands (0 when the EQ is off or flat).
+    pub fn max_boost_db(&self) -> f32 {
+        if self.enabled {
+            max_boost_db(&self.bands, self.sample_rate)
+        } else {
+            0.0
+        }
+    }
+
     pub fn bands(&self) -> &[EqBand] {
         &self.bands
     }
@@ -458,6 +498,26 @@ impl ParametricEq {
 /// Default target: −14 LUFS (the common streaming target).
 pub const DEFAULT_LOUDNESS_TARGET: f32 = -14.0;
 /// Hard gain cap; exceeding it logs a warning instead of pumping.
+/// Where the headroom guard starts to bend the signal (about -0.9 dBFS).
+pub const GUARD_THRESHOLD: f32 = 0.9;
+
+/// Headroom guard for the shared (DSP) path. EQ boosts and loudness gain
+/// (up to +12 dB) can push peaks past full scale, and the output device
+/// hard-clips anything over 1.0, which is harsh on loud transients. This
+/// bends only what rises above [`GUARD_THRESHOLD`] along a smooth curve
+/// that approaches, and never exceeds, 1.0. Everything below the threshold
+/// is untouched, so ordinary material passes bit-for-bit.
+pub fn headroom_guard(samples: &mut [f32]) {
+    const T: f32 = GUARD_THRESHOLD;
+    for s in samples.iter_mut() {
+        let a = s.abs();
+        if a > T {
+            let over = (a - T) / (1.0 - T);
+            *s = s.signum() * (T + (1.0 - T) * over.tanh());
+        }
+    }
+}
+
 pub const MAX_LOUDNESS_GAIN_DB: f32 = 12.0;
 pub const MIN_LOUDNESS_GAIN_DB: f32 = -24.0;
 
@@ -694,6 +754,23 @@ pub struct LoudnessNorm {
     enabled: bool,
     target_lufs: f32,
     cache: HashMap<(i64, StreamFormat), f32>,
+    /// (integrated LUFS, sample peak) per track, so the gain can be re-planned
+    /// when the EQ changes without another pre-scan.
+    levels: HashMap<(i64, StreamFormat), (f32, f32)>,
+}
+
+/// Headroom kept below full scale when planning gain (dB).
+pub const HEADROOM_MARGIN_DB: f32 = 1.0;
+
+/// The loudness gain (dB) that reaches the target *without* the track's peak,
+/// after `eq_boost_db` of EQ boost, passing full scale. The output device
+/// hard-clips anything over 1.0, which is harsh; a quieter result beats that.
+pub fn plan_gain_db(wanted_db: f32, peak: f32, eq_boost_db: f32) -> f32 {
+    if peak <= 1e-6 {
+        return wanted_db;
+    }
+    let room = -20.0 * peak.log10() - eq_boost_db - HEADROOM_MARGIN_DB;
+    wanted_db.min(room).max(MIN_LOUDNESS_GAIN_DB)
 }
 
 impl LoudnessNorm {
@@ -702,6 +779,7 @@ impl LoudnessNorm {
             enabled: false,
             target_lufs,
             cache: HashMap::new(),
+            levels: HashMap::new(),
         }
     }
 
@@ -729,6 +807,39 @@ impl LoudnessNorm {
 
     /// Gain in dB for this track: cached, else `scan()` once and cache.
     /// A failed or silent scan yields 0 dB (never blocks playback).
+    /// The gain for a track, planned against its real peak and the EQ's
+    /// worst-case boost so the result cannot clip. `scan` runs at most once
+    /// per (track, format); the levels are cached, the gain is re-planned.
+    pub fn gain_for_levels(
+        &mut self,
+        track_id: i64,
+        fmt: StreamFormat,
+        eq_boost_db: f32,
+        scan: impl FnOnce() -> Result<Option<(f32, f32)>, MusicError>,
+    ) -> f32 {
+        let key = (track_id, fmt);
+        let (lufs, peak) = match self.levels.get(&key) {
+            Some(&l) => l,
+            None => match scan() {
+                Ok(Some(l)) => {
+                    self.levels.insert(key, l);
+                    l
+                }
+                Ok(None) => return 0.0, // silence: nothing to normalize
+                Err(e) => {
+                    tracing::warn!(track_id, "loudness pre-scan failed ({e}); playing unnormalized");
+                    return 0.0;
+                }
+            },
+        };
+        let wanted = (self.target_lufs - lufs).clamp(MIN_LOUDNESS_GAIN_DB, MAX_LOUDNESS_GAIN_DB);
+        let planned = plan_gain_db(wanted, peak, eq_boost_db);
+        if planned < wanted {
+            tracing::info!(track_id, wanted, planned, "loudness gain reduced to keep the peak below full scale");
+        }
+        planned
+    }
+
     pub fn gain_for(
         &mut self,
         track_id: i64,
@@ -774,6 +885,17 @@ pub fn scan_track_lufs(
     track_id: i64,
     fmt: StreamFormat,
 ) -> Result<Option<f32>, MusicError> {
+    Ok(scan_track_levels(transport, track_id, fmt)?.map(|(lufs, _peak)| lufs))
+}
+
+/// Like [`scan_track_lufs`], but also returns the track's sample peak
+/// (linear, 1.0 = full scale) from the same pass, so the gain can be planned
+/// to keep that peak, after any EQ boost, below full scale.
+pub fn scan_track_levels(
+    transport: &dyn Transport,
+    track_id: i64,
+    fmt: StreamFormat,
+) -> Result<Option<(f32, f32)>, MusicError> {
     let opts = StreamOptions {
         format: Some(fmt),
         ..Default::default()
@@ -798,6 +920,7 @@ pub fn scan_track_lufs(
     let mut next_block: u64 = 0;
     let mut energies: Vec<f64> = Vec::new();
     let mut pcm = vec![0.0f32; 4096 * channels];
+    let mut peak = 0.0f32;
 
     loop {
         let n = decoder.decode_interleaved(&mut pcm)?;
@@ -805,6 +928,7 @@ pub fn scan_track_lufs(
             break;
         }
         for (i, smp) in pcm[..n * channels].iter().enumerate() {
+            peak = peak.max(smp.abs());
             let ch = i % channels;
             let y = biquad_step(&pre, &mut pre_state[ch], *smp);
             window.push(biquad_step(&rlb, &mut rlb_state[ch], y));
@@ -834,7 +958,7 @@ pub fn scan_track_lufs(
         energies.push(block_energy(&block, channels));
         next_block += hop_frames as u64;
     }
-    Ok(gate_integrated(&energies))
+    Ok(gate_integrated(&energies).map(|lufs| (lufs, peak)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,5 +1486,85 @@ mod tests {
         let m = measured.expect("not silence");
         // 16-bit quantization + decode round-trip: agree within 0.2 LU.
         assert!((m - direct).abs() < 0.2, "scan {m} vs direct {direct}");
+    }
+
+    #[test]
+    fn headroom_guard_leaves_normal_material_bit_exact() {
+        let mut v: Vec<f32> = (0..1000).map(|i| ((i as f32) * 0.37).sin() * GUARD_THRESHOLD).collect();
+        let before = v.clone();
+        headroom_guard(&mut v);
+        assert_eq!(v, before, "nothing at or below the threshold changes");
+    }
+
+    #[test]
+    fn headroom_guard_never_exceeds_full_scale_and_keeps_order() {
+        let mut prev = 0.0f32;
+        for i in 0..=4000 {
+            let x = i as f32 * 0.001; // 0.0 ..= 4.0
+            let mut a = [x, -x];
+            headroom_guard(&mut a);
+            assert!(a[0] <= 1.0 && a[1] >= -1.0, "{x} -> {}", a[0]);
+            assert_eq!(a[0], -a[1], "symmetric");
+            assert!(a[0] >= prev, "monotonic at {x}");
+            prev = a[0];
+        }
+    }
+
+    #[test]
+    fn headroom_guard_is_continuous_at_the_threshold() {
+        let mut a = [GUARD_THRESHOLD + 1e-4];
+        headroom_guard(&mut a);
+        assert!((a[0] - (GUARD_THRESHOLD + 1e-4)).abs() < 2e-4, "no step where it engages");
+    }
+
+    #[test]
+    fn headroom_guard_tames_the_measured_overs() {
+        // A 1.37 FS peak (track 2 of the reported album) lands just under 1.0.
+        let mut a = [1.37f32, -1.06];
+        headroom_guard(&mut a);
+        assert!(a[0] > 0.99 && a[0] <= 1.0, "{}", a[0]);
+        assert!(a[1] < -0.95 && a[1] >= -1.0, "{}", a[1]);
+    }
+
+    #[test]
+    fn max_boost_of_no_bands_or_cuts_is_zero() {
+        assert_eq!(max_boost_db(&[], 44_100), 0.0);
+        let cut = EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db: -6.0, q: 1.0 };
+        assert_eq!(max_boost_db(&[cut], 44_100), 0.0, "a cut never raises the peak");
+    }
+
+    #[test]
+    fn max_boost_finds_the_peak_of_a_band() {
+        let b = EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db: 6.0, q: 1.0 };
+        let m = max_boost_db(&[b], 44_100);
+        assert!((m - 6.0).abs() < 0.2, "a +6 dB peaking band boosts about 6 dB, got {m}");
+    }
+
+    #[test]
+    fn max_boost_of_several_bands_is_the_true_worst_case_not_their_sum() {
+        // The reported EQ: low shelf +2.5, peaks +1.5 and +1.5, high shelf +2.
+        let bands = [
+            EqBand { band_type: EqBandType::LowShelf, freq: 100.0, gain_db: 2.5, q: 0.7 },
+            EqBand { band_type: EqBandType::Peaking, freq: 250.0, gain_db: 1.5, q: 1.0 },
+            EqBand { band_type: EqBandType::Peaking, freq: 3000.0, gain_db: 1.5, q: 1.0 },
+            EqBand { band_type: EqBandType::HighShelf, freq: 10_000.0, gain_db: 2.0, q: 0.7 },
+        ];
+        let m = max_boost_db(&bands, 44_100);
+        assert!(m > 2.0 && m < 4.0, "somewhere near the strongest band, well under the sum of all four: {m}");
+    }
+
+    #[test]
+    fn planned_gain_keeps_the_peak_below_full_scale() {
+        // Wants +5.3 dB, but the track peaks at 0.70 FS (-3.1 dB) and the EQ adds 3.4 dB.
+        let g = plan_gain_db(5.3, 0.70, 3.4);
+        let out_peak = 0.70 * 10f32.powf((g + 3.4) / 20.0);
+        assert!(out_peak <= 10f32.powf(-HEADROOM_MARGIN_DB / 20.0) + 1e-4, "{out_peak}");
+        assert!(g < 5.3, "reduced from what the target asked for");
+    }
+
+    #[test]
+    fn planned_gain_is_untouched_when_there_is_room() {
+        assert_eq!(plan_gain_db(2.0, 0.3, 0.0), 2.0);
+        assert_eq!(plan_gain_db(-4.0, 0.9, 3.0), -4.0, "attenuation is never held back");
     }
 }

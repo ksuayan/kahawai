@@ -75,9 +75,12 @@ export type PlayerStatus = "stopped" | "loading" | "playing" | "paused";
 export type OutputPathName = "pcm-shared" | "dop-exclusive" | "pcm-exclusive";
 
 /** When to play through the exclusive, untouched bit-perfect path. */
-export type BitPerfectMode = "off" | "mqa" | "all";
+export type BitPerfectMode = "auto" | "off" | "mqa" | "all";
 
-export const BIT_PERFECT_MODES: BitPerfectMode[] = ["off", "mqa", "all"];
+/** Top-level sound-quality mode. Auto settings in Advanced follow it. */
+export type QualityMode = "best" | "compatible";
+
+export const BIT_PERFECT_MODES: BitPerfectMode[] = ["auto", "off", "mqa", "all"];
 
 export interface PlayerState {
   status: PlayerStatus;
@@ -100,6 +103,10 @@ export interface PlayerState {
   output_path: OutputPathName;
   volume: number;
   error: string | null;
+  /** Non-fatal note for this track, e.g. why DSD played as FLAC. */
+  notice?: string | null;
+  /** Your own processing (EQ, Loudness, Analog, Volume) that exclusive output would bypass right now. */
+  exclusive_blockers?: string[];
   /** Queue repeat mode. */
   repeat: "off" | "all" | "one";
   /** Queue shuffle on/off. */
@@ -556,11 +563,46 @@ export interface OutputDevice {
   is_default: boolean;
 }
 
+export interface DsdRateSupport {
+  name: "DSD64" | "DSD128" | "DSD256";
+  /** PCM rate (Hz) the DoP stream for this DSD rate runs at. */
+  dop_rate: number;
+  supported: boolean;
+}
+
+/** What the selected output device reports it can carry. */
+export interface DeviceCapabilities {
+  name: string;
+  /** "usb" | "thunderbolt" | "firewire" | "built-in" | "bluetooth" | "hdmi" | "airplay" | "virtual" | "other" | "unknown". */
+  transport: string;
+  /** External DAC-class connection: Best quality may take it exclusively. */
+  external_dac: boolean;
+  sample_rates: number[];
+  /** Integer bit depths offered (a 32 usually carries 24 valid bits). */
+  bit_depths: number[];
+  float32: boolean;
+  /** DoP PCM rates (Hz) it can carry: 176400 = DSD64, 352800 = DSD128, 705600 = DSD256. */
+  dop_rates: number[];
+  exclusive_available: boolean;
+}
+
 export interface DopStatus {
-  /** DoP PCM rates (Hz) the default output device accepts right now. */
+  /** DoP PCM rates (Hz) the output device accepts right now. */
   supported_rates: number[];
+  /** The same, named by the DSD rate they carry. */
+  dsd_rates?: DsdRateSupport[];
   /** True on macOS: the exclusive hog-mode path exists. */
   exclusive_available: boolean;
+  /** The device output would use (system default resolved to its name). */
+  device?: string | null;
+  /** Built in, or confirmed by the user, as decoding DoP. */
+  known_dsd_device?: boolean;
+  /** The user's own confirmation is what makes it known. */
+  user_confirmed?: boolean;
+  /** What "Auto" DSD handling resolves to right now. */
+  auto_resolves_to?: "native" | "convert";
+  /** Everything the device reports it can carry. */
+  capabilities?: DeviceCapabilities | null;
 }
 
 /**
@@ -663,9 +705,10 @@ export function isJobActive(j: JobInfo): boolean {
 }
 
 /** DSD handling preference (Settings → DSD). Persisted by the Rust core. */
-export type DsdStory = "native" | "convert";
+export type DsdStory = "auto" | "native" | "convert";
 
 export interface PlaybackPrefs {
+  quality_mode?: QualityMode;
   dsd_story: DsdStory;
   global_format: StreamFormat | null;
   bit_perfect?: BitPerfectMode;

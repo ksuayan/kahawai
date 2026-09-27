@@ -9,9 +9,12 @@
 //! 2. **Nominal sample rate** set to the exact DoP rate (176.4 / 352.8 /
 //!    705.6 kHz) and *verified by readback* — a device that silently
 //!    stays at 44.1 kHz would play garbage.
-//! 3. **Stream physical format** forced to 24-bit packed signed-integer
-//!    PCM and verified by readback — CoreAudio HAL streams default to
-//!    Float32, which would destroy the DoP marker encoding.
+//! 3. **Stream physical format** forced to signed-integer PCM and verified
+//!    by readback — CoreAudio HAL streams default to Float32, which would
+//!    destroy the DoP marker encoding. Packed 24-bit is preferred; DACs
+//!    that carry their 24-bit slot as 32 bits (XMOS XU316 firmware such as
+//!    the FiiO K15 offers only 16 and 32) get a left-aligned 32-bit
+//!    container instead: the same 24 DoP bits in the top of each word.
 //!
 //! If any step fails, `open()` returns `Err` and the device is left as it
 //! was (hog released, rate restored): the engine's capability query
@@ -29,7 +32,7 @@
 
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -234,27 +237,149 @@ fn output_streams(device: AudioObjectID) -> Result<Vec<AudioStreamID>, MusicErro
     Ok(ids)
 }
 
-fn dop_stream_format(rate: u32, channels: u16) -> AudioStreamBasicDescription {
+/// How one 24-bit DoP/PCM sample is carried on the device's stream. The
+/// engine and the ring always hold packed 24-bit; the render proc expands
+/// to the device's container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Container {
+    /// 3 bytes per sample, as the server packs them.
+    Packed24,
+    /// 4 bytes per sample, 24-bit value left-aligned (low byte zero):
+    /// how UAC devices with a 4-byte subslot appear in CoreAudio.
+    Wide32,
+}
+
+impl Container {
+    const PREFERENCE: [Container; 2] = [Container::Packed24, Container::Wide32];
+
+    fn bytes_per_sample(self) -> usize {
+        match self {
+            Container::Packed24 => 3,
+            Container::Wide32 => 4,
+        }
+    }
+
+    fn bits(self) -> u32 {
+        self.bytes_per_sample() as u32 * 8
+    }
+}
+
+/// How the IO callback's buffers are laid out: the stream's VIRTUAL format,
+/// which can differ from the physical format we set for the hardware. On the
+/// FiiO K15 (XMOS XU316) it is fixed at Float32 and the driver converts to the
+/// 32-bit integer the DAC takes; writing integers there would be read as floats
+/// (loud noise). A 24-bit sample scaled by exactly 2^-23 is exact in Float32 and
+/// converts back to the identical integer, so this stays bit-perfect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IoLayout {
+    /// 3 bytes per sample, as the ring holds them.
+    Packed24,
+    /// 4 bytes per sample, 24-bit value left-aligned in a signed 32-bit integer.
+    Int32,
+    /// 4 bytes per sample, Float32 in [-1, 1): the 24-bit value divided by 2^23.
+    Float32,
+}
+
+/// Decide the IO layout from the stream's virtual format read back after the
+/// physical format was set. `None` when it is neither our integer container
+/// nor interleaved Float32 at the right rate and channel count.
+fn classify_virtual(
+    virt: &AudioStreamBasicDescription,
+    rate: u32,
+    channels: u16,
+    container: Container,
+) -> Option<IoLayout> {
+    if format_matches(virt, rate, channels, container) {
+        return Some(match container {
+            Container::Packed24 => IoLayout::Packed24,
+            Container::Wide32 => IoLayout::Int32,
+        });
+    }
+    let float32 = virt.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        && virt.mBitsPerChannel == 32
+        && virt.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
+        && virt.mChannelsPerFrame == channels as u32
+        && virt.mBytesPerFrame == channels as u32 * 4
+        && (virt.mSampleRate - rate as f64).abs() < 1.0;
+    float32.then_some(IoLayout::Float32)
+}
+
+fn dop_stream_format(
+    rate: u32,
+    channels: u16,
+    container: Container,
+) -> AudioStreamBasicDescription {
+    let bps = container.bytes_per_sample() as u32;
     AudioStreamBasicDescription {
         mSampleRate: rate as f64,
         mFormatID: kAudioFormatLinearPCM,
         // Packed signed-integer, native (little) endian: the DoP bytes
         // land on the wire exactly as the server packed them.
         mFormatFlags: kAudioFormatFlagIsPacked | kAudioFormatFlagIsSignedInteger,
-        mBytesPerPacket: channels as u32 * 3,
+        mBytesPerPacket: channels as u32 * bps,
         mFramesPerPacket: 1,
-        mBytesPerFrame: channels as u32 * 3,
+        mBytesPerFrame: channels as u32 * bps,
         mChannelsPerFrame: channels as u32,
-        mBitsPerChannel: 24,
+        mBitsPerChannel: container.bits(),
         mReserved: 0,
     }
 }
 
-fn set_stream_format(
+/// Integer physical formats a stream offers at `rate`, as containers we
+/// can drive. Capability query only.
+fn offered_containers(device: AudioObjectID, rate: u32, channels: u16) -> Vec<Container> {
+    let Ok(streams) = output_streams(device) else {
+        return Vec::new();
+    };
+    let Some(stream) = streams.first().copied() else {
+        return Vec::new();
+    };
+    let addr = prop_addr(kAudioStreamPropertyAvailablePhysicalFormats);
+    let mut size: u32 = 0;
+    if unsafe { AudioObjectGetPropertyDataSize(stream, &addr, 0, ptr::null(), &mut size) } != NO_ERR
+    {
+        return Vec::new();
+    }
+    let n = size as usize / std::mem::size_of::<AudioStreamRangedDescription>();
+    let mut fmts: Vec<AudioStreamRangedDescription> = Vec::with_capacity(n);
+    let mut size2 = size;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            stream,
+            &addr,
+            0,
+            ptr::null(),
+            &mut size2,
+            fmts.as_mut_ptr() as *mut c_void,
+        )
+    };
+    if status != NO_ERR {
+        return Vec::new();
+    }
+    unsafe { fmts.set_len((size2 as usize / std::mem::size_of::<AudioStreamRangedDescription>()).min(n)) };
+    Container::PREFERENCE
+        .into_iter()
+        .filter(|c| {
+            fmts.iter().any(|f| {
+                let a = &f.mFormat;
+                a.mFormatID == kAudioFormatLinearPCM
+                    && a.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0
+                    && a.mFormatFlags & kAudioFormatFlagIsFloat == 0
+                    && a.mBitsPerChannel == c.bits()
+                    && a.mChannelsPerFrame == channels as u32
+                    && (a.mSampleRate - rate as f64).abs() < 1.0
+            })
+        })
+        .collect()
+}
+
+fn set_format_prop(
     stream: AudioStreamID,
+    selector: u32,
     asbd: &AudioStreamBasicDescription,
+    what: &str,
 ) -> Result<(), MusicError> {
-    let addr = prop_addr(kAudioStreamPropertyPhysicalFormat);
+    let addr = prop_addr(selector);
     os(
         unsafe {
             AudioObjectSetPropertyData(
@@ -266,12 +391,16 @@ fn set_stream_format(
                 asbd as *const _ as *const c_void,
             )
         },
-        "set stream physical format",
+        what,
     )
 }
 
-fn get_stream_format(stream: AudioStreamID) -> Result<AudioStreamBasicDescription, MusicError> {
-    let addr = prop_addr(kAudioStreamPropertyPhysicalFormat);
+fn get_format_prop(
+    stream: AudioStreamID,
+    selector: u32,
+    what: &str,
+) -> Result<AudioStreamBasicDescription, MusicError> {
+    let addr = prop_addr(selector);
     let mut asbd: AudioStreamBasicDescription = AudioStreamBasicDescription {
         mSampleRate: 0.0,
         mFormatID: 0,
@@ -295,9 +424,42 @@ fn get_stream_format(stream: AudioStreamID) -> Result<AudioStreamBasicDescriptio
                 &mut asbd as *mut _ as *mut c_void,
             )
         },
-        "get stream physical format",
+        what,
     )?;
     Ok(asbd)
+}
+
+/// What the hardware is sent.
+fn set_stream_format(stream: AudioStreamID, asbd: &AudioStreamBasicDescription) -> Result<(), MusicError> {
+    set_format_prop(stream, kAudioStreamPropertyPhysicalFormat, asbd, "set stream physical format")
+}
+
+fn get_stream_format(stream: AudioStreamID) -> Result<AudioStreamBasicDescription, MusicError> {
+    get_format_prop(stream, kAudioStreamPropertyPhysicalFormat, "get stream physical format")
+}
+
+/// What the IO callback's buffers actually contain. Independent of the
+/// physical format: if it is left at Float32 while we write integers, the
+/// device reads our samples as floats, which is loud garbage. It does not
+/// always follow the physical format (it only moves when the physical format
+/// *changes*), so it must be set and verified explicitly.
+fn set_virtual_format(stream: AudioStreamID, asbd: &AudioStreamBasicDescription) -> Result<(), MusicError> {
+    set_format_prop(stream, kAudioStreamPropertyVirtualFormat, asbd, "set stream virtual format")
+}
+
+fn get_virtual_format(stream: AudioStreamID) -> Result<AudioStreamBasicDescription, MusicError> {
+    get_format_prop(stream, kAudioStreamPropertyVirtualFormat, "get stream virtual format")
+}
+
+/// Does this stream format match what we asked for (an integer container of
+/// the right width, at the right rate and channel count)?
+fn format_matches(back: &AudioStreamBasicDescription, rate: u32, channels: u16, container: Container) -> bool {
+    (back.mSampleRate - rate as f64).abs() < 1.0
+        && back.mBitsPerChannel == container.bits()
+        && back.mChannelsPerFrame == channels as u32
+        && back.mBytesPerFrame == channels as u32 * container.bytes_per_sample() as u32
+        && back.mFormatFlags & kAudioFormatFlagIsFloat == 0
+        && back.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0
 }
 
 /// State owned by the IO proc: the render thread only touches the
@@ -306,6 +468,12 @@ struct RenderState {
     cons: HeapCons<u8>,
     underruns: Arc<AtomicU64>,
     channels: u16,
+    /// How the IO buffers are laid out (the ring is always packed 24).
+    layout: IoLayout,
+    /// Set by the engine thread to drop whatever is still queued (a seek or
+    /// skip on a session that stays open); the render thread clears it once
+    /// the ring is emptied, which is the engine's cue that it is safe to write.
+    flush: Arc<AtomicBool>,
     /// Marker for the next underrun-silence frame (DoP only).
     marker: u8,
     /// What an underrun sounds like: DoP needs valid marker frames, plain
@@ -368,22 +536,77 @@ unsafe extern "C" fn dop_io_proc(
 /// Fill `bytes` with whole DoP frames from the ring; underruns become
 /// valid DoP silence frames so the marker stream never desyncs.
 fn render_into(state: &mut RenderState, bytes: &mut [u8]) {
-    let frame_bytes = state.channels as usize * 3;
-    if frame_bytes == 0 {
+    let ring_frame = state.channels as usize * 3;
+    if ring_frame == 0 {
         return;
     }
-    let frames = bytes.len() / frame_bytes;
-    for f in 0..frames {
-        let dst = &mut bytes[f * frame_bytes..(f + 1) * frame_bytes];
-        if state.cons.pop_slice(dst) == frame_bytes {
-            continue;
-        }
-        // Underrun: one frame of the stream's own kind of silence (DoP
-        // keeps its markers alternating so the DAC never loses sync; PCM
-        // gets zeros).
-        state.underruns.fetch_add(1, Ordering::Relaxed);
-        fill_underrun_frame(dst, state.channels, state.silence, &mut state.marker);
+    if state.flush.load(Ordering::Acquire) {
+        state.cons.clear();
+        state.flush.store(false, Ordering::Release);
     }
+    match state.layout {
+        IoLayout::Packed24 => {
+            let frames = bytes.len() / ring_frame;
+            for f in 0..frames {
+                let dst = &mut bytes[f * ring_frame..(f + 1) * ring_frame];
+                pop_frame(state, dst);
+            }
+        }
+        IoLayout::Int32 | IoLayout::Float32 => {
+            let out_frame = state.channels as usize * 4;
+            let float = state.layout == IoLayout::Float32;
+            let mut scratch = [0u8; 8 * 3];
+            let frames = bytes.len() / out_frame;
+            for f in 0..frames {
+                let src = &mut scratch[..ring_frame];
+                pop_frame(state, src);
+                let dst = &mut bytes[f * out_frame..(f + 1) * out_frame];
+                for ch in 0..state.channels as usize {
+                    let b = [src[ch * 3], src[ch * 3 + 1], src[ch * 3 + 2]];
+                    if float {
+                        // Sign-extend the 24-bit word, scale by 2^-23 (exact).
+                        let v = i32::from_le_bytes([b[0], b[1], b[2], if b[2] & 0x80 != 0 { 0xFF } else { 0 }]);
+                        dst[ch * 4..ch * 4 + 4].copy_from_slice(&(v as f32 / 8_388_608.0).to_le_bytes());
+                    } else {
+                        // 24-bit little-endian sample -> top three bytes of a
+                        // 32-bit little-endian word.
+                        dst[ch * 4] = 0;
+                        dst[ch * 4 + 1] = b[0];
+                        dst[ch * 4 + 2] = b[1];
+                        dst[ch * 4 + 3] = b[2];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Give a DoP frame the next marker in the alternating 0x05 / 0xFA sequence.
+/// The renderer owns the marker phase: audio frames from a new stream, and the
+/// silence frames it emits between streams, must form one unbroken
+/// alternation, or the DAC drops out of DSD mode and plays the frames as PCM
+/// (loud noise). The server's markers are the same sequence, so on a
+/// continuous stream this rewrites nothing.
+fn stamp_marker(frame: &mut [u8], channels: u16, marker: &mut u8) {
+    for ch in 0..channels as usize {
+        frame[ch * 3 + 2] = *marker;
+    }
+    *marker = if *marker == MARKER_EVEN { MARKER_ODD } else { MARKER_EVEN };
+}
+
+/// One packed-24 frame from the ring, or the stream's own silence (counted
+/// as an underrun) when the ring is short.
+fn pop_frame(state: &mut RenderState, dst: &mut [u8]) {
+    if state.cons.pop_slice(dst) == dst.len() {
+        if state.silence == Silence::Dop {
+            stamp_marker(dst, state.channels, &mut state.marker);
+        }
+        return;
+    }
+    // Underrun: DoP keeps its markers alternating so the DAC never loses
+    // sync; PCM gets zeros.
+    state.underruns.fetch_add(1, Ordering::Relaxed);
+    fill_underrun_frame(dst, state.channels, state.silence, &mut state.marker);
 }
 
 /// Every audio device the HAL knows about.
@@ -423,7 +646,7 @@ fn all_devices() -> Result<Vec<AudioObjectID>, MusicError> {
 
 /// Device name as cpal reports it (`kAudioDevicePropertyDeviceNameCFString`),
 /// so the name the UI picked from cpal's list matches here.
-fn device_name(device: AudioObjectID) -> Option<String> {
+fn device_name_of(device: AudioObjectID) -> Option<String> {
     let addr = prop_addr(kAudioDevicePropertyDeviceNameCFString);
     let mut cf: CFStringRef = ptr::null();
     let mut size = std::mem::size_of::<CFStringRef>() as u32;
@@ -458,7 +681,7 @@ fn device_name(device: AudioObjectID) -> Option<String> {
 /// First output-capable device with this name.
 fn find_output_device(name: &str) -> Option<AudioObjectID> {
     all_devices().ok()?.into_iter().find(|&d| {
-        device_name(d).as_deref() == Some(name)
+        device_name_of(d).as_deref() == Some(name)
             && output_streams(d).map(|s| !s.is_empty()).unwrap_or(false)
     })
 }
@@ -475,16 +698,143 @@ fn resolve_device(name: Option<&str>) -> Result<AudioObjectID, MusicError> {
     default_output_device()
 }
 
-/// DoP rates the given output device (`None` = system default) reports as
-/// available nominal rates.
+/// DoP rates the given output device (`None` = system default) can carry:
+/// reported as available nominal rates *and* offering an integer stream
+/// format we can drive at that rate.
 pub fn supported_dop_rates(device_name: Option<&str>) -> Result<Vec<u32>, MusicError> {
     let device = resolve_device(device_name)?;
     let avail = available_sample_rates(device)?;
     Ok(DOP_RATES
         .into_iter()
         .filter(|r| avail.iter().any(|a| (*a - *r as f64).abs() < 1.0))
+        .filter(|r| !offered_containers(device, *r, 2).is_empty())
         .collect())
 }
+
+/// How a device is connected, as a short stable name for the UI and for the
+/// "is this an external DAC" rule.
+fn transport_name(device: AudioObjectID) -> &'static str {
+    let addr = prop_addr(kAudioDevicePropertyTransportType);
+    let mut t: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(device, &addr, 0, ptr::null(), &mut size, &mut t as *mut _ as *mut c_void)
+    };
+    if status != NO_ERR {
+        return "unknown";
+    }
+    match t {
+        x if x == kAudioDeviceTransportTypeUSB => "usb",
+        x if x == kAudioDeviceTransportTypeThunderbolt => "thunderbolt",
+        x if x == kAudioDeviceTransportTypeFireWire => "firewire",
+        x if x == kAudioDeviceTransportTypeBuiltIn => "built-in",
+        x if x == kAudioDeviceTransportTypeBluetooth || x == kAudioDeviceTransportTypeBluetoothLE => "bluetooth",
+        x if x == kAudioDeviceTransportTypeHDMI || x == kAudioDeviceTransportTypeDisplayPort => "hdmi",
+        x if x == kAudioDeviceTransportTypeAirPlay => "airplay",
+        x if x == kAudioDeviceTransportTypeVirtual || x == kAudioDeviceTransportTypeAggregate => "virtual",
+        _ => "other",
+    }
+}
+
+/// External DAC-class connections: worth taking exclusive control of.
+fn is_external_transport(name: &str) -> bool {
+    matches!(name, "usb" | "thunderbolt" | "firewire")
+}
+
+/// Everything the Settings screen shows about an output device: what it is,
+/// how it is connected, and what it can carry.
+pub fn device_capabilities(device_name: Option<&str>) -> Option<crate::DeviceCapabilities> {
+    let device = resolve_device(device_name).ok()?;
+    let mut rates: Vec<u32> = available_sample_rates(device)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.round() as u32)
+        .filter(|r| *r > 0)
+        .collect();
+    rates.sort_unstable();
+    rates.dedup();
+    // Integer bit depths the first output stream offers at any rate.
+    let mut depths: Vec<u32> = Vec::new();
+    let mut float32 = false;
+    if let Some(stream) = output_streams(device).ok().and_then(|s| s.first().copied()) {
+        for f in all_physical_formats(stream) {
+            if f.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
+                float32 = true;
+            } else if !depths.contains(&f.mBitsPerChannel) {
+                depths.push(f.mBitsPerChannel);
+            }
+        }
+    }
+    depths.sort_unstable();
+    let transport = transport_name(device);
+    let dop_rates: Vec<u32> = DOP_RATES
+        .into_iter()
+        .filter(|r| rates.contains(r))
+        .filter(|r| !offered_containers(device, *r, 2).is_empty())
+        .collect();
+    Some(crate::DeviceCapabilities {
+        name: device_name_of(device).unwrap_or_default(),
+        transport,
+        external_dac: is_external_transport(transport),
+        sample_rates: rates,
+        bit_depths: depths,
+        float32,
+        dop_rates,
+        exclusive_available: true,
+    })
+}
+
+/// What the device is doing right now, read from CoreAudio (not from what
+/// the player believes): its current rate, its current stream format, and
+/// whether this process holds it exclusively. Cheap; safe to poll.
+pub fn device_live_state(device_name: Option<&str>) -> Option<crate::DeviceLiveState> {
+    let device = resolve_device(device_name).ok()?;
+    let rate = get_nominal_rate(device).ok()?;
+    let (bits, float) = output_streams(device)
+        .ok()
+        .and_then(|s| s.first().copied())
+        .and_then(|s| get_stream_format(s).ok())
+        .map(|f| (f.mBitsPerChannel, f.mFormatFlags & kAudioFormatFlagIsFloat != 0))
+        .unwrap_or((0, false));
+    let exclusive = get_hog_pid(device).map(|p| p == std::process::id() as i32).unwrap_or(false);
+    Some(crate::DeviceLiveState {
+        name: device_name_of(device).unwrap_or_default(),
+        rate_hz: rate.round() as u32,
+        bit_depth: bits,
+        float,
+        exclusive,
+    })
+}
+
+/// Every physical format a stream offers (all rates).
+fn all_physical_formats(stream: AudioStreamID) -> Vec<AudioStreamBasicDescription> {
+    let addr = prop_addr(kAudioStreamPropertyAvailablePhysicalFormats);
+    let mut size: u32 = 0;
+    if unsafe { AudioObjectGetPropertyDataSize(stream, &addr, 0, ptr::null(), &mut size) } != NO_ERR {
+        return Vec::new();
+    }
+    let n = size as usize / std::mem::size_of::<AudioStreamRangedDescription>();
+    let mut fmts: Vec<AudioStreamRangedDescription> = Vec::with_capacity(n);
+    let mut size2 = size;
+    let status = unsafe {
+        AudioObjectGetPropertyData(stream, &addr, 0, ptr::null(), &mut size2, fmts.as_mut_ptr() as *mut c_void)
+    };
+    if status != NO_ERR {
+        return Vec::new();
+    }
+    unsafe { fmts.set_len((size2 as usize / std::mem::size_of::<AudioStreamRangedDescription>()).min(n)) };
+    fmts.into_iter().map(|f| f.mFormat).collect()
+}
+
+/// Name of the device a sink would open for `device_name` (`None` = the
+/// system default, resolved to its real name).
+pub fn resolved_device_name(device_name: Option<&str>) -> Option<String> {
+    let device = resolve_device(device_name).ok()?;
+    device_name_of(device)
+}
+
+/// A stream's formats before we touched it.
+type SavedFormat = (AudioStreamID, AudioStreamBasicDescription, AudioStreamBasicDescription);
 
 pub struct CoreAudioDopSink {
     device: AudioObjectID,
@@ -498,7 +848,17 @@ pub struct CoreAudioDopSink {
     producer: Option<HeapProd<u8>>,
     active_rate: u32,
     channels: u16,
+    container: Container,
+    /// How the IO buffers are laid out (may be Float32 even when the hardware format is integer).
+    layout: IoLayout,
+    /// What the open session carries (DoP vs plain PCM); a session is only
+    /// reused for the same kind.
+    silence: Silence,
+    /// Shared with the render thread's `RenderState`; see there.
+    flush: Arc<AtomicBool>,
     saved_rate: f64,
+    /// Every output stream's physical format before we changed it.
+    saved_formats: Vec<SavedFormat>,
     state: SinkState,
     underruns: Arc<AtomicU64>,
 }
@@ -520,7 +880,12 @@ impl CoreAudioDopSink {
             producer: None,
             active_rate: 0,
             channels: 0,
+            container: Container::Packed24,
+            layout: IoLayout::Packed24,
+            silence: Silence::Dop,
+            flush: Arc::new(AtomicBool::new(false)),
             saved_rate: 0.0,
+            saved_formats: Vec::new(),
             state: SinkState::Stopped,
             underruns: Arc::new(AtomicU64::new(0)),
         }
@@ -539,9 +904,7 @@ impl CoreAudioDopSink {
                     let _ = Box::from_raw(self.render_state);
                     self.render_state = ptr::null_mut();
                 }
-                if self.saved_rate > 0.0 {
-                    let _ = set_nominal_rate(self.device, self.saved_rate);
-                }
+                restore_device(self.device, self.saved_rate, &self.saved_formats);
                 // -1 = no owner: release hog mode.
                 let _ = set_hog_pid(self.device, -1);
             }
@@ -551,12 +914,16 @@ impl CoreAudioDopSink {
         self.device = 0;
         self.active_rate = 0;
         self.channels = 0;
+        self.container = Container::Packed24;
+        self.layout = IoLayout::Packed24;
         self.saved_rate = 0.0;
+        self.saved_formats.clear();
         self.state = SinkState::Stopped;
     }
 
-    /// Acquire hog mode, switch to `rate`, force 24-bit stream formats.
-    /// Every step is verified by readback; any failure unwinds.
+    /// Acquire hog mode, switch to `rate`, and force an integer stream
+    /// format. Every step is verified by readback; any failure unwinds the
+    /// device to how it was (stream formats, rate, hog).
     fn acquire(&mut self, rate: u32, channels: u16) -> Result<(), MusicError> {
         let device = resolve_device(self.device_name.as_deref())?;
         self.saved_rate = get_nominal_rate(device)?;
@@ -575,66 +942,125 @@ impl CoreAudioDopSink {
             ));
         }
 
-        // 2. Exact sample rate, verified by readback.
-        let mut ok = false;
-        let undo = |device: AudioObjectID| {
-            let _ = set_hog_pid(device, -1);
-        };
-        if set_nominal_rate(device, rate as f64).is_ok() {
-            if let Ok(back) = get_nominal_rate(device) {
-                ok = (back - rate as f64).abs() < 1.0;
+        // Remember every stream's format before touching anything: setting a
+        // stream's physical format pins the device at that rate, and the
+        // nominal rate alone will not move it back.
+        let streams = match output_streams(device) {
+            Ok(s) if !s.is_empty() => s,
+            other => {
+                let _ = set_hog_pid(device, -1);
+                return Err(match other {
+                    Err(e) => e,
+                    _ => MusicError::Audio("device has no output streams".into()),
+                });
             }
-        }
-        if !ok {
-            undo(device);
+        };
+        self.saved_formats = streams
+            .iter()
+            .filter_map(|s| {
+                let phys = get_stream_format(*s).ok()?;
+                let virt = get_virtual_format(*s).unwrap_or(phys);
+                Some((*s, phys, virt))
+            })
+            .collect();
+        let unwind = |this: &mut Self| {
+            restore_device(device, this.saved_rate, &this.saved_formats);
+            let _ = set_hog_pid(device, -1);
+            this.saved_formats.clear();
+        };
+
+        // 2. Exact sample rate, verified by readback.
+        if !set_rate_and_wait(device, rate as f64) {
+            unwind(self);
             return Err(MusicError::Audio(format!(
                 "device would not switch to {rate} Hz; refusing DoP"
             )));
         }
 
-        // 3. 24-bit physical stream format on every output stream,
-        // verified by readback. (HAL streams default to Float32, which
-        // would destroy the DoP encoding.)
-        let asbd = dop_stream_format(rate, channels);
-        let streams = output_streams(device)?;
-        if streams.is_empty() {
-            undo(device);
-            let _ = set_nominal_rate(device, self.saved_rate);
-            return Err(MusicError::Audio("device has no output streams".into()));
-        }
-        for s in &streams {
-            let fail = |device: AudioObjectID| {
-                let _ = set_nominal_rate(device, self.saved_rate);
-                let _ = set_hog_pid(device, -1);
-            };
-            if set_stream_format(*s, &asbd).is_err() {
-                fail(device);
-                return Err(MusicError::Audio(
-                    "device refused the 24-bit DoP stream format".into(),
-                ));
-            }
-            match get_stream_format(*s) {
-                Ok(back)
-                    if (back.mSampleRate - rate as f64).abs() < 1.0
-                        && back.mBitsPerChannel == 24
-                        && back.mChannelsPerFrame == channels as u32
-                        && back.mBytesPerFrame == channels as u32 * 3 =>
-                {
-                    // verified
+        // 3. Integer physical stream format on every output stream, verified
+        // by readback. (HAL streams default to Float32, which would destroy
+        // the DoP encoding.) Packed 24-bit if the device takes it, else a
+        // left-aligned 32-bit container.
+        let mut chosen = None;
+        'containers: for container in Container::PREFERENCE {
+            let asbd = dop_stream_format(rate, channels, container);
+            let mut layout = None;
+            for s in &streams {
+                // Physical: what goes to the hardware.
+                if set_stream_format(*s, &asbd).is_err() {
+                    continue 'containers;
                 }
-                _ => {
-                    fail(device);
-                    return Err(MusicError::Audio(
-                        "24-bit DoP stream format did not stick; refusing DoP".into(),
-                    ));
+                match get_stream_format(*s) {
+                    Ok(back) if format_matches(&back, rate, channels, container) => {}
+                    _ => continue 'containers,
+                }
+                // Virtual: what our IO callback's buffers hold. Ask for the same
+                // integer format (some devices honour it), then read back what
+                // it really is, and render in that layout.
+                let _ = set_virtual_format(*s, &asbd);
+                let this = get_virtual_format(*s)
+                    .ok()
+                    .and_then(|v| classify_virtual(&v, rate, channels, container));
+                match (layout, this) {
+                    (_, None) => continue 'containers,
+                    (None, Some(l)) => layout = Some(l),
+                    (Some(a), Some(b)) if a == b => {}
+                    _ => continue 'containers, // streams disagree: not something we can drive
                 }
             }
+            chosen = layout.map(|l| (container, l));
+            break;
         }
+        let Some((container, layout)) = chosen else {
+            unwind(self);
+            return Err(MusicError::Audio(
+                "device accepts neither a 24-bit nor a 32-bit integer stream format; refusing DoP"
+                    .into(),
+            ));
+        };
+        self.container = container;
+        self.layout = layout;
 
         self.device = device;
         self.active_rate = rate;
         self.channels = channels;
         Ok(())
+    }
+}
+
+/// How long to wait for a device to report a rate change. USB DACs apply it
+/// asynchronously (the K15 takes several hundred milliseconds), so an
+/// immediate readback still shows the old rate.
+const RATE_SETTLE: Duration = Duration::from_millis(2500);
+
+/// Set the nominal rate and wait until the device reports it (bounded).
+fn set_rate_and_wait(device: AudioObjectID, rate: f64) -> bool {
+    if set_nominal_rate(device, rate).is_err() {
+        return false;
+    }
+    let deadline = Instant::now() + RATE_SETTLE;
+    loop {
+        if matches!(get_nominal_rate(device), Ok(r) if (r - rate).abs() < 1.0) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Put a device back how `acquire` found it: each stream's original physical
+/// format first (that is what pins the rate), then the nominal rate.
+fn restore_device(device: AudioObjectID, rate: f64, formats: &[SavedFormat]) {
+    for (stream, physical, virt) in formats {
+        let _ = set_stream_format(*stream, physical);
+        let _ = set_virtual_format(*stream, virt);
+    }
+    if rate > 0.0 {
+        // Wait for it: the next open records the device's rate as "original",
+        // and must not catch it mid-switch.
+        let _ = set_rate_and_wait(device, rate);
     }
 }
 
@@ -651,6 +1077,33 @@ impl Drop for CoreAudioDopSink {
 }
 
 impl CoreAudioDopSink {
+    /// Can the running session carry a new stream at `rate`/`channels` of
+    /// this kind? If so, flush it and return true. Only a session whose IO is
+    /// running qualifies: the flush is acknowledged by the render thread,
+    /// and only then is it safe to write (else fresh audio could be flushed).
+    fn reuse_session(&mut self, rate: u32, channels: u16, silence: Silence) -> bool {
+        if self.device == 0
+            || self.io_proc.is_none()
+            || self.producer.is_none()
+            || self.state != SinkState::Playing
+            || self.active_rate != rate
+            || self.channels != channels
+            || self.silence != silence
+        {
+            return false;
+        }
+        self.flush.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while self.flush.load(Ordering::Acquire) {
+            if Instant::now() >= deadline {
+                self.flush.store(false, Ordering::Release);
+                return false; // render thread not answering: start clean
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
     /// Acquire the device at `rate` / `channels` and create the IO proc.
     /// Shared by the DoP path (`open`) and exclusive PCM (`open_exclusive_pcm`).
     fn open_at(&mut self, rate: u32, channels: u16, silence: Silence) -> Result<(), MusicError> {
@@ -665,6 +1118,8 @@ impl CoreAudioDopSink {
             cons,
             underruns: self.underruns.clone(),
             channels,
+            layout: self.layout,
+            flush: self.flush.clone(),
             marker: MARKER_EVEN,
             silence,
         });
@@ -688,6 +1143,8 @@ impl CoreAudioDopSink {
             self.release();
             return Err(e);
         }
+        self.silence = silence;
+        self.flush.store(false, Ordering::Release);
         self.render_state = raw;
         self.io_proc = Some(proc_id);
         self.producer = Some(prod);
@@ -698,13 +1155,20 @@ impl CoreAudioDopSink {
 
 impl AudioSink for CoreAudioDopSink {
     fn open(&mut self, track: &Track) -> Result<(), MusicError> {
-        self.release();
         let dsd_rate = track
             .sample_rate
             .ok_or_else(|| MusicError::Audio("DoP needs a known DSD rate".into()))?;
         let rate = dop_pcm_rate(dsd_rate)
             .ok_or_else(|| MusicError::Audio(format!("not a DSD rate: {dsd_rate}")))?;
         let channels = track.channels.unwrap_or(2).clamp(1, 8) as u16;
+        // Same rate and channels as the running session (next album track, a
+        // seek): keep the device hogged, locked and streaming valid DoP
+        // silence, and only drop the stale audio. No re-lock click, no gap
+        // while the device is re-acquired.
+        if self.reuse_session(rate, channels, Silence::Dop) {
+            return Ok(());
+        }
+        self.release();
         self.open_at(rate, channels, Silence::Dop)
     }
 
@@ -719,6 +1183,12 @@ impl AudioSink for CoreAudioDopSink {
     }
 
     fn open_exclusive_pcm(&mut self, rate_hz: u32, channels: u16) -> Result<(), MusicError> {
+        // Next track at the same rate and channel count: keep the device
+        // hogged, locked and streaming zeros, and only drop stale audio. No
+        // ~1.7 s re-acquire gap, and no device reconfiguration between tracks.
+        if self.reuse_session(rate_hz, channels.clamp(1, 8), Silence::Pcm) {
+            return Ok(());
+        }
         self.release();
         if self.exclusive_pcm_rate(rate_hz).is_none() {
             return Err(MusicError::Audio(format!(
@@ -785,6 +1255,9 @@ impl AudioSink for CoreAudioDopSink {
         let proc = self
             .io_proc
             .ok_or_else(|| MusicError::Audio("DoP sink not open".into()))?;
+        if self.state == SinkState::Playing {
+            return Ok(()); // a reused session is already running
+        }
         os(
             unsafe { AudioDeviceStart(self.device, proc) },
             "start DoP IO",
@@ -821,14 +1294,24 @@ impl AudioSink for CoreAudioDopSink {
         let rate = dop_pcm_rate(dsd_rate_hz)?;
         let device = resolve_device(self.device_name.as_deref()).ok()?;
         let avail = available_sample_rates(device).ok()?;
-        avail
-            .iter()
-            .any(|a| (*a - rate as f64).abs() < 1.0)
-            .then_some(rate)
+        let rate_ok = avail.iter().any(|a| (*a - rate as f64).abs() < 1.0);
+        // The rate alone is not enough: the device must also offer an
+        // integer container we can drive at that rate.
+        (rate_ok && !offered_containers(device, rate, 2).is_empty()).then_some(rate)
     }
 
     fn select_output_path(&mut self, _path: OutputPath) {
         // This sink *is* the DoP path.
+    }
+
+    fn output_device_name(&self) -> Option<String> {
+        resolved_device_name(self.device_name.as_deref())
+    }
+
+    fn output_is_external_dac(&self) -> bool {
+        resolve_device(self.device_name.as_deref())
+            .map(|d| is_external_transport(transport_name(d)))
+            .unwrap_or(false)
     }
 
     fn set_output_device(&mut self, name: Option<&str>) {
@@ -843,6 +1326,115 @@ impl AudioSink for CoreAudioDopSink {
 
     fn underrun_count(&self) -> u64 {
         self.underruns.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::*;
+
+    /// Manual: `KAHAWAI_DOP_DEVICE="FIIO K15 " cargo test -p kahawai-player-audio
+    /// -- --ignored --nocapture k15`. Takes hog mode and sets the DoP rate and
+    /// stream format, then releases; the IO proc is never started, so no audio
+    /// reaches the device.
+    #[test]
+    #[ignore]
+    fn dop_format_negotiation_on_a_real_device() {
+        let name = std::env::var("KAHAWAI_DOP_DEVICE").ok();
+        let mut sink = CoreAudioDopSink::new();
+        sink.set_output_device(name.as_deref());
+        let device = resolve_device(name.as_deref()).unwrap();
+        println!("capabilities: {:?}", device_capabilities(name.as_deref()));
+        println!("live (idle): {:?}", device_live_state(name.as_deref()));
+        println!("offered @176.4k: {:?}", offered_containers(device, 176_400, 2));
+        println!("dop_output_rate(DSD64): {:?}", sink.dop_output_rate(2_822_400));
+        sink.open_at(176_400, 2, Silence::Dop).expect("acquire");
+        println!("negotiated container: {:?}, io layout: {:?}", sink.container, sink.layout);
+        println!("live (exclusive): {:?}", device_live_state(name.as_deref()));
+        let before = sink.saved_rate;
+        sink.release();
+        // The device must come back to the rate it had (and stay unhogged).
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut now = get_nominal_rate(device).unwrap();
+        while (now - before).abs() > 1.0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            now = get_nominal_rate(device).unwrap();
+        }
+        println!("rate restored: {before} -> {now}");
+        assert!((now - before).abs() < 1.0, "device left at {now} Hz, expected {before}");
+        assert_eq!(get_hog_pid(device).unwrap(), -1, "hog mode released");
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    /// Manual: `KAHAWAI_DOP_DEVICE="FIIO K15 " cargo test -p kahawai-player-audio
+    /// -- --ignored --nocapture exclusive_pcm_cycles`. Opens and releases the
+    /// exclusive PCM session back to back, like consecutive tracks, running the
+    /// IO proc on an empty ring (all-zero output: silent), and prints what the
+    /// device reports each time.
+    #[test]
+    #[ignore]
+    fn exclusive_pcm_cycles_on_a_real_device() {
+        let name = std::env::var("KAHAWAI_DOP_DEVICE").ok();
+        let mut sink = CoreAudioDopSink::new();
+        sink.set_output_device(name.as_deref());
+        let device = resolve_device(name.as_deref()).unwrap();
+        for i in 0..4 {
+            let t0 = Instant::now();
+            sink.open_exclusive_pcm(44_100, 2).expect("open exclusive pcm");
+            sink.play().expect("play");
+            println!("cycle {i}: opened+started in {:?}, container {:?}, io layout {:?}", t0.elapsed(), sink.container, sink.layout);
+            for ms in [0u64, 100, 300, 600] {
+                std::thread::sleep(Duration::from_millis(if ms == 0 { 0 } else { 100 }));
+                let live = device_live_state(name.as_deref()).unwrap();
+                let fmt = output_streams(device).ok().and_then(|s| s.first().copied()).and_then(|s| get_stream_format(s).ok());
+                // The IO proc's buffers use the VIRTUAL format, not the physical one.
+                let virt = output_streams(device).ok().and_then(|s| s.first().copied()).and_then(|s| {
+                    let addr = prop_addr(kAudioStreamPropertyVirtualFormat);
+                    let mut a: AudioStreamBasicDescription = unsafe { std::mem::zeroed() };
+                    let mut size = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
+                    let st = unsafe {
+                        AudioObjectGetPropertyData(s, &addr, 0, ptr::null(), &mut size, &mut a as *mut _ as *mut c_void)
+                    };
+                    (st == NO_ERR).then_some(a)
+                });
+                let v = virt.expect("virtual format readable");
+                assert!(
+                    classify_virtual(&v, 44_100, 2, sink.container) == Some(sink.layout),
+                    "cycle {i}: the IO callback's buffers are not what we render (virtual bits {}, flags {:#x}, layout {:?})",
+                    v.mBitsPerChannel,
+                    v.mFormatFlags,
+                    sink.layout
+                );
+                println!(
+                    "   +{ms}ms rate={} PHYS bits={} bpf={:?} flags={:#x} | VIRT bits={:?} bpf={:?} flags={:#x?} float={:?}",
+                    live.rate_hz,
+                    live.bit_depth,
+                    fmt.map(|f| f.mBytesPerFrame),
+                    fmt.map(|f| f.mFormatFlags).unwrap_or(0),
+                    virt.map(|v| v.mBitsPerChannel),
+                    virt.map(|v| v.mBytesPerFrame),
+                    virt.map(|v| v.mFormatFlags),
+                    virt.map(|v| v.mFormatFlags & kAudioFormatFlagIsFloat != 0),
+                );
+            }
+            sink.stop().unwrap();
+        }
+        // Consecutive same-rate tracks: the session is reused, not re-acquired.
+        sink.open_exclusive_pcm(44_100, 2).expect("first track");
+        sink.play().expect("play");
+        std::thread::sleep(Duration::from_millis(200));
+        let t0 = Instant::now();
+        sink.open_exclusive_pcm(44_100, 2).expect("second track");
+        sink.play().expect("play");
+        let took = t0.elapsed();
+        println!("second same-rate track opened in {took:?} (layout {:?})", sink.layout);
+        assert!(took < Duration::from_millis(400), "session reused, not re-acquired: {took:?}");
+        assert_eq!(get_hog_pid(device).unwrap(), std::process::id() as i32, "still hogged throughout");
+        sink.stop().unwrap();
     }
 }
 
@@ -869,7 +1461,7 @@ mod device_tests {
                 "no HAL device found for cpal name {:?}",
                 d.name
             );
-            assert_eq!(device_name(id.unwrap()).as_deref(), Some(d.name.as_str()));
+            assert_eq!(device_name_of(id.unwrap()).as_deref(), Some(d.name.as_str()));
         }
     }
 
@@ -907,11 +1499,98 @@ mod render_tests {
                 cons,
                 underruns: Arc::new(AtomicU64::new(0)),
                 channels,
+                layout: IoLayout::Packed24,
+                flush: Arc::new(AtomicBool::new(false)),
                 marker: MARKER_EVEN,
                 silence,
             },
             prod,
         )
+    }
+
+    #[test]
+    fn a_flush_request_drops_stale_audio_and_is_acknowledged() {
+        let (mut st, mut prod) = state(Silence::Dop, 2, 4096);
+        prod.push_slice(&[0x11, 0x22, MARKER_EVEN, 0x33, 0x44, MARKER_ODD]);
+        st.flush.store(true, Ordering::Release);
+        let mut out = vec![0u8; 6];
+        render_into(&mut st, &mut out);
+        assert!(!st.flush.load(Ordering::Acquire), "acknowledged: safe to write again");
+        assert_eq!(
+            out,
+            [DSD_SILENCE, DSD_SILENCE, MARKER_EVEN, DSD_SILENCE, DSD_SILENCE, MARKER_EVEN],
+            "the stale frame never reaches the device; valid DoP silence instead"
+        );
+        // Audio written after the acknowledgement plays normally.
+        prod.push_slice(&[0xAA, 0xBB, MARKER_ODD, 0xCC, 0xDD, MARKER_ODD]);
+        let mut out2 = vec![0u8; 6];
+        render_into(&mut st, &mut out2);
+        assert_eq!(out2, [0xAA, 0xBB, MARKER_ODD, 0xCC, 0xDD, MARKER_ODD]);
+    }
+
+    #[test]
+    fn a_32_bit_container_carries_the_same_24_bits_left_aligned() {
+        let (mut st, mut prod) = state(Silence::Dop, 2, 4096);
+        st.layout = IoLayout::Int32;
+        prod.push_slice(&[0x11, 0x22, MARKER_EVEN, 0x33, 0x44, MARKER_EVEN]); // one stereo frame
+        let mut out = vec![0xEEu8; 8];
+        render_into(&mut st, &mut out);
+        assert_eq!(
+            out,
+            [0, 0x11, 0x22, MARKER_EVEN, 0, 0x33, 0x44, MARKER_EVEN],
+            "marker stays the most significant byte, low byte is zero"
+        );
+    }
+
+    #[test]
+    fn a_float32_io_layout_scales_each_24_bit_sample_by_exactly_two_to_the_minus_23() {
+        let (mut st, mut prod) = state(Silence::Pcm, 2, 4096);
+        st.layout = IoLayout::Float32;
+        // L = +1 (0x000001), R = -1 (0xFFFFFF); then full-scale positive and negative.
+        prod.push_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x00, 0x80]);
+        let mut out = vec![0u8; 16];
+        render_into(&mut st, &mut out);
+        let f = |i: usize| f32::from_le_bytes([out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3]]);
+        assert_eq!(f(0), 1.0 / 8_388_608.0);
+        assert_eq!(f(1), -1.0 / 8_388_608.0);
+        assert_eq!(f(2), 8_388_607.0 / 8_388_608.0);
+        assert_eq!(f(3), -1.0);
+    }
+
+    #[test]
+    fn float32_round_trips_every_24_bit_word_exactly() {
+        // What the driver does with the float: scale by 2^31. It must give the
+        // original 24-bit word back, shifted left 8, for the whole range.
+        for v in (-8_388_608i32..8_388_608).step_by(4099).chain([-8_388_608, -1, 0, 1, 8_388_607]) {
+            let f = v as f32 / 8_388_608.0;
+            assert_eq!((f as f64 * 2_147_483_648.0) as i64, (v as i64) << 8, "word {v}");
+        }
+    }
+
+    #[test]
+    fn dop_markers_survive_the_float32_layout_exactly() {
+        let (mut st, mut prod) = state(Silence::Dop, 2, 4096);
+        st.layout = IoLayout::Float32;
+        prod.push_slice(&[0x12, 0x34, MARKER_EVEN, 0x12, 0x34, MARKER_EVEN, 0x56, 0x78, MARKER_ODD, 0x56, 0x78, MARKER_ODD]);
+        let mut out = vec![0u8; 16];
+        render_into(&mut st, &mut out);
+        let word = |i: usize| {
+            let f = f32::from_le_bytes([out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3]]);
+            ((f as f64 * 2_147_483_648.0) as i64 >> 8) as i32
+        };
+        assert_eq!(word(0) & 0xFF_FFFF, 0x05_3412, "marker 0x05 in the top byte, payload intact");
+        assert_eq!((word(2) as u32 >> 16) & 0xFF, 0xFA, "marker 0xFA survives the sign");
+    }
+
+    #[test]
+    fn a_32_bit_container_underruns_still_alternate_markers() {
+        let (mut st, _prod) = state(Silence::Dop, 2, 4096);
+        st.layout = IoLayout::Int32;
+        let mut out = vec![0u8; 16]; // 2 frames
+        render_into(&mut st, &mut out);
+        assert_eq!(out[3], MARKER_EVEN);
+        assert_eq!(out[11], MARKER_ODD);
+        assert_eq!(st.underruns.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -989,24 +1668,79 @@ mod render_tests {
     #[test]
     fn dop_rendering_is_unchanged_by_the_pcm_mode() {
         let (mut st, mut prod) = state(Silence::Dop, 2, 4096);
-        prod.push_slice(&[0x11, 0x22, MARKER_EVEN, 0x33, 0x44, MARKER_EVEN]);
+        prod.push_slice(&[0x11, 0x22, MARKER_EVEN, 0x33, 0x44, MARKER_EVEN, 0x55, 0x66, MARKER_ODD, 0x77, 0x88, MARKER_ODD]);
         let mut out = vec![0u8; 12];
         render_into(&mut st, &mut out);
         assert_eq!(
-            &out[..6],
-            &[0x11, 0x22, MARKER_EVEN, 0x33, 0x44, MARKER_EVEN]
+            out,
+            [0x11, 0x22, MARKER_EVEN, 0x33, 0x44, MARKER_EVEN, 0x55, 0x66, MARKER_ODD, 0x77, 0x88, MARKER_ODD],
+            "an already-correct stream passes through untouched"
         );
-        assert_eq!(
-            &out[6..],
-            &[
-                DSD_SILENCE,
-                DSD_SILENCE,
-                MARKER_EVEN,
-                DSD_SILENCE,
-                DSD_SILENCE,
-                MARKER_EVEN
-            ]
+    }
+
+    /// Every marker in a rendered DoP buffer, per frame (stereo, packed 24).
+    fn markers(out: &[u8]) -> Vec<u8> {
+        out.chunks(6).map(|f| f[2]).collect()
+    }
+
+    #[test]
+    fn a_new_stream_after_silence_keeps_the_marker_alternation_unbroken() {
+        // The bug: between tracks the device plays the renderer's own silence
+        // frames; the next track's first frame carried the same marker as the
+        // last silence frame, breaking the alternation (the DAC then plays the
+        // DoP as noise).
+        let (mut st, mut prod) = state(Silence::Dop, 2, 4096);
+        let mut silence = vec![0u8; 6 * 3]; // three underrun frames: EVEN, ODD, EVEN
+        render_into(&mut st, &mut silence);
+        assert_eq!(markers(&silence), [MARKER_EVEN, MARKER_ODD, MARKER_EVEN]);
+        // The next track starts on EVEN again (its own parity), which would repeat.
+        prod.push_slice(&[0xAA, 0xBB, MARKER_EVEN, 0xAA, 0xBB, MARKER_EVEN, 0xCC, 0xDD, MARKER_ODD, 0xCC, 0xDD, MARKER_ODD]);
+        let mut out = vec![0u8; 12];
+        render_into(&mut st, &mut out);
+        assert_eq!(markers(&out), [MARKER_ODD, MARKER_EVEN], "continues the alternation");
+        assert_eq!(&out[..2], &[0xAA, 0xBB], "the DSD payload is never touched");
+        assert_eq!(&out[6..8], &[0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn markers_alternate_across_tracks_of_odd_length_and_underruns() {
+        let (mut st, mut prod) = state(Silence::Dop, 2, 4096);
+        let mut all = Vec::new();
+        for track in 0..3u8 {
+            // 3 frames per "track", each starting on EVEN: odd length, so the
+            // naive concatenation repeats a marker at every boundary.
+            for f in 0..3u8 {
+                let m = if f % 2 == 0 { MARKER_EVEN } else { MARKER_ODD };
+                prod.push_slice(&[track, f, m, track, f, m]);
+            }
+            let mut out = vec![0u8; 6 * 4]; // ask for one more frame than exists: an underrun
+            render_into(&mut st, &mut out);
+            all.extend_from_slice(&out);
+        }
+        let m = markers(&all);
+        assert!(
+            m.windows(2).all(|w| w[0] != w[1]),
+            "markers must strictly alternate across boundaries and underruns: {m:02X?}"
         );
+    }
+
+    #[test]
+    fn all_channels_share_the_same_marker_in_a_frame() {
+        let (mut st, mut prod) = state(Silence::Dop, 2, 4096);
+        prod.push_slice(&[1, 2, MARKER_ODD, 3, 4, MARKER_ODD]); // wrong phase on purpose
+        let mut out = vec![0u8; 6];
+        render_into(&mut st, &mut out);
+        assert_eq!(out[2], out[5]);
+        assert_eq!(out[2], MARKER_EVEN, "the first frame of a session starts the sequence");
+    }
+
+    #[test]
+    fn a_pcm_stream_is_never_stamped() {
+        let (mut st, mut prod) = state(Silence::Pcm, 2, 4096);
+        prod.push_slice(&[1, 2, 0x77, 3, 4, 0x77]);
+        let mut out = vec![0u8; 6];
+        render_into(&mut st, &mut out);
+        assert_eq!(out, [1, 2, 0x77, 3, 4, 0x77], "only DoP has markers");
     }
 
     #[test]

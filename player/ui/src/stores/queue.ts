@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { getQueueTracks, queuePlay, seekMs, stop } from "../tauri";
+import { getQueueTracks, queuePlay, seekMs } from "../tauri";
 import { useLibraryStore } from "./library";
 import { usePlayerStore } from "./player";
 import type { PlayerState, Track } from "../types";
@@ -27,9 +27,12 @@ export const useQueueStore = defineStore("queue", () => {
   );
   const queueIds = computed(() => tracks.value.map((t) => t.id));
 
+  let syncSeq = 0;
+
   /** Reconcile with the core: adopt its queue order, hydrate unknown ids,
    *  and move the index. Never invents state — the core is the truth. */
   async function syncFromState(s: PlayerState): Promise<void> {
+    const seq = ++syncSeq;
     const ids = s.queue_ids;
     const localIds = tracks.value.map((t) => t.id);
     const same =
@@ -40,7 +43,11 @@ export const useQueueStore = defineStore("queue", () => {
         // Tracks the library cache doesn't know (a queue restored at launch,
         // before or without the server) come from the engine's saved copy.
         if (ids.some((id) => !lib.trackCache.has(id))) lib.cacheTracks(await getQueueTracks());
-        tracks.value = await lib.ensureTracks(ids);
+        const hydrated = await lib.ensureTracks(ids);
+        // A newer state event superseded this one while it hydrated (e.g. the
+        // core's now-empty queue): applying the stale list would resurrect it.
+        if (seq !== syncSeq) return;
+        tracks.value = hydrated;
       } catch (e) {
         console.warn("[queue] could not hydrate queue tracks:", e);
       }
@@ -142,7 +149,7 @@ export const useQueueStore = defineStore("queue", () => {
     if (index.value != null) {
       if (tracks.value.length === 0) {
         index.value = null;
-        await stop();
+        await emptyCore();
         return;
       }
       if (i < index.value) index.value -= 1;
@@ -151,10 +158,17 @@ export const useQueueStore = defineStore("queue", () => {
     await resync(true);
   }
 
+  /** `stop` alone leaves the core's queue intact, and `syncFromState` would
+   *  adopt it straight back; an empty `queue_play` clears, stops and persists. */
+  async function emptyCore(): Promise<void> {
+    await queuePlay([], 0);
+  }
+
   async function clear(): Promise<void> {
+    syncSeq++; // drop any in-flight hydration of the old queue
     tracks.value = [];
     index.value = null;
-    await stop();
+    await emptyCore();
   }
 
   return {
