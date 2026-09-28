@@ -1,6 +1,6 @@
 # SACD extraction — not planned
 
-Earlier docs in this repo (`kahawai-server-spec.md`, `DESIGN.md`, `Roadmap.md`, the two READMEs) described SACD ISO support as a staged feature: cataloged in v1, decoded via an external `sacd_extract` step "soon," with in-server ISO/DST decoding pushed to v2. That framing is retired. **There is no intent to implement SACD extraction, in any form, at any point.**
+Earlier docs in this repo (`kahawai-server-spec.md`, `DESIGN.md`, `docs/Roadmap.md`, the two READMEs) described SACD ISO support as a staged feature: cataloged in v1, decoded via an external `sacd_extract` step "soon," with in-server ISO/DST decoding pushed to v2. That framing is retired. **There is no intent to implement SACD extraction, in any form, at any point.**
 
 ## What Kahawai actually does with a `.iso` file today
 

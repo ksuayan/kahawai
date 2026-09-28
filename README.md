@@ -2,7 +2,7 @@
 
 **Kahawai Server** + **Kahawai Player** — self-hosted music streaming (Rust). Serves your own library over the LAN with HTTP Range streaming, a SQLite catalog, on-the-fly transcoding, native DSD-over-PCM, queued playlists, and background jobs — no cloud, no accounts. The v1 macOS desktop client (Tauri 2 + Vue 3) lives in `player/`.
 
-> **⚠️ Trusted-LAN only.** This server has **no authentication, no TLS, and no rate limiting**. Bind it to a private LAN interface (`bind = "192.168.x.x:..."`) behind your router's firewall. **Never expose it to the internet.** Auth/TLS are v2 scope (`Roadmap.md`).
+> **⚠️ Trusted-LAN only.** This server has **no authentication, no TLS, and no rate limiting**. Bind it to a private LAN interface (`bind = "192.168.x.x:..."`) behind your router's firewall. **Never expose it to the internet.** Auth/TLS are v2 scope (`docs/Roadmap.md`).
 
 ## Quick start
 
@@ -32,33 +32,47 @@ v1 is code-complete: server (147 tests at last server gate) + macOS client (C1�
 
 ## Documentation map
 
+Docs live under `docs/`, split by audience and by how settled the material is:
+
+- **`docs/v1/`** — design & feature docs for what's actually built and shipped. Read these before touching code.
+- **`docs/v2/`** — upcoming specs; nothing in here has been started yet (see `docs/Backlog.md` for how these map to tracked work).
+- **`docs/users/`** — non-technical, general-audience material (press release, background articles). No code references, nothing here assumes you're a contributor.
+- **`docs/Backlog.md`** / **`docs/Roadmap.md`** — cross-cutting planning docs, not tied to a single version.
+
 New here? Read top to bottom. Already know the codebase? Jump to whichever group you need.
 
 **Start here**
 
-- `kahawai-press-release.md` — the pitch: what Kahawai is and why it exists, written for someone seeing the project for the first time.
+- `docs/users/kahawai-press-release.md` — the pitch: what Kahawai is and why it exists, written for someone seeing the project for the first time.
 
-**Design & architecture** — the durable "why it's shaped this way" docs, read before touching code
+**Design & architecture** (`docs/v1/`) — the durable "why it's shaped this way" docs, read before touching code
 
-- `DESIGN.md` — formal design specification: philosophy, architecture of both applications, long-term considerations. The one doc to read if you only read one.
-- `kahawai-server-spec.md` — server build record: stories S1–S13, API, DSD work, deployment (written as the work happened; historical record, not a living spec).
-- `kahawai-player-design.md` — client build record: engine, stores, UI, DSP. Companion to the server spec above.
-- `kahawai-server-desktop-ui-spec.md` — macOS desktop UI spec for the first-run setup wizard. Decisions here are ratified — don't relitigate without asking.
+- `docs/v1/DESIGN.md` — formal design specification: philosophy, architecture of both applications, long-term considerations. The one doc to read if you only read one.
+- `docs/v1/kahawai-server-spec.md` — server build record: stories S1–S13, API, DSD work, deployment (written as the work happened; historical record, not a living spec).
+- `docs/v1/kahawai-player-design.md` — client build record: engine, stores, UI, DSP. Companion to the server spec above.
+- `docs/v1/kahawai-server-desktop-ui-spec.md` — macOS desktop UI spec for the first-run setup wizard. Decisions here are ratified — don't relitigate without asking.
 
-**Feature deep-dives** — how a specific piece of playback actually works
+**Feature deep-dives** (`docs/v1/`) — how a specific piece of playback actually works
 
-- `Audiophile-Mode.md` — what the Settings screen's "Best quality" means: bit-perfect playback, native DSD, and the fallback decision tree.
-- `EQ.md` — how the player's EQ works today, what it doesn't do, and how Audio Units could extend it later.
-- `Analog-Emulation.md` — research and design for adding tube/transistor analog character to the playback chain (branch: `analog-poc`).
-- `Euphonics-Vacuum-Tube-Primer.md` — background primer on why tube gear sounds the way it does; companion reading for Analog Emulation.
+- `docs/v1/Audiophile-Mode.md` — what the Settings screen's "Best quality" means: bit-perfect playback, native DSD, and the fallback decision tree.
+- `docs/v1/EQ.md` — how the player's EQ works today, what it doesn't do, and how Audio Units could extend it later.
+- `docs/v1/Analog-Emulation.md` — research and design for adding tube/transistor analog character to the playback chain (branch: `analog-poc`). Built and tested; see `docs/Backlog.md` for the listening-review follow-up.
+- `docs/users/Euphonics-Vacuum-Tube-Primer.md` — background primer on why tube gear sounds the way it does; companion reading for Analog Emulation, written for a general audience.
+- `docs/v1/SACD-Extraction.md` — a scope decision, not a roadmap item: why SACD ISO decoding is permanently out of scope.
+
+**Upcoming work** (`docs/v2/`) — specs for features not yet started; also tracked in `docs/Backlog.md`
+
+- `docs/v2/kahawai-fast-first-scan-spec.md` — faster first-time SMB ingestion.
+- `docs/v2/kahawai-genre-normalization-spec.md` — genre normalization + browse/search.
+- `docs/v2/kahawai-metadata-enrichment-spec.md` — metadata remapping & external enrichment (Phase C).
+- `docs/v2/kahawai-player-catalog-cache-spec.md` — local catalog cache so the player doesn't re-pull everything on restart.
 
 **Planning & scope**
 
-- `Roadmap.md` — future enhancements: possibilities, not commitments, grouped by area.
-- `Backlog.md` — deferred decisions and known rough edges, with enough context to pick them back up cold.
-- `SACD-Extraction.md` — a scope decision, not a roadmap item: why SACD ISO decoding is permanently out of scope.
+- `docs/Roadmap.md` — future enhancements: possibilities, not commitments, grouped by area.
+- `docs/Backlog.md` — deferred decisions and known rough edges, with enough context to pick them back up cold; includes the `docs/v2/` specs above.
 
-Outside this vault, in the repo itself: `player/README.md` (the desktop client's own setup/build README), `LICENSE`, and `player/ui/src/content/notices.md` (third-party dependency licenses).
+Outside `docs/`: `player/README.md` (the desktop client's own setup/build README), `LICENSE`, `CLAUDE.md` (orientation for AI coding agents working in this repo), and `player/ui/src/content/notices.md` (third-party dependency licenses).
 
 ## Workspace
 

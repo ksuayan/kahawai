@@ -4,7 +4,7 @@ Research, plan and results for adding tube and transistor character to the PCM p
 
 **Status: built and tested; not yet listened to.** The engine has an optional analog stage (21 flavours, drive, mix, sag, transformer colour, level match, alias-protected), and Settings has an A/B test bench for it (two slots, level meter, blind test, listening suggestions, keyboard shortcut). It is off by default and never runs on DoP or bit-perfect output.
 
-Written for the Kahawai maintainers. Related: [Backlog.md](Backlog.md) (what is left), [EQ.md](EQ.md) (the EQ, and the `DspStage` seam this uses).
+Written for the Kahawai maintainers. Related: [Backlog.md](../Backlog.md) (what is left), [EQ.md](EQ.md) (the EQ, and the `DspStage` seam this uses).
 
 **Where to look**
 

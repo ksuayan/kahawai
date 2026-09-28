@@ -9,7 +9,7 @@ Scope: `player/` (Tauri shell + Vue UI) and `crates/kahawai-player-core`, `crate
 ## 1. Summary
 
 - The EQ runs **on the client**, in Rust, inside the playback thread. The server streams audio and knows nothing about EQ.
-- It is a cascade of up to **8 biquad filters** (RBJ "Audio EQ Cookbook"), applied to decoded 32-bit float PCM, before the optional analog stage (see [Analog-Emulation.md](Analog%20Emulation.md)), loudness gain and volume.
+- It is a cascade of up to **8 biquad filters** (RBJ "Audio EQ Cookbook"), applied to decoded 32-bit float PCM, before the optional analog stage (see [Analog-Emulation.md](Analog-Emulation.md)), loudness gain and volume.
 - It applies to the **shared PCM path only**. The exclusive paths (DoP and bit-perfect PCM) send samples to the DAC untouched, so EQ is bypassed and the UI dims the editor.
 - Settings are pushed to the engine live as you edit and saved in `engine-settings.json`. Presets are UI-side (see 5).
 

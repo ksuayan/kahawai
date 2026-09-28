@@ -366,7 +366,7 @@ scripts/build-client-universal.sh
   stream) and says so where a buffer readout would be expected.
 - **Artwork disk cache**: browser HTTP caching only; content-addressed
   LRU disk cache is v2.
-- **SACD ISO is not supported and never will be** — see root `SACD-Extraction.md`.
+- **SACD ISO is not supported and never will be** — see `docs/v1/SACD-Extraction.md`.
 - **Offline mode**, **PCM exclusive-mode toggle**, **VST3/AU** are out of v1.
 
 ## Validation caveats

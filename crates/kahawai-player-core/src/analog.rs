@@ -1,5 +1,5 @@
 //! Analog character: an optional tube or transistor "warmth" stage for the
-//! shared PCM path. (Plan: Analog-Emulation.md, Phases 1 and 2.)
+//! shared PCM path. (Plan: docs/v1/Analog-Emulation.md, Phases 1 and 2.)
 //!
 //! Signal flow per channel, all in place on interleaved f32:
 //!
@@ -933,7 +933,7 @@ pub struct AntiAlias {
 }
 
 /// The plan for a sample rate, chosen from the measurements in
-/// Analog-Emulation.md (section 12).
+/// docs/v1/Analog-Emulation.md (section 12).
 pub fn anti_alias_plan(sample_rate: u32) -> AntiAlias {
     match sample_rate {
         0..=50_000 => AntiAlias {
@@ -1673,7 +1673,7 @@ mod tests {
     }
 
     /// Prints the aliasing of every plan (run with --ignored --nocapture); the
-    /// table in Analog-Emulation.md section 12 comes from this.
+    /// table in docs/v1/Analog-Emulation.md section 12 comes from this.
     #[test]
     #[ignore]
     fn measure_anti_alias_plans() {
@@ -1869,7 +1869,7 @@ mod tests {
 
     #[test]
     fn triode_stage_matches_the_prototype_harmonic_profile() {
-        // Research prototype (Analog-Emulation.md 10.2): a 12AX7 stage at input
+        // Research prototype (docs/v1/Analog-Emulation.md 10.2): a 12AX7 stage at input
         // 0.3 gave 2nd -32.5 dB and 3rd -60 dB; the 2nd rises 1 dB per dB.
         let (n, bin) = (1 << 14, 200);
         let h = |amp: f32| {
@@ -2637,7 +2637,7 @@ mod tests {
     }
 
     /// Prints each flavour's operating point and harmonic profile (run with
-    /// --ignored --nocapture); section 15 of Analog-Emulation.md comes from this.
+    /// --ignored --nocapture); section 15 of docs/v1/Analog-Emulation.md comes from this.
     #[test]
     #[ignore]
     fn print_flavour_profiles() {

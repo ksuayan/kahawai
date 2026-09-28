@@ -68,7 +68,7 @@ The full license text is in the open-source notices.
 - **Anti-aliasing:** the analog stage uses oversampling and first-order antiderivative
   antialiasing (Parker, Zavalishin and Le Bivic; Bilbao, Esqueda, Parker and Välimäki).
 - **Design notes:** the reasoning, measurements and sources are in the project's
-  `Analog-Emulation.md` and `EQ.md`.
+  `docs/v1/Analog-Emulation.md` and `docs/v1/EQ.md`.
 
 ## Open-source software
 

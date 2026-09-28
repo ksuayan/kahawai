@@ -41,9 +41,10 @@ node_modules/
 # macOS
 .DS_Store
 
-# start-server.sh runtime files
+# start-server.sh / start-dev-combined.sh runtime files
 /.kahawai-server.pid
 /kahawai-server.log
+/kahawai-server-dev.log
 
 # Keep npm lockfiles even though a global gitignore excludes them
 !package-lock.json

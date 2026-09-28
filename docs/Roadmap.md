@@ -104,7 +104,7 @@ Recently added, most played (needs play-count tracking — server), ratings, tag
 - Social features, scrobbling-as-a-service, analytics, telemetry.
 - Cloud sync of any kind.
 - DRM or protected-content playback — v1 decision, stands.
-- SACD ISO extraction/decoding, in any form — see `SACD-Extraction.md`.
+- SACD ISO extraction/decoding, in any form — see `v1/SACD-Extraction.md`.
 
 ---
 

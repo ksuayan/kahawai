@@ -160,7 +160,7 @@ describe("the design document lists the recipes", () => {
   it("names every listening recipe in Analog-Emulation.md", async () => {
     const { readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const doc = readFileSync(join(__dirname, "../../../../Analog-Emulation.md"), "utf8");
+    const doc = readFileSync(join(__dirname, "../../../../docs/v1/Analog-Emulation.md"), "utf8");
     for (const r of LISTENING_RECIPES) expect(doc).toContain(r.title);
     expect(doc).toMatch(/## 18\. Listening suggestions/);
     expect(doc.trimEnd().split("\n## ").pop()).toMatch(/^19\. References/); // References is the last section

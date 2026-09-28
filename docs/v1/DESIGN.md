@@ -2,7 +2,7 @@
 
 *2026-09-25. Formal specification for **Kahawai Server** and **Kahawai Player**. This document states the philosophy, the architecture, and the long-term considerations.*
 
-*Reading guide: `kahawai-server-spec.md` and `kahawai-player-design.md` are the build records — written as the work happened, with stories, phases, and resolved decisions. This document is the durable specification: what the system is, why it is shaped this way, and where it is allowed to go next. `README.md` (both roots) covers operation and library choices; `Roadmap.md` lists future enhancements.*
+*Reading guide: `kahawai-server-spec.md` and `kahawai-player-design.md` are the build records — written as the work happened, with stories, phases, and resolved decisions. This document is the durable specification: what the system is, why it is shaped this way, and where it is allowed to go next. `README.md` (repo root) and `player/README.md` cover operation and library choices; `docs/Roadmap.md` lists future enhancements.*
 
 ---
 
@@ -134,7 +134,7 @@ No crossfade (gapless-only in v1). No remote control of other instances. No PCM 
 
 ## 5. Long-term considerations
 
-These are not commitments; they are the directions the architecture was shaped to allow. Details live in `Roadmap.md`.
+These are not commitments; they are the directions the architecture was shaped to allow. Details live in `docs/Roadmap.md`.
 
 ### 5.1 Security v2 — the one that changes the threat model
 
