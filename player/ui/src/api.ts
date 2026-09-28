@@ -17,10 +17,121 @@ let baseUrl = "http://localhost:8080";
 
 export function setBaseUrl(url: string): void {
   baseUrl = url.trim().replace(/\/+$/, "") || "http://localhost:8080";
+  reconnectCatalogEvents();
 }
 
 export function getBaseUrl(): string {
   return baseUrl;
+}
+
+// --- Server events (GET /api/events, SSE) -----------------------------------
+// A scan finishing anywhere — this app's own "Scan" button, or the desktop
+// Server app's wizard/status screen — pushes a catalog-updated event here;
+// without it, a scan triggered elsewhere would only ever be noticed by the
+// player that started it (see stores/jobs.ts, which only polls while a job
+// it knows about is active). The server also pushes a shutdown notice.
+//
+// Reconnection is handled manually (not the browser's built-in EventSource
+// retry) so the interval is ours to control — currently a fixed 3s, but
+// structured so a future Settings pulldown (3/5/10/15s) can change it via
+// `setServerEventsRetryMs` without touching the reconnect logic itself.
+
+let eventSource: EventSource | null = null;
+let reconnectTimer: number | undefined;
+/** True once `open` has fired at least once for the *current* `baseUrl` —
+ *  guards against announcing a "disconnect" before ever having connected. */
+let everConnected = false;
+let isConnected = false;
+let retryMs = 3000;
+
+/** For a future Settings screen. Takes effect on the next reconnect
+ *  attempt; does not tear down an already-scheduled one. */
+export function setServerEventsRetryMs(ms: number): void {
+  retryMs = ms;
+}
+
+const catalogListeners = new Set<() => void>();
+const shuttingDownListeners = new Set<() => void>();
+const connectedListeners = new Set<() => void>();
+const disconnectedListeners = new Set<() => void>();
+
+function reconnectCatalogEvents(): void {
+  eventSource?.close();
+  eventSource = null;
+  window.clearTimeout(reconnectTimer);
+  everConnected = false;
+  isConnected = false;
+  connectServerEvents();
+}
+
+function connectServerEvents(): void {
+  if (typeof EventSource === "undefined") return; // defensive; every real target has it
+  const source = new EventSource(`${baseUrl}/api/events`);
+  eventSource = source;
+
+  source.addEventListener("open", () => {
+    if (source !== eventSource) return; // a stale instance from a prior baseUrl
+    everConnected = true;
+    isConnected = true;
+    for (const cb of connectedListeners) cb();
+  });
+  source.addEventListener("error", () => {
+    if (source !== eventSource) return;
+    source.close();
+    if (everConnected && isConnected) {
+      isConnected = false;
+      for (const cb of disconnectedListeners) cb();
+    }
+    reconnectTimer = window.setTimeout(connectServerEvents, retryMs);
+  });
+  source.addEventListener("catalog-updated", () => {
+    if (source !== eventSource) return;
+    for (const cb of catalogListeners) cb();
+  });
+  source.addEventListener("server-shutting-down", () => {
+    if (source !== eventSource) return;
+    for (const cb of shuttingDownListeners) cb();
+  });
+}
+
+/** Subscribe to catalog-change notifications. Returns an unsubscribe fn. */
+export function onCatalogUpdated(cb: () => void): () => void {
+  catalogListeners.add(cb);
+  return () => catalogListeners.delete(cb);
+}
+
+/** The server sent an explicit "about to exit" notice (graceful shutdown).
+ *  Fires before the connection actually drops — `onServerDisconnected`
+ *  fires shortly after, same as any other disconnect. */
+export function onServerShuttingDown(cb: () => void): () => void {
+  shuttingDownListeners.add(cb);
+  return () => shuttingDownListeners.delete(cb);
+}
+
+/** Fires on every successful (re)connection, including the first one. */
+export function onServerConnected(cb: () => void): () => void {
+  connectedListeners.add(cb);
+  return () => connectedListeners.delete(cb);
+}
+
+/** Fires once per actual drop (not once per failed retry attempt) — after a
+ *  prior successful connection is lost, whether from a graceful shutdown, a
+ *  crash, or a network blip. Reconnection keeps retrying every `retryMs`
+ *  regardless; this is purely a notification for the UI. */
+export function onServerDisconnected(cb: () => void): () => void {
+  disconnectedListeners.add(cb);
+  return () => disconnectedListeners.delete(cb);
+}
+
+/** Test-only: these listener sets are module-level (there's exactly one
+ *  server connection per app instance), so without this, a subscription
+ *  left registered by one test (a store's `init()` whose `stop()` the test
+ *  never called) would still fire — and push toasts — in every later test. */
+export function resetServerEventListenersForTest(): void {
+  catalogListeners.clear();
+  shuttingDownListeners.clear();
+  connectedListeners.clear();
+  disconnectedListeners.clear();
 }
 
 /**

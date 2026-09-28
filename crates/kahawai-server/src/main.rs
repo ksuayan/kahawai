@@ -3,6 +3,8 @@
 
 mod api;
 mod db;
+#[cfg(target_os = "macos")]
+mod desktop;
 mod dop;
 mod dsd;
 mod dsd_meta;
@@ -25,13 +27,46 @@ use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing::{info, warn};
 
+/// Pushed to SSE subscribers over `GET /api/events`. `Clone` is required by
+/// `broadcast::Sender`; both variants are unit-like so cloning is free.
+#[derive(Debug, Clone)]
+pub enum ServerEvent {
+    /// A scan finished successfully — the catalog changed.
+    CatalogUpdated,
+    /// The process is about to exit (SIGINT/SIGTERM received). Sent with a
+    /// brief grace period before the graceful shutdown actually closes
+    /// connections, so subscribers have a real chance to receive it.
+    ShuttingDown,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub pool: sqlx::SqlitePool,
     pub jobs: jobs::JobStore,
-    pub config: ServerConfig,
+    /// Shared and mutable so a running server's config can be edited in
+    /// place (desktop app: add a music folder, Apply, rescan) without a
+    /// restart. `bind` and `db_path` are only ever read at startup — there
+    /// is no live path for rebinding the listener or swapping the DB pool.
+    pub config: Arc<std::sync::RwLock<ServerConfig>>,
     /// Ensures only one library scan runs at a time (S1).
     pub scan_lock: Arc<tokio::sync::Mutex<()>>,
+    /// `GET /api/events` (SSE): lets already-connected clients learn the
+    /// catalog changed, or that the server is about to exit, without
+    /// polling for either. No receivers is not an error — `send` on an
+    /// empty broadcast channel just means nobody's listening.
+    pub catalog_events: tokio::sync::broadcast::Sender<ServerEvent>,
+}
+
+impl AppState {
+    pub fn music_dirs(&self) -> Vec<std::path::PathBuf> {
+        self.config.read().unwrap().music_dirs.clone()
+    }
+    pub fn preferred_ladder(&self) -> Vec<kahawai_core::StreamFormat> {
+        self.config.read().unwrap().preferred_ladder.clone()
+    }
+    pub fn dsd_story(&self) -> kahawai_core::DsdStory {
+        self.config.read().unwrap().dsd_story
+    }
 }
 
 /// Request bodies larger than this are rejected with 413 (S10).
@@ -84,32 +119,89 @@ pub fn app(state: AppState) -> Router {
             "/stream/{id}",
             get(api::stream_track).head(api::stream_head),
         )
+        // Long-lived like the stream routes above: kept outside the `api`
+        // sub-router so the 60s API timeout never closes it.
+        .route("/api/events", get(api::scan_events))
         .with_state(state)
         // v1 is LAN-only: permissive CORS is acceptable here (spec §3.6).
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config.toml".into());
+    let argv1 = std::env::args().nth(1).map(std::path::PathBuf::from);
+    let config_path = ServerConfig::resolve_path(argv1.as_deref())?;
     let config = match ServerConfig::load(&config_path) {
         Ok(c) => {
-            info!(path = %config_path, "loaded config");
+            info!(path = %config_path.display(), "loaded config");
             c
         }
         Err(e) => {
-            warn!(error = %e, path = %config_path, "using default config");
+            warn!(error = %e, path = %config_path.display(), "using default config");
             ServerConfig::default()
         }
     };
 
+    run_server(config).await
+}
+
+/// macOS: a Tauri shell instead of a headless process. On launch, an
+/// existing usable config starts the server right away in the background
+/// (see `desktop::autostart`); otherwise the UI shows the first-run wizard.
+/// Linux and Windows are unaffected — this whole function, and every crate
+/// it touches, is absent from their dependency graph.
+#[cfg(target_os = "macos")]
+fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(desktop::DesktopState::default())
+        .invoke_handler(tauri::generate_handler![
+            desktop::setup_get_state,
+            desktop::setup_pick_directory,
+            desktop::setup_validate_dir,
+            desktop::setup_save_config,
+            desktop::setup_get_running_config,
+            desktop::setup_apply_config,
+            desktop::setup_recent_scans,
+            desktop::setup_start_server,
+            desktop::setup_server_status,
+            desktop::setup_reveal_config,
+            desktop::setup_quit,
+        ])
+        .setup(|app| {
+            desktop::autostart(app);
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running the Kahawai Server desktop shell");
+}
+
+/// Everything after config load: open the catalog, run the startup scan,
+/// bind, and serve until a graceful shutdown signal. Both the headless
+/// entry point and (on macOS) the desktop shell's spawned task call this.
+pub async fn run_server(config: ServerConfig) -> anyhow::Result<()> {
+    run_server_with_ready(config, None).await
+}
+
+/// Same as [`run_server`], but hands the constructed [`AppState`] back
+/// through `ready` as soon as it exists (before binding/serving) — the
+/// macOS desktop shell uses this to keep a live handle for its "apply
+/// config + rescan" and "recent scans" commands, so they act on the exact
+/// same state the HTTP layer does rather than a stale snapshot.
+pub async fn run_server_with_ready(
+    config: ServerConfig,
+    ready: Option<tokio::sync::oneshot::Sender<AppState>>,
+) -> anyhow::Result<()> {
     let pool = db::open(&config.db_path).await?;
     info!("SQLite catalog open (WAL mode)");
 
@@ -119,12 +211,17 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
+    let (catalog_events, _) = tokio::sync::broadcast::channel(16);
     let state = AppState {
         pool,
         jobs,
-        config: config.clone(),
+        config: Arc::new(std::sync::RwLock::new(config.clone())),
         scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+        catalog_events,
     };
+    if let Some(tx) = ready {
+        let _ = tx.send(state.clone());
+    }
 
     // S9: the startup scan is a real persisted job (visible in /api/jobs),
     // not a bare background task — it survives the same lifecycle, progress,
@@ -156,8 +253,9 @@ async fn main() -> anyhow::Result<()> {
         "LAN-only build: no authentication, no TLS — bind to a trusted network only"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let events = state.catalog_events.clone();
     axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(events))
         .await?;
     info!("shutdown complete");
     Ok(())
@@ -166,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
 /// SIGINT/SIGTERM → graceful shutdown: in-flight streams drain, then the
 /// process exits. Jobs left running/queued in the DB are failed by the S9
 /// restart rule on the next boot — never silently resumed.
-async fn shutdown_signal() {
+async fn shutdown_signal(events: tokio::sync::broadcast::Sender<ServerEvent>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -187,6 +285,11 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     info!("shutdown signal received; draining in-flight requests");
+    // Tell connected clients (Player apps via SSE) before this function's
+    // return lets axum start actually closing connections. No receivers is
+    // fine — just means nobody was listening.
+    let _ = events.send(ServerEvent::ShuttingDown);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 }
 
 #[cfg(test)]
@@ -221,11 +324,12 @@ mod integration_tests {
             jobs: jobs::JobStore::new(),
             // S10: tests run with the temp dir as the only music root, so
             // strict root enforcement is exercised, not bypassed.
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir, fixture)
     }
@@ -243,11 +347,12 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir)
     }
@@ -943,6 +1048,112 @@ mod integration_tests {
         assert_eq!(n, 2, "background scan did not finish");
     }
 
+    /// The desktop shell edits `AppState.config` in place (add a music
+    /// folder, Apply) rather than restarting the process; this is the
+    /// plumbing that makes that possible.
+    #[tokio::test]
+    async fn app_state_music_dirs_reflects_a_live_config_edit() {
+        let (_app, state, _dir) = scanned_app().await;
+        let original = state.music_dirs();
+        let new_dirs = vec![std::path::PathBuf::from("/tmp/a-different-music-folder")];
+        state.config.write().unwrap().music_dirs = new_dirs.clone();
+        assert_ne!(state.music_dirs(), original);
+        assert_eq!(state.music_dirs(), new_dirs);
+    }
+
+    /// A scan started from anywhere (HTTP or, in the desktop shell, an
+    /// internal command) broadcasts on completion, so a Player that already
+    /// has an open `/api/events` connection learns the catalog changed
+    /// without needing to be the one that triggered — or even be aware of —
+    /// the scan.
+    #[tokio::test]
+    async fn scan_completion_broadcasts_a_catalog_updated_event() {
+        use tokio_stream::StreamExt;
+
+        let (app, _state, _dir) = scanned_app().await;
+
+        let sse_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sse_res.status(), StatusCode::OK);
+        let mut events = sse_res.into_body().into_data_stream();
+
+        let scan_res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scan")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scan_res.status(), StatusCode::ACCEPTED);
+
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let bytes = events.next().await.expect("SSE stream ended").unwrap();
+                if !bytes.is_empty() {
+                    return bytes;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for a catalog-updated SSE event");
+        assert!(
+            String::from_utf8_lossy(&chunk).contains("catalog-updated"),
+            "unexpected SSE payload: {:?}",
+            String::from_utf8_lossy(&chunk)
+        );
+    }
+
+    /// `shutdown_signal` sends this on the same channel before the graceful
+    /// shutdown starts closing connections — this locks in that a
+    /// `ShuttingDown` event renders as `server-shutting-down` for
+    /// subscribers, independent of exercising the actual signal handler.
+    #[tokio::test]
+    async fn shutting_down_event_renders_as_server_shutting_down() {
+        use tokio_stream::StreamExt;
+
+        let (app, state, _dir) = scanned_app().await;
+
+        let sse_res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut events = sse_res.into_body().into_data_stream();
+
+        let _ = state.catalog_events.send(ServerEvent::ShuttingDown);
+
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let bytes = events.next().await.expect("SSE stream ended").unwrap();
+                if !bytes.is_empty() {
+                    return bytes;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the server-shutting-down SSE event");
+        assert!(
+            String::from_utf8_lossy(&chunk).contains("server-shutting-down"),
+            "unexpected SSE payload: {:?}",
+            String::from_utf8_lossy(&chunk)
+        );
+    }
+
     // ------------------------------------------------------------------
     // Phase 3 route tests (S6, S12-transcode, S13)
     // ------------------------------------------------------------------
@@ -1037,8 +1248,9 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config,
+            config: Arc::new(std::sync::RwLock::new(config)),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state), dir)
     }
@@ -1286,8 +1498,9 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config,
+            config: Arc::new(std::sync::RwLock::new(config)),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir, bits)
     }
@@ -1557,11 +1770,12 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
         let res = app
@@ -1594,11 +1808,12 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
         let res = app
@@ -1642,11 +1857,12 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
         let res = app
@@ -1699,11 +1915,12 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
         let res = app
@@ -1755,11 +1972,12 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
         // Track 2's file is outside the roots → 404 (indistinguishable
@@ -1807,11 +2025,12 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
         let res = app
@@ -1902,11 +2121,12 @@ mod integration_tests {
         let state = AppState {
             pool,
             jobs: jobs::JobStore::new(),
-            config: ServerConfig {
+            config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
                 ..Default::default()
-            },
+            })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state), dir)
     }

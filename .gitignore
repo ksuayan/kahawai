@@ -27,9 +27,11 @@ target
 /player/src-tauri/target/
 # Tauri generated schemas (regenerated on every build)
 /player/src-tauri/gen/
+/crates/kahawai-server/gen/
 # Vue UI: dependencies and Vite build output
 node_modules/
 /player/ui/dist/
+/crates/kahawai-server/ui/dist/
 
 # Local config written by scripts/setup.sh (machine-specific paths/IPs)
 /config.toml

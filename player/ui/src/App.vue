@@ -27,8 +27,10 @@ import { usePlayerStore } from "./stores/player";
 import { usePlaylistsStore } from "./stores/playlists";
 import { useQueueStore } from "./stores/queue";
 import { useSettingsStore } from "./stores/settings";
+import { useServerHealthStore } from "./stores/serverHealth";
 import { handleShortcut } from "./shortcuts";
 import { onMenuAction } from "./tauri";
+import { onCatalogUpdated } from "./api";
 
 const nav = useNavStore();
 const settings = useSettingsStore();
@@ -42,14 +44,22 @@ const jobs = useJobsStore();
 const toasts = useToastsStore();
 const abx = useAbxStore();
 const overlays = useOverlaysStore();
+const serverHealth = useServerHealthStore();
 
 // Cleanup must be registered synchronously: inside the async onMounted below
 // there is no active component instance left after the first await.
 let stopWatch: (() => void) | undefined;
 let stopMenu: (() => void) | undefined;
+// Registered synchronously (not inside onMounted) for the same reason as
+// stopMenu below: unsubscribing must be reachable from onUnmounted even
+// though the subscription itself is set up after an await.
+const stopCatalogEvents = onCatalogUpdated(() => void lib.loadAll());
+const stopServerHealth = serverHealth.init();
 onUnmounted(() => {
   stopWatch?.();
   stopMenu?.();
+  stopCatalogEvents();
+  stopServerHealth();
   player.dispose();
   window.removeEventListener("keydown", onKeydown);
 });
@@ -60,7 +70,7 @@ onMounted(async () => {
   stopMenu = (await onMenuAction((id) => {
     if (id === "app.about") overlays.openAbout();
   })) ?? undefined;
-  await settings.init(); // get_server_url + persisted playback prefs, then point the REST client at it
+  await settings.init(); // get_server_url + persisted playback prefs, then point the REST client at it (and (re)connects /api/events)
   await player.init(); // subscribe to player-state events
   await dsp.init(); // persisted EQ/loudness + device/DoP capability
   await analog.init(); // the A/B pair of analog-warmth settings

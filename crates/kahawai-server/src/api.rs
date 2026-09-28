@@ -540,12 +540,12 @@ async fn resolve_m3u_entry(s: &AppState, raw: &str) -> Result<Option<i64>, ApiEr
     if entry_path.is_absolute() {
         candidates.push(entry_path.to_path_buf());
     } else {
-        for root in &s.config.music_dirs {
+        for root in &s.music_dirs() {
             candidates.push(root.join(entry_path));
         }
     }
     for candidate in candidates {
-        let Ok(canonical) = ensure_within_roots(&candidate, &s.config.music_dirs) else {
+        let Ok(canonical) = ensure_within_roots(&candidate, &s.music_dirs()) else {
             continue;
         };
         // The scanner stores walked paths; try the joined candidate verbatim
@@ -695,8 +695,7 @@ pub async fn import_playlist(
         // S10: the playlist file itself is a served file — it must live
         // under a music root, or its raw lines (returned as `unmatched`)
         // would become a filesystem-read oracle.
-        let playlist_path =
-            ensure_within_roots(std::path::Path::new(&req.path), &s.config.music_dirs)?;
+        let playlist_path = ensure_within_roots(std::path::Path::new(&req.path), &s.music_dirs())?;
         let data = std::fs::read(&playlist_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 MusicError::NotFound(format!("playlist file not found: {}", req.path))
@@ -812,11 +811,10 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                 }
             }
         });
-        let report =
-            scanner::run_scan_with_progress(&s.pool, &s.config.music_dirs, |done, total| {
-                let _ = ptx.send((done, total));
-            })
-            .await;
+        let report = scanner::run_scan_with_progress(&s.pool, &s.music_dirs(), |done, total| {
+            let _ = ptx.send((done, total));
+        })
+        .await;
         // The progress closure only borrowed `ptx`, so the sender is still
         // alive here — drop it explicitly, otherwise the forwarder below
         // would wait forever for the channel to close.
@@ -847,6 +845,12 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                     )),
                 )
                 .await;
+                // The catalog changed: tell already-connected clients (SSE)
+                // rather than leaving them to notice on their next poll —
+                // a scan triggered from the desktop app while a Player is
+                // idle would otherwise never surface there. No receivers is
+                // not an error; `send` just reports how many got it.
+                let _ = s.catalog_events.send(crate::ServerEvent::CatalogUpdated);
             }
             Err(e) => {
                 tracing::error!(error = %e, "background scan failed");
@@ -854,6 +858,28 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
             }
         }
     });
+}
+
+/// `GET /api/events`: an SSE stream emitting `catalog-updated` (a scan
+/// finished) and `server-shutting-down` (the process is about to exit).
+/// Routed outside the `api` sub-router (see `main.rs`) so the 60s API
+/// timeout never closes it.
+pub async fn scan_events(
+    State(s): State<AppState>,
+) -> axum::response::sse::Sse<
+    impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use tokio_stream::StreamExt;
+    let stream = tokio_stream::wrappers::BroadcastStream::new(s.catalog_events.subscribe())
+        .filter_map(|msg| msg.ok())
+        .map(|ev| {
+            let name = match ev {
+                crate::ServerEvent::CatalogUpdated => "catalog-updated",
+                crate::ServerEvent::ShuttingDown => "server-shutting-down",
+            };
+            Ok(axum::response::sse::Event::default().event(name))
+        });
+    axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,7 +1026,7 @@ pub async fn stream_track(
 
     let fmt: AudioFormat = track.format;
     // S10: the catalog path must canonicalize inside a configured music root.
-    let path = ensure_within_roots(std::path::Path::new(&track.path), &s.config.music_dirs)?;
+    let path = ensure_within_roots(std::path::Path::new(&track.path), &s.music_dirs())?;
 
     // Resolve the rendition (S13): explicit ?format= wins, otherwise the
     // server ladder. Ok(None) = passthrough. Errors: 501 for disabled
@@ -1011,8 +1037,8 @@ pub async fn stream_track(
         fmt,
         path.clone(),
         q.format,
-        &s.config.preferred_ladder,
-        s.config.dsd_story,
+        &s.preferred_ladder(),
+        s.dsd_story(),
         q.seek_ms,
     )?;
 
@@ -1106,13 +1132,13 @@ async fn stream_dop(
     let mut plans = vec![plan];
     if let Some(nt) = next {
         let nfmt: AudioFormat = nt.format;
-        let npath = ensure_within_roots(std::path::Path::new(&nt.path), &s.config.music_dirs)?;
+        let npath = ensure_within_roots(std::path::Path::new(&nt.path), &s.music_dirs())?;
         let nplan = transcode::resolve_plan(
             nfmt,
             npath,
             Some(StreamFormat::Dop),
-            &s.config.preferred_ladder,
-            s.config.dsd_story,
+            &s.preferred_ladder(),
+            s.dsd_story(),
             None,
         )?
         .ok_or_else(|| MusicError::BadRequest("next track does not resolve to DoP".into()))?;
@@ -1186,13 +1212,13 @@ async fn stream_transcode(
     let mut plans = vec![plan];
     if let Some(nt) = next {
         let nfmt: AudioFormat = nt.format;
-        let npath = ensure_within_roots(std::path::Path::new(&nt.path), &s.config.music_dirs)?;
+        let npath = ensure_within_roots(std::path::Path::new(&nt.path), &s.music_dirs())?;
         match transcode::resolve_plan(
             nfmt,
             npath.clone(),
             Some(plans[0].target),
-            &s.config.preferred_ladder,
-            s.config.dsd_story,
+            &s.preferred_ladder(),
+            s.dsd_story(),
             None,
         )? {
             Some(nplan) => plans.push(nplan),
@@ -1287,13 +1313,13 @@ pub async fn stream_head(
             .ok_or_else(|| MusicError::NotFound(format!("next track {next_id}")))?;
     }
     let fmt: AudioFormat = track.format;
-    let path = ensure_within_roots(std::path::Path::new(&track.path), &s.config.music_dirs)?;
+    let path = ensure_within_roots(std::path::Path::new(&track.path), &s.music_dirs())?;
     let plan = transcode::resolve_plan(
         fmt,
         path.clone(),
         q.format,
-        &s.config.preferred_ladder,
-        s.config.dsd_story,
+        &s.preferred_ladder(),
+        s.dsd_story(),
         q.seek_ms,
     )?;
 

@@ -7,10 +7,12 @@ import {
   fetchAllAlbums,
   fetchArtistDetail,
   fetchArtists,
+  onCatalogUpdated,
   searchTracks,
   setBaseUrl,
 } from "./api";
 import { makeAlbum, makeTrack, mockFetch } from "./test/fixtures";
+import { latestEventSource } from "./test/eventsource-mock";
 
 beforeEach(() => setBaseUrl("http://server:8080"));
 
@@ -20,6 +22,30 @@ describe("base URL", () => {
     expect(artworkSrc("abc")).toBe("http://a:1/api/artwork/abc");
     setBaseUrl("   ");
     expect(artworkSrc("abc")).toBe("http://localhost:8080/api/artwork/abc");
+  });
+});
+
+describe("catalog-updated notifications (SSE)", () => {
+  it("opens /api/events against the current base URL", () => {
+    expect(latestEventSource()?.url).toBe("http://server:8080/api/events");
+  });
+
+  it("reconnects to the new URL when the base URL changes, closing the old connection", () => {
+    const first = latestEventSource()!;
+    setBaseUrl("http://other:9090");
+    expect(first.closed).toBe(true);
+    expect(latestEventSource()).not.toBe(first);
+    expect(latestEventSource()?.url).toBe("http://other:9090/api/events");
+  });
+
+  it("notifies every subscriber when the server emits catalog-updated", () => {
+    let calls = 0;
+    const stop = onCatalogUpdated(() => calls++);
+    latestEventSource()!.emit("catalog-updated");
+    expect(calls).toBe(1);
+    stop();
+    latestEventSource()!.emit("catalog-updated");
+    expect(calls).toBe(1); // unsubscribed — no further calls
   });
 });
 

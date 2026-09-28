@@ -1,0 +1,4 @@
+/* Reuses the player's design tokens, type scale, and base layer byte-for-byte
+ * so the two apps read as one system. Nothing here is player-specific: it's
+ * pure tokens/utilities, no component styles. */
+@import "@pw/style.css";

@@ -3,6 +3,7 @@ import App from "./App.vue";
 import { makeAlbum, makeState, makeTrack, mockFetch } from "./test/fixtures";
 import { key, mountApp, settle, typeInto } from "./test/helpers";
 import { tauri } from "./test/tauri-mock";
+import { latestEventSource } from "./test/eventsource-mock";
 import { useNavStore } from "./stores/nav";
 import { useAbxStore } from "./stores/abx";
 import { useAnalogStore } from "./stores/analog";
@@ -93,6 +94,19 @@ describe("App: boot", () => {
     tauri.emit("player-state", makeState({ status: "playing", track: makeTrack({ title: "Next up" }) }));
     await settle();
     expect(w.get('[data-testid="title"]').text()).toBe("Next up");
+  });
+
+  it("reloads the library when the server pushes a catalog-updated event (a scan finished — including one started elsewhere, like the desktop Server app)", async () => {
+    tauriApp();
+    const calls = online();
+    await bootApp();
+    const albumCallsAtBoot = calls.filter((c) => c.url.includes("/api/albums")).length;
+
+    latestEventSource()!.emit("catalog-updated");
+    await settle();
+
+    const albumCallsAfter = calls.filter((c) => c.url.includes("/api/albums")).length;
+    expect(albumCallsAfter).toBeGreaterThan(albumCallsAtBoot);
   });
 });
 

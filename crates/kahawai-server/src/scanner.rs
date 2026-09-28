@@ -321,7 +321,7 @@ pub async fn run_scan_with_progress(
     Ok(report)
 }
 
-fn is_audio(path: &Path) -> bool {
+pub(crate) fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
         .map(|ext| AudioFormat::from_extension(ext) != AudioFormat::Unknown)
@@ -1195,7 +1195,9 @@ pub mod fixtures {
     pub struct TrackSpec<'a> {
         pub dir: &'a str,
         pub file: &'a str,
-        /// ffmpeg audio codec: "flac" | "libmp3lame" | "libvorbis" | "aac" | "pcm_s16le"
+        /// ffmpeg audio codec: "flac" | "libmp3lame" | "vorbis" | "aac" | "pcm_s16le"
+        /// ("vorbis" is FFmpeg's native encoder, not the "libvorbis" wrapper —
+        /// see the `-strict -2` note below.)
         pub codec: &'a str,
         pub title: &'a str,
         pub artist: &'a str,
@@ -1286,6 +1288,13 @@ pub mod fixtures {
         args.extend(["-c:a", &codec]);
         if spec.codec == "libmp3lame" {
             args.extend(["-id3v2_version", "3"]);
+        }
+        // FFmpeg's native "vorbis" encoder (unlike the "libvorbis" wrapper
+        // around libvorbis, which most FFmpeg builds don't bundle — notably
+        // Homebrew's) is flagged experimental and refuses to run without
+        // this. The bitstream it produces is standard Ogg Vorbis either way.
+        if spec.codec == "vorbis" {
+            args.extend(["-strict", "-2"]);
         }
         let meta_args: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
         let mut owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -1410,7 +1419,7 @@ pub mod fixtures {
             TrackSpec {
                 dir: "Jazz Compilation",
                 file: "01.ogg",
-                codec: "libvorbis",
+                codec: "vorbis",
                 title: "Take Five",
                 artist: "Dave Brubeck",
                 album: "Jazz Compilation",
@@ -1423,7 +1432,7 @@ pub mod fixtures {
             TrackSpec {
                 dir: "Jazz Compilation",
                 file: "02.ogg",
-                codec: "libvorbis",
+                codec: "vorbis",
                 title: "My Favorite Things",
                 artist: "John Coltrane; Miles Davis",
                 album: "Jazz Compilation",

@@ -48,3 +48,14 @@ encode-mp3 = ["dep:mp3lame-sys"]
 
 [dev-dependencies]
 tempfile = "3"
+
+# The desktop setup-wizard UI: macOS only. Absent from the dependency graph
+# on every other target, so `cargo check/test/clippy --workspace` stays
+# green on Linux (this crate is a workspace member; the player's Tauri
+# shell is not, and is excluded from the workspace for the same reason).
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = { version = "2" }
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+tauri-build = { version = "2", features = [] }

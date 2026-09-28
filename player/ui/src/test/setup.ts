@@ -1,6 +1,8 @@
 import { enableAutoUnmount } from "@vue/test-utils";
 import { afterEach, beforeEach, vi } from "vitest";
 import { tauri } from "./tauri-mock";
+import { MockEventSource, resetEventSourceMock } from "./eventsource-mock";
+import { resetServerEventListenersForTest } from "../api";
 
 vi.mock("@tauri-apps/api/core", async () => {
   const { tauri } = await import("./tauri-mock");
@@ -25,6 +27,9 @@ class ResizeObserverStub {
   disconnect(): void {}
 }
 vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+// `setBaseUrl` (api.ts) opens a catalog-events SSE connection on every call,
+// including in every test's setup — happy-dom has no EventSource at all.
+vi.stubGlobal("EventSource", MockEventSource);
 Element.prototype.hasPointerCapture ??= () => false;
 Element.prototype.setPointerCapture ??= () => {};
 Element.prototype.releasePointerCapture ??= () => {};
@@ -75,6 +80,8 @@ beforeEach(() => {
   vi.stubGlobal("fetch", offline);
   localStorage.clear();
   tauri.reset();
+  resetEventSourceMock();
+  resetServerEventListenersForTest();
   // Outside Tauri unless a test opts in.
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   vi.spyOn(console, "warn").mockImplementation(() => {});

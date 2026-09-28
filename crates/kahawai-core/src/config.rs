@@ -60,6 +60,70 @@ impl ServerConfig {
         let text = std::fs::read_to_string(path.as_ref()).map_err(MusicError::Io)?;
         toml::from_str(&text).map_err(|e| MusicError::Config(e.to_string()))
     }
+
+    /// Serialize to TOML and write to `path`, creating parent directories
+    /// as needed. Used by the desktop setup wizard (macOS) to persist the
+    /// config it built interactively.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), MusicError> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(MusicError::Io)?;
+        }
+        let text = toml::to_string_pretty(self).map_err(|e| MusicError::Config(e.to_string()))?;
+        std::fs::write(path, text).map_err(MusicError::Io)
+    }
+
+    /// The per-OS default config path, used when nothing more specific is
+    /// given. Reads `HOME`/`XDG_CONFIG_HOME`/`APPDATA` directly — no new
+    /// crates for this.
+    pub fn default_config_path() -> Result<PathBuf, MusicError> {
+        Self::default_config_path_from_env(|k| std::env::var(k).ok())
+    }
+
+    /// Same as [`Self::default_config_path`] but takes an env lookup
+    /// function, so tests can exercise every branch without mutating the
+    /// process environment.
+    fn default_config_path_from_env(
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<PathBuf, MusicError> {
+        #[cfg(target_os = "macos")]
+        {
+            let home =
+                env("HOME").ok_or_else(|| MusicError::Config("HOME is not set".to_string()))?;
+            Ok(PathBuf::from(home).join("Library/Application Support/Kahawai Server/config.toml"))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let appdata = env("APPDATA")
+                .ok_or_else(|| MusicError::Config("APPDATA is not set".to_string()))?;
+            Ok(PathBuf::from(appdata)
+                .join("Kahawai Server")
+                .join("config.toml"))
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if let Some(xdg) = env("XDG_CONFIG_HOME") {
+                return Ok(PathBuf::from(xdg).join("kahawai-server/config.toml"));
+            }
+            let home =
+                env("HOME").ok_or_else(|| MusicError::Config("HOME is not set".to_string()))?;
+            Ok(PathBuf::from(home).join(".config/kahawai-server/config.toml"))
+        }
+    }
+
+    /// Resolution order for the config path: an explicit `argv[1]` wins,
+    /// then a `config.toml` in the current directory (legacy, pre-wizard
+    /// behavior), then the per-OS default under [`Self::default_config_path`].
+    pub fn resolve_path(argv1: Option<&Path>) -> Result<PathBuf, MusicError> {
+        if let Some(p) = argv1 {
+            return Ok(p.to_path_buf());
+        }
+        let legacy = PathBuf::from("config.toml");
+        if legacy.exists() {
+            return Ok(legacy);
+        }
+        Self::default_config_path()
+    }
 }
 
 impl Default for ServerConfig {
@@ -150,5 +214,104 @@ mod tests {
         let err = ServerConfig::load(&path).unwrap_err();
         assert!(matches!(err, MusicError::Config(_)));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_round_trips_and_creates_parents() {
+        let dir = std::env::temp_dir().join("kahawai-core-config-save-test");
+        let path = dir.join("nested/config.toml");
+        let cfg = ServerConfig {
+            music_dirs: vec![PathBuf::from("/mnt/music")],
+            bind: "127.0.0.1:9090".to_string(),
+            ..Default::default()
+        };
+        cfg.save(&path).expect("save");
+        let back = ServerConfig::load(&path).expect("load");
+        assert_eq!(back.music_dirs, cfg.music_dirs);
+        assert_eq!(back.bind, cfg.bind);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn default_config_path_macos_uses_application_support() {
+        let path = ServerConfig::default_config_path_from_env(|k| match k {
+            "HOME" => Some("/Users/kyo".to_string()),
+            _ => None,
+        });
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            path.unwrap(),
+            PathBuf::from("/Users/kyo/Library/Application Support/Kahawai Server/config.toml")
+        );
+        #[cfg(not(target_os = "macos"))]
+        let _ = path; // exercised on non-mac targets by the other branches below
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn default_config_path_linux_prefers_xdg_config_home() {
+        let path = ServerConfig::default_config_path_from_env(|k| match k {
+            "XDG_CONFIG_HOME" => Some("/tmp/xdg".to_string()),
+            "HOME" => Some("/home/kyo".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/xdg/kahawai-server/config.toml"));
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn default_config_path_linux_falls_back_to_home_dot_config() {
+        let path = ServerConfig::default_config_path_from_env(|k| match k {
+            "HOME" => Some("/home/kyo".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/home/kyo/.config/kahawai-server/config.toml")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn default_config_path_windows_uses_appdata() {
+        let path = ServerConfig::default_config_path_from_env(|k| match k {
+            "APPDATA" => Some(r"C:\Users\kyo\AppData\Roaming".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from(r"C:\Users\kyo\AppData\Roaming\Kahawai Server\config.toml")
+        );
+    }
+
+    #[test]
+    fn default_config_path_missing_home_is_a_config_error() {
+        let err = ServerConfig::default_config_path_from_env(|_| None).unwrap_err();
+        assert!(matches!(err, MusicError::Config(_)));
+    }
+
+    #[test]
+    fn resolve_path_prefers_explicit_argv() {
+        let explicit = PathBuf::from("/explicit/config.toml");
+        let resolved = ServerConfig::resolve_path(Some(&explicit)).unwrap();
+        assert_eq!(resolved, explicit);
+    }
+
+    #[test]
+    fn resolve_path_prefers_legacy_cwd_config_over_default() {
+        // No other test in this crate reads or changes the process cwd, so
+        // this swap-and-restore is safe under `cargo test`'s parallel runner.
+        let dir = std::env::temp_dir().join("kahawai-core-config-resolve-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), "bind = \"1.2.3.4:1\"").unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let resolved = ServerConfig::resolve_path(None);
+        std::env::set_current_dir(&original_cwd).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(resolved.unwrap(), PathBuf::from("config.toml"));
     }
 }

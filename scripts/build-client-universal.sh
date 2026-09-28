@@ -53,7 +53,11 @@ EXE_NAME="kahawai-player"  # the Cargo bin name inside Contents/MacOS (not the p
 BUNDLES="${PLAYER}/src-tauri/target/universal-apple-darwin/release/bundle"
 
 echo "==> cargo tauri build --target universal-apple-darwin (frontend once, Rust for both architectures)…"
-cd "${PLAYER}"
+# Must cd into src-tauri itself (where tauri.conf.json lives), not its parent:
+# run from player/, the CLI's beforeBuildCommand resolves relative to the
+# frontendDist's directory instead of src-tauri's, doubling "ui" (it looks
+# for player/ui/ui/package.json instead of player/ui/package.json).
+cd "${PLAYER}/src-tauri"
 cargo tauri build --target universal-apple-darwin
 
 if [[ ! -d "${BUNDLES}/macos/${APP_NAME}.app" ]]; then
