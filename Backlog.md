@@ -1,8 +1,6 @@
 # Backlog
 
-Things we decided to leave for later, with enough context to pick them up
-cold. Newest thinking wins: edit freely. Size is a rough guess:
-**S** = an hour or two, **M** = a day, **L** = several days.
+Things we decided to leave for later, with enough context to pick them up cold. Newest thinking wins: edit freely. Size is a rough guess: **S** = an hour or two, **M** = a day, **L** = several days.
 
 ## EQ and audio
 
@@ -51,40 +49,22 @@ Branch: `look-and-feel` (see [guidelines/Visual-House-Style-Guide.md](guidelines
 
 Both items below need the same groundwork, so plan them together:
 
-- **A stage seam.** Extract the `DspStage` trait sketched in EQ.md
-  section 6, so the EQ, tape and tube stages are interchangeable and
-  orderable in the PCM chain (decode, resample, [stages], loudness,
-  volume).
-- **Oversampling.** Saturation creates harmonics above the original
-  bandwidth; without 2x to 8x oversampling around the non-linear part they
-  alias back as harsh, inharmonic distortion. This is the main CPU cost,
-  and the playback thread must still keep ahead of the device (see the
-  200 ms ring buffer in [cpal_sink.rs](crates/kahawai-player-audio/src/cpal_sink.rs)).
-- **Same path rules as the EQ.** PCM shared path only. DoP and bit-perfect
-  playback bypass these effects, and the UI dims them with the same
-  "not supported for this stream type" message.
-- **Level discipline.** Non-linear stages care about input level. Decide
-  where in the chain they sit relative to loudness normalization and volume
-  (level in, level out, and a drive control), and add a gain-matched A/B so
-  "better" is not just "louder".
-- **Live edits without clicks.** Reuse the EQ's fade approach for parameter
-  changes and on/off.
-- **Licensing and naming.** Prefer our own implementations from published
-  papers and measurements. Check the licence before borrowing from open-source
-  emulations (some are GPL). Use "inspired by" wording for classic gear names;
-  the names are other companies' trademarks.
+- **A stage seam.** Extract the `DspStage` trait sketched in EQ.md section 6, so the EQ, tape and tube stages are interchangeable and orderable in the PCM chain (decode, resample, [stages], loudness, volume).
+- **Oversampling.** Saturation creates harmonics above the original bandwidth; without 2x to 8x oversampling around the non-linear part they alias back as harsh, inharmonic distortion. This is the main CPU cost, and the playback thread must still keep ahead of the device (see the 200 ms ring buffer in [cpal_sink.rs](crates/kahawai-player-audio/src/cpal_sink.rs)).
+- **Same path rules as the EQ.** PCM shared path only. DoP and bit-perfect playback bypass these effects, and the UI dims them with the same "not supported for this stream type" message.
+- **Level discipline.** Non-linear stages care about input level. Decide where in the chain they sit relative to loudness normalization and volume (level in, level out, and a drive control), and add a gain-matched A/B so "better" is not just "louder".
+- **Live edits without clicks.** Reuse the EQ's fade approach for parameter changes and on/off.
+- **Licensing and naming.** Prefer our own implementations from published papers and measurements. Check the licence before borrowing from open-source emulations (some are GPL). Use "inspired by" wording for classic gear names; the names are other companies' trademarks.
 
 | Item | Size | Why / notes |
 |---|---|---|
 | **Analog tape emulation, with classic machines as presets** | L (research: M) | A chain of models, not one effect: input saturation with magnetic hysteresis (Jiles-Atherton or a simpler bias-curve model), head bump and gap loss (low-frequency bump, high-frequency roll-off that depends on tape speed), wow and flutter (slow and fast pitch modulation), compression from tape saturation, noise floor and hiss (optional, off by default), record and playback EQ curves (NAB / IEC), and optionally azimuth error and crosstalk. Presets would set speed, tape type and the parameters above for a few well-documented machines and formats (for example a studio 2-inch machine, a consumer reel-to-reel, a cassette deck with and without Dolby-style noise reduction). Research needed: pick the reference machines, find measurements (published frequency responses, THD versus level, wow and flutter figures), decide model depth versus CPU, and listen-test against real recordings. |
-| ~~Tube and transistor "euphonics", with a few popular models as presets~~ | done on `analog-poc` | Built: 21 flavours, sag, transformer colour, level meter, blind test and listening suggestions. See [Analog-Emulation.md](Analog-Emulation.md). Follow-ups are in "Analog warmth: what is left" below. |
+| ~~Tube and transistor "euphonics", with a few popular models as presets~~ | done on `analog-poc` | Built: 21 flavours, sag, transformer colour, level meter, blind test and listening suggestions. See [Analog-Emulation.md](Analog%20Emulation.md). Follow-ups are in "Analog warmth: what is left" below. |
 | **Effects chain UI** | M | A single place to enable, order and preset the effects (EQ, tape, tube), in the same modal style as the EQ dialog, each with the level meters and the "not supported for this stream type" dimming. Needs the stage seam above and a per-stage on/off with fades. |
 
 ## Analog warmth: what is left
 
-Everything here follows from the work on `analog-poc` (see
-[Analog-Emulation.md](Analog-Emulation.md)); it is built and tested but has
-not been listened to yet.
+Everything here follows from the work on `analog-poc` (see [Analog-Emulation.md](Analog%20Emulation.md)); it is built and tested but has not been listened to yet.
 
 | Item | Size | Why / notes |
 |---|---|---|
