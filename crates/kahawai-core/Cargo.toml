@@ -2,6 +2,7 @@
 name = "kahawai-core"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-or-later"
 description = "Shared types, config, format logic, and errors for the music streaming server and player"
 
 [dependencies]

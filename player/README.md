@@ -396,3 +396,8 @@ scripts/build-client-universal.sh
 3. Bit-perfect DoP playback on a real DAC (marker-exact frames).
 4. Universal bundle via `scripts/build-client-universal.sh`.
 5. Signing + notarization with an Apple Developer identity.
+
+## License
+
+Kahawai is licensed under the GNU Affero General Public License v3.0 or later
+(AGPL-3.0-or-later). See `LICENSE` for the full text.

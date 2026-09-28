@@ -2,6 +2,7 @@
 name = "kahawai-player-api"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-or-later"
 description = "Async HTTP client for the music server API (browse, playlists, jobs, stream URLs)"
 
 [dependencies]

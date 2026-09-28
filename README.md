@@ -193,3 +193,9 @@ Gates for every phase: `cargo check` zero warnings, full suite green,
   macOS-only and Mac-gated for first validation.
 - Loudness pre-scan doubles first-play LAN bandwidth (documented in
   `player/README.md`); gain cache is in-memory.
+
+## License
+
+Kahawai is licensed under the GNU Affero General Public License v3.0 or later
+(AGPL-3.0-or-later). See `LICENSE` for the full text. Third-party dependency
+licenses are listed in `player/ui/src/content/notices.md`.
