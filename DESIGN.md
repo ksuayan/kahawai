@@ -35,10 +35,11 @@ is the day you stop trusting it.
 ### 1.3 Honest engineering — never fake a capability
 
 A feature that isn't built must say so, precisely. Disabled encoders answer
-`501` naming the cargo feature that enables them. The SACD extractor fails
-with a message naming the missing `sacd_extract` integration instead of
-silently doing nothing. Fallbacks (DSD→PCM when the DAC can't do DoP) are
-logged with the reason. UI surfaces server limitations verbatim rather than
+`501` naming the cargo feature that enables them. SACD ISO gets an honest
+`415` rather than a silent failure — see `SACD-Extraction.md` for why
+there's no extraction path behind it, now or ever. Fallbacks (DSD→PCM when
+the DAC can't do DoP) are logged with the reason. UI surfaces server
+limitations verbatim rather than
 hiding them. Test-pinned behaviors (e.g. headerless DoP seek responses) are
 documented as contract, not smoothed over. Guesses are marked as guesses.
 
@@ -121,8 +122,7 @@ flowchart TD
   explicitly by the client.
 - **Jobs**: SQLite-persisted (`003_jobs.sql`). Restart recovery rule: any
   `queued`/`running` job becomes `failed` with `error = "server restarted"`.
-  Scans run as jobs with live progress. The ISO extractor validates the
-  path and then fails honestly until `sacd_extract` is integrated.
+  Scans run as jobs with live progress.
 - **Hardening (S10)**: every served file is canonicalized and must stay
   under a configured music dir (symlink escapes → `404`); artwork hashes
   must be hex (`400`); JSON/import bodies capped at 10 MiB (`413`); API

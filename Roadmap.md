@@ -29,14 +29,6 @@ Reverse-proxy documentation (Caddy/nginx recipes), optional Tailscale/WireGuard
 notes. **Depends on:** auth + TLS. **Risk:** support burden for network
 topologies; keep it docs-first.
 
-### SACD ISO extraction worker
-
-Integrate `sacd_extract` (bundled binary or user-provided path) behind the
-existing jobs API — the job types, toasts, and recovery semantics already
-exist; only the worker is a stub. **Depends on:** deciding how the binary
-ships (bundle vs. BYO). **Risk:** licensing/distribution of the tool;
-per-platform binaries.
-
 ### Server-computed loudness metadata
 
 R128 integrated loudness measured at scan time (or as a background job),
@@ -168,6 +160,7 @@ the philosophy doc is the guardrail.
 - Social features, scrobbling-as-a-service, analytics, telemetry.
 - Cloud sync of any kind.
 - DRM or protected-content playback — v1 decision, stands.
+- SACD ISO extraction/decoding, in any form — see `SACD-Extraction.md`.
 
 ---
 
@@ -177,6 +170,6 @@ the philosophy doc is the guardrail.
 2. Server-computed loudness (deletes a real daily cost) + artwork disk
    cache (small, satisfying).
 3. Auth + TLS with a real security review.
-4. SACD worker, PCM exclusive toggle, device selection.
+4. PCM exclusive toggle, device selection.
 5. Mobile shells + offline.
 6. Everything else as demand dictates.

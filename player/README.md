@@ -229,7 +229,6 @@ Every track row, the now-playing bar, and album headers offer:
 - **Play next** — insert right after the current queue item.
 - **Add to queue** — append to the end, playback undisturbed.
 - **Add to playlist…** — pick an existing playlist or create one inline.
-- **Extract to DSF** — shown for SACD ISO tracks; posts a server job.
 
 Album headers additionally offer play-all / play-next / queue / playlist
 for the whole album.
@@ -248,9 +247,6 @@ for the whole album.
 
 - `POST /api/scan` from Settings → Library; a **409 means a scan is already
   running** — that's an info toast, not an error.
-- SACD ISO **Extract to DSF** posts `POST /api/jobs`. The v1 server does
-  not yet integrate `sacd_extract`, so the job fails with the server's
-  honest message, displayed **verbatim** in the failure toast.
 - The jobs store polls `GET /api/jobs` at ~2 Hz **only while jobs are
   active** (progress toasts update live; completion/failure close the
   progress toast and post a final toast). Launch picks up already-active
@@ -370,9 +366,7 @@ scripts/build-client-universal.sh
   stream) and says so where a buffer readout would be expected.
 - **Artwork disk cache**: browser HTTP caching only; content-addressed
   LRU disk cache is v2.
-- **SACD ISO** is not directly playable; the v1 path is offline
-  `sacd_extract` → DSF. The client's Extract-to-DSF action surfaces the
-  server's not-yet-implemented message verbatim.
+- **SACD ISO is not supported and never will be** — see root `SACD-Extraction.md`.
 - **Offline mode**, **PCM exclusive-mode toggle**, **VST3/AU** are out of v1.
 
 ## Validation caveats

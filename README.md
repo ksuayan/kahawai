@@ -16,9 +16,11 @@ Docs (read in this order):
 - `DESIGN.md` — formal design specification: philosophy, architecture of both
   applications, long-term considerations.
 - `kahawai-server-spec.md` — server build record: stories S1–S13, API,
-  DSD work, deployment (written as the work happened; not edited afterward).
+  DSD work, deployment (written as the work happened; not edited afterward,
+  except to strike SACD-extraction content per `SACD-Extraction.md`).
 - `kahawai-player-design.md` — client build record: engine, stores, UI, DSP.
 - `Roadmap.md` — future enhancements (possibilities, not commitments).
+- `SACD-Extraction.md` — why SACD ISO decoding is permanently out of scope.
 - `player/README.md` — the desktop client's own README.
 
 ## Status
@@ -105,7 +107,7 @@ your network or your real files.
   naming the required cargo feature (`encode-opus`, `encode-mp3`).
 - `?format=dop` serves native DSD-over-PCM in a WAV container (DSD64→176.4 kHz,
   DSD128→352.8 kHz, DSD256→705.6 kHz; `0x05`/`0xFA` markers). Non-DSD +
-  `?format=dop` → `400`. SACD ISO → `415` (offline extraction is the v1 path).
+  `?format=dop` → `400`.
 - `?seek_ms=` seeks transcodes sample-exactly (DSD seeks use phase-aligned
   FIR warm-up). A *seeked* DoP response carries the raw payload suffix with
   no WAV header — test-pinned server behavior the client handles explicitly.
@@ -187,8 +189,6 @@ Gates for every phase: `cargo check` zero warnings, full suite green,
 
 - LAN-only: no auth, no TLS — v2 (`Roadmap.md`).
 - AAC confirmed; no DRM/protected content.
-- SACD ISO is cataloged, not directly playable → offline `sacd_extract` → DSF;
-  the extraction worker integration is future work.
 - DoP gapless is best-effort (chained WAVs) by design; the DoP client sink is
   macOS-only and Mac-gated for first validation.
 - Loudness pre-scan doubles first-play LAN bandwidth (documented in

@@ -1,7 +1,7 @@
 # Kahawai Server — Design Spec (v1)
 
 *2026-09-25. New project. ~1 TB collection: MP3, MP4/M4A, AAC, FLAC, Opus,
-OGG Vorbis, DSD (DSF/DFF), SACD ISOs. No DRM or protected-content support in
+OGG Vorbis, DSD (DSF/DFF). No DRM or protected-content support in
 v1 (Kyo, 2026-09-25). Initial deployment is LAN over Wi-Fi; auth/TLS deferred
 to v2.*
 
@@ -34,12 +34,8 @@ workload — tokio is the right runtime here (unlike Koa, where it was rejected)
 | MP3, FLAC, M4A/MP4 (AAC/ALAC), WAV, AIFF, OGG Vorbis | **symphonia** (pure Rust, SIMD, ±15% of FFmpeg) | Bit-perfect passthrough — serve the file bytes, no transcode |
 | Opus (.opus) | **symphonia + `symphonia-adapter-libopus`** (third-party adapter over libopus) | Bit-perfect passthrough |
 | DSF / DFF (DSD64/128) | Own parser + FIR decimation filter DSD→PCM (this is the established approach; symphonia does **not** do DSD) | **Story A — DSD as PCM:** real-time transcode → FLAC 24/88.2 (or 176.4). **Story B — native DSD:** bit-perfect DSD stream to a DSD-capable DAC (DoP encapsulation); separate client audio path, separate feature |
-| SACD ISO | **v1 (confirmed): offline extraction** — `sacd_extract` → DSF before ingest, with progress/completion surfaced to the user (§3.7); **v2:** in-server ISO parse + DST decompression | Same as DSF once extracted |
 
-**Hard truth, recorded:** SACD ISO with DST (Direct Stream Transfer)
-decompression, especially multichannel, is the single hardest decode task in
-this project. Do not attempt in-server ISO support in v1 — the offline
-extraction path gets the music playing now; ISO+DST is a cleanly scoped v2.
+SACD ISO is cataloged but never decoded — see `SACD-Extraction.md`.
 
 **Transcode ladder** (only when passthrough isn't possible or bandwidth
 demands it): source → PCM (symphonia or DSD decimator) → **rubato** resample
@@ -137,8 +133,8 @@ never stare at a hung UI:
   (`"extract_iso"`, `"ogg_vorbis"`).
 - `GET /api/jobs` lists; `GET /api/jobs/{id}` polls status. (SSE push is a v2
   refinement; polling at 1 Hz is fine for v1.)
-- Client surfaces a **toast** when a job starts ("Extracting SACD ISO…"),
-  updates progress inline, and toasts again on completion or failure with the
+- Client surfaces a **toast** when a job starts ("Scanning…"), updates
+  progress inline, and toasts again on completion or failure with the
   outcome (tracks added, error message).
 - Jobs survive client disconnects (server-owned); a reconnecting client picks
   up in-flight job states from `GET /api/jobs`.
@@ -212,15 +208,14 @@ server API so queues become playlists and playlists become queues:
 | ☐ | S12 | Scrubbing: Range seek on passthrough; `?seek_ms=` transcode restart; buffered-range display |
 | ☐ | S13 | Format options: `?format=` ladder, per-client preferred ladder, per-session override, DSD story selector |
 | ☐ | S8 | Gapless: `?next=` pre-decode hint, encoder padding compensation |
-| ☐ | S9 | Job queue API + client toasts for long-running tasks (ISO extraction progress/completion) |
+| ☐ | S9 | Job queue API + client toasts for long-running tasks (scan progress/completion) |
 | ☐ | S10 | Backpressure streaming (constant memory), connection caps, WAL SQLite; TOML config, structured per-stream logging (LAN-only: no auth/TLS in v1) |
 | ☐ | C1 | Tauri client: browse + queue + gapless playback (cpal/rodio) |
 | ☐ | C2 | Pinia stores (library / player / playlists), artwork disk cache |
 | ☐ | C3 | Built-in parametric EQ + loudness normalization |
 
-**Explicitly v2:** SACD ISO in-server decode (DST), Subsonic API dialect,
-multi-user, **auth/TLS**, VST3/AU plugin hosting, smart playlists, SSE job
-push.
+**Explicitly v2:** Subsonic API dialect, multi-user, **auth/TLS**, VST3/AU
+plugin hosting, smart playlists, SSE job push.
 
 ## 7. Phasing
 
@@ -234,13 +229,11 @@ push.
    queue + toasts, hardening (LAN-only, no auth).
 6. **C1–C3** — Tauri client: queue UI with save-as-playlist, seek bar with
    buffered ranges, format picker + Now Playing chain badge.
-7. **Spikes (parallel):** SACD ISO/DST feasibility; AU plugin-host prototype.
+7. **Spikes (parallel):** AU plugin-host prototype.
 
 ## 8. Decisions (resolved 2026-09-25, Kyo)
 
 1. "aacs" = plain AAC. No DRM or protected-content support in v1.
-2. SACD ISOs: offline `sacd_extract` → DSF is the v1 ingest story, with toast
-   + job-queue notifications for extraction progress and completion.
-3. Native DSD (DoP to a DSD-capable DAC) and DSD→PCM→FLAC are two separate
+2. Native DSD (DoP to a DSD-capable DAC) and DSD→PCM→FLAC are two separate
    features (S5b vs S5a), not one.
-4. v1 is LAN over Wi-Fi, no auth/TLS. Secure/authenticated connections are v2.
+3. v1 is LAN over Wi-Fi, no auth/TLS. Secure/authenticated connections are v2.
