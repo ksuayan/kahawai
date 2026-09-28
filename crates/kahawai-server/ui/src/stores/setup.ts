@@ -4,16 +4,19 @@ import {
   setupApplyConfig,
   setupGetRunningConfig,
   setupGetState,
+  setupLiveScanStats,
   setupPickDirectory,
   setupQuit,
   setupRecentScans,
+  setupRestartServer,
   setupRevealConfig,
   setupSaveConfig,
   setupServerStatus,
   setupStartServer,
+  setupStopServer,
   setupValidateDir,
 } from "../tauri";
-import type { MusicDirEntry, ScanJob, ServerStatus } from "../types";
+import type { LiveScanStats, MusicDirEntry, ScanJob, ServerStatus } from "../types";
 import { dirStatus, isJobActive } from "../types";
 
 /** A `host:port` shape good enough to gate the Continue button; the backend
@@ -25,6 +28,8 @@ export const useSetupStore = defineStore("setup", () => {
   /** "wizard" until a usable config exists, then the minimal status view. */
   const view = ref<"wizard" | "status">("wizard");
   const step = ref(0);
+  /** Which tab the status view shows. */
+  const activeTab = ref<"status" | "settings">("status");
 
   const configPath = ref("");
   const dirs = ref<MusicDirEntry[]>([]);
@@ -36,15 +41,23 @@ export const useSetupStore = defineStore("setup", () => {
   const serverStatus = ref<ServerStatus | null>(null);
   const dbDirValidation = ref<MusicDirEntry["validation"]>(undefined);
 
-  // Status view: the running server's own config, edited and applied live
-  // (no restart) — distinct from `dirs`/`bind`/`dbDir` above, which are the
-  // wizard's own working copy before a server exists.
+  // Status/Settings tabs: the running server's own config, edited and
+  // applied live (no restart) — distinct from `dirs`/`bind`/`dbDir` above,
+  // which are the wizard's own working copy before a server exists.
   const runningDbPath = ref("");
   const runningBind = ref("");
+  /** Display copy: the live config's folders, with pending adds/removes
+   *  already reflected so the list looks right immediately. The *only*
+   *  things actually sent to the backend are `pendingAdds`/`pendingRemoves`
+   *  below — never this full list — so a folder can never be dropped except
+   *  by explicitly removing it (see `setup_apply_config`). */
   const runningDirs = ref<MusicDirEntry[]>([]);
+  const pendingAdds = ref<string[]>([]);
+  const pendingRemoves = ref<string[]>([]);
   const applying = ref(false);
   const applyError = ref<string | null>(null);
   const recentScans = ref<ScanJob[]>([]);
+  const liveScanStats = ref<LiveScanStats | null>(null);
   let scanPollTimer: number | undefined;
 
   const okDirCount = computed(
@@ -53,9 +66,11 @@ export const useSetupStore = defineStore("setup", () => {
   const canLeaveFolders = computed(() => okDirCount.value >= 1);
   const canLeaveDatabase = computed(() => dbDirValidation.value?.writable === true);
   const bindLooksValid = computed(() => BIND_RE.test(bind.value.trim()));
-  const canApply = computed(
-    () => runningDirs.value.some((d) => d.validation && dirStatus(d.validation) === "ok"),
-  );
+  const canApply = computed(() => pendingAdds.value.length > 0 || pendingRemoves.value.length > 0);
+  /** True while any scan job (however it was started — Settings' Apply, the
+   *  startup scan, anything) is queued or running. Drives the Status tab's
+   *  live view independent of who triggered it. */
+  const isScanning = computed(() => recentScans.value.some(isJobActive));
 
   /** Called once on mount: decides wizard vs. status, prefills from any
    *  existing config. */
@@ -71,6 +86,7 @@ export const useSetupStore = defineStore("setup", () => {
       view.value = "status";
       serverStatus.value = (await setupServerStatus()) ?? null;
       await Promise.all([loadRunningConfig(), loadRecentScans()]);
+      if (isScanning.value) ensureScanPolling();
     } else {
       view.value = "wizard";
       step.value = 0;
@@ -78,9 +94,10 @@ export const useSetupStore = defineStore("setup", () => {
     loading.value = false;
   }
 
-  /** Populates the Status view's editable folder list from the *running*
+  /** Populates the Status/Settings tabs' folder list from the *running*
    *  server's config (not the wizard's `dirs`, which is only meaningful
-   *  before a server exists). */
+   *  before a server exists) — and clears any pending add/remove, since
+   *  this re-syncs to the authoritative source. */
   async function loadRunningConfig(): Promise<void> {
     const config = await setupGetRunningConfig();
     if (!config) return;
@@ -92,13 +109,23 @@ export const useSetupStore = defineStore("setup", () => {
       validating: false,
       validation: validations[i],
     }));
+    pendingAdds.value = [];
+    pendingRemoves.value = [];
   }
 
+  /** Adds to the display list and queues the folder to actually be added on
+   *  the next Apply. Re-adding something removed earlier this session just
+   *  cancels that pending removal — it was never actually gone. */
   async function addRunningDirFromPicker(): Promise<void> {
     const picked = await setupPickDirectory();
     if (!picked) return;
     if (runningDirs.value.some((d) => d.path === picked)) return;
     runningDirs.value.push({ path: picked, validating: true });
+    if (pendingRemoves.value.includes(picked)) {
+      pendingRemoves.value = pendingRemoves.value.filter((p) => p !== picked);
+    } else {
+      pendingAdds.value.push(picked);
+    }
     const validation = await setupValidateDir(picked);
     const row = runningDirs.value.find((d) => d.path === picked);
     if (row) {
@@ -107,28 +134,39 @@ export const useSetupStore = defineStore("setup", () => {
     }
   }
 
+  /** Removes from the display list. If the folder was only a pending add
+   *  (never actually applied), that's all — otherwise queues an explicit
+   *  removal, since that's the only way `setup_apply_config` will drop it. */
   function removeRunningDir(path: string): void {
     runningDirs.value = runningDirs.value.filter((d) => d.path !== path);
+    if (pendingAdds.value.includes(path)) {
+      pendingAdds.value = pendingAdds.value.filter((p) => p !== path);
+    } else if (!pendingRemoves.value.includes(path)) {
+      pendingRemoves.value.push(path);
+    }
   }
 
   async function loadRecentScans(): Promise<void> {
     recentScans.value = await setupRecentScans();
   }
 
-  /** Poll `setup_recent_scans` until the newest scan job settles, so the UI
-   *  can show "scanning…" and then the final result without the caller
-   *  needing its own timer. Safe to call again — restarts the poll. */
-  function pollScansUntilSettled(): void {
-    window.clearInterval(scanPollTimer);
+  async function refreshLiveScanStats(): Promise<void> {
+    liveScanStats.value = await setupLiveScanStats();
+  }
+
+  /** Poll while a scan is active, for the Status tab's live tally and the
+   *  Settings tab's Apply button — regardless of who started the scan.
+   *  Safe to call repeatedly; a second call while already polling is a
+   *  no-op. */
+  function ensureScanPolling(): void {
+    if (scanPollTimer !== undefined) return;
     scanPollTimer = window.setInterval(async () => {
-      await loadRecentScans();
-      const newest = recentScans.value[0];
-      if (!newest || !isJobActive(newest)) {
+      await Promise.all([loadRecentScans(), refreshLiveScanStats()]);
+      if (!isScanning.value) {
         window.clearInterval(scanPollTimer);
         scanPollTimer = undefined;
-        applying.value = false;
       }
-    }, 500);
+    }, 1000);
   }
 
   /** Add/remove music folders on the running server: applies immediately
@@ -138,15 +176,34 @@ export const useSetupStore = defineStore("setup", () => {
     applyError.value = null;
     applying.value = true;
     try {
-      await setupApplyConfig({
-        music_dirs: runningDirs.value
-          .filter((d) => d.validation && dirStatus(d.validation) === "ok")
-          .map((d) => d.path),
-      });
-      pollScansUntilSettled();
+      await setupApplyConfig({ add: pendingAdds.value, remove: pendingRemoves.value });
+      pendingAdds.value = [];
+      pendingRemoves.value = [];
+      await loadRecentScans();
+      ensureScanPolling();
     } catch (err) {
       applyError.value = String(err);
+    } finally {
       applying.value = false;
+    }
+  }
+
+  /** Stops the server process (not the app). */
+  async function stopServer(): Promise<void> {
+    await setupStopServer();
+    serverStatus.value = { running: false, bind: serverStatus.value?.bind ?? "" };
+  }
+
+  /** Stops, then starts again from the on-disk config — e.g. after an
+   *  Advanced settings change (bind/database) that needs a restart. */
+  async function restartServer(): Promise<void> {
+    startError.value = null;
+    try {
+      serverStatus.value = await setupRestartServer();
+      await Promise.all([loadRunningConfig(), loadRecentScans()]);
+      if (isScanning.value) ensureScanPolling();
+    } catch (err) {
+      startError.value = String(err);
     }
   }
 
@@ -214,6 +271,7 @@ export const useSetupStore = defineStore("setup", () => {
       // the very folder(s) just set up in the wizard could be silently
       // dropped the first time someone added another one from Status.
       await Promise.all([loadRunningConfig(), loadRecentScans()]);
+      if (isScanning.value) ensureScanPolling();
     } catch (err) {
       startError.value = String(err);
     }
@@ -237,6 +295,7 @@ export const useSetupStore = defineStore("setup", () => {
     loading,
     view,
     step,
+    activeTab,
     configPath,
     dirs,
     dbDir,
@@ -252,10 +311,14 @@ export const useSetupStore = defineStore("setup", () => {
     runningDbPath,
     runningBind,
     runningDirs,
+    pendingAdds,
+    pendingRemoves,
     applying,
     applyError,
     recentScans,
+    liveScanStats,
     canApply,
+    isScanning,
     init,
     addDirFromPicker,
     removeDir,
@@ -271,6 +334,9 @@ export const useSetupStore = defineStore("setup", () => {
     addRunningDirFromPicker,
     removeRunningDir,
     loadRecentScans,
+    refreshLiveScanStats,
     applyAndRescan,
+    stopServer,
+    restartServer,
   };
 });

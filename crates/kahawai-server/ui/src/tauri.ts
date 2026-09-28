@@ -9,6 +9,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type {
   ApplyConfigInput,
   DirValidation,
+  LiveScanStats,
   ScanJob,
   ServerConfigShape,
   ServerStatus,
@@ -73,7 +74,9 @@ export async function setupGetRunningConfig(): Promise<ServerConfigShape | undef
 }
 
 /** Add/remove music folders on a running server: applies immediately (no
- *  restart) and triggers a rescan. Throws the backend's error string. */
+ *  restart) and triggers a rescan. `add`/`remove` are deltas, not a full
+ *  replacement list — a folder is dropped only if named in `remove`.
+ *  Throws the backend's error string. */
 export async function setupApplyConfig(input: ApplyConfigInput): Promise<void> {
   await invoke("setup_apply_config", { input });
 }
@@ -81,6 +84,23 @@ export async function setupApplyConfig(input: ApplyConfigInput): Promise<void> {
 /** Most recent scan jobs (successes and failures), newest first. */
 export async function setupRecentScans(): Promise<ScanJob[]> {
   return (await cmd<ScanJob[]>("setup_recent_scans")) ?? [];
+}
+
+/** Live catalog counts, for the Status tab's tally while a scan runs. */
+export async function setupLiveScanStats(): Promise<LiveScanStats> {
+  return (
+    (await cmd<LiveScanStats>("setup_live_scan_stats")) ?? { albums: 0, artists: 0, tracks: 0 }
+  );
+}
+
+/** Stops the server process without quitting the app. */
+export async function setupStopServer(): Promise<void> {
+  await cmd("setup_stop_server");
+}
+
+/** Stops then starts again from the on-disk config. Throws on a bind failure. */
+export async function setupRestartServer(): Promise<ServerStatus> {
+  return invoke<ServerStatus>("setup_restart_server");
 }
 
 export async function setupQuit(): Promise<void> {

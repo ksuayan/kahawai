@@ -18,7 +18,7 @@ function subtitle(a: { artist?: string | null; year?: number | null; track_count
 </script>
 
 <template>
-  <ViewShell title="Albums" :subtitle="`${lib.albums.length} albums in library`">
+  <ViewShell title="Albums" :subtitle="`${lib.albums.length} albums in library`" width="full">
     <StateMessage v-if="lib.loading" kind="loading">Loading albums…</StateMessage>
     <StateMessage v-else-if="lib.error" kind="error">{{ lib.error }}</StateMessage>
     <StateMessage v-else-if="lib.sortedAlbums.length === 0" kind="empty">No albums found.</StateMessage>

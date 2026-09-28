@@ -53,6 +53,14 @@ describe("AlbumsView", () => {
     expect(error.get('[role="alert"]').text()).toBe("Server not reachable");
     expect(mountApp(AlbumsView).wrapper.text()).toContain("No albums found.");
   });
+
+  // The grid uses auto-fill columns, so giving it the full panel (not a
+  // fixed max-width like the other views) is what lets more columns show up
+  // on a wide display instead of the grid capping out regardless of window size.
+  it("takes the full panel width instead of capping out like other views", () => {
+    const { wrapper } = mountApp(AlbumsView, {}, {}, seed([makeAlbum()]));
+    expect(wrapper.get(".px-6.pb-10.pt-5").classes()).toContain("max-w-none");
+  });
 });
 
 describe("ArtistsView", () => {

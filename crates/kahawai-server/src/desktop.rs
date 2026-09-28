@@ -38,6 +38,20 @@ pub struct SetupState {
     config: Option<ServerConfig>,
 }
 
+/// Time budget for `setup_validate_dir`'s walk. Just a UI sanity check (does
+/// this folder have music in it?), not the real scan —
+/// `scanner::run_scan_with_progress` walks every file, no limit of any kind.
+/// Time-boxed rather than count-capped: a real library can be huge (six
+/// figures of files isn't unusual), and a fixed file-count cap either
+/// truncates almost immediately for a library that size or does nothing
+/// useful for a small one. A time budget scales itself — a fast local drive
+/// gets an exact count regardless of how many files that takes, a slow
+/// network share just reports what it found in the budget and says so.
+const VALIDATE_DIR_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
+/// How often to check the clock — `Instant::now()` per file is wasteful at
+/// six-figure file counts.
+const VALIDATE_DIR_CLOCK_CHECK_INTERVAL: u32 = 256;
+
 #[derive(Serialize)]
 pub struct DirValidation {
     exists: bool,
@@ -45,6 +59,10 @@ pub struct DirValidation {
     readable: bool,
     writable: bool,
     audio_files: usize,
+    /// True if the walk hit `VALIDATE_DIR_FILE_CAP` before finishing —
+    /// `audio_files` is then a lower bound, not the true count. Never true
+    /// for the actual scan, only this quick preview.
+    truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -116,13 +134,16 @@ pub fn setup_validate_dir(path: String) -> DirValidation {
             readable: false,
             writable: false,
             audio_files: 0,
+            truncated: false,
         };
     }
     let readable = std::fs::read_dir(dir).is_ok();
     let writable = is_writable(dir);
     let mut audio_files = 0usize;
+    let mut truncated = false;
     if readable {
-        let mut seen = 0usize;
+        let start = std::time::Instant::now();
+        let mut checked = 0u32;
         for entry in walkdir::WalkDir::new(dir)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -130,11 +151,14 @@ pub fn setup_validate_dir(path: String) -> DirValidation {
             if !entry.file_type().is_file() {
                 continue;
             }
-            seen += 1;
             if crate::scanner::is_audio(entry.path()) {
                 audio_files += 1;
             }
-            if seen >= 2000 {
+            checked += 1;
+            if checked.is_multiple_of(VALIDATE_DIR_CLOCK_CHECK_INTERVAL)
+                && start.elapsed() >= VALIDATE_DIR_TIME_BUDGET
+            {
+                truncated = true;
                 break;
             }
         }
@@ -145,6 +169,7 @@ pub fn setup_validate_dir(path: String) -> DirValidation {
         readable,
         writable,
         audio_files,
+        truncated,
     }
 }
 
@@ -193,7 +218,12 @@ pub fn setup_get_running_config(state: tauri::State<DesktopState>) -> Option<Ser
 
 #[derive(Deserialize)]
 pub struct ApplyConfigInput {
-    music_dirs: Vec<String>,
+    /// Folders to add. A path already present is a no-op, not a duplicate.
+    #[serde(default)]
+    add: Vec<String>,
+    /// Folders to remove — the *only* way a folder leaves `music_dirs`.
+    #[serde(default)]
+    remove: Vec<String>,
 }
 
 /// Add/remove music folders on a *running* server, no restart: updates the
@@ -203,16 +233,18 @@ pub struct ApplyConfigInput {
 /// hot-swapped safely (the listener is already bound; the DB pool is
 /// already open against the old path), so those still need the wizard's
 /// save-and-restart path.
+///
+/// Takes `add`/`remove` deltas, not a full replacement list: the frontend
+/// used to send its entire working copy of the folder list, and a bug that
+/// left that copy incomplete (e.g. not yet loaded from the running config)
+/// silently dropped every folder it didn't know about. Computing the new
+/// list here, against the live config, means a folder can only ever
+/// disappear because this call explicitly named it in `remove`.
 #[tauri::command]
 pub async fn setup_apply_config(
     input: ApplyConfigInput,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<(), String> {
-    if input.music_dirs.is_empty() {
-        return Err("Add at least one music folder.".to_string());
-    }
-    let dirs: Vec<PathBuf> = input.music_dirs.into_iter().map(PathBuf::from).collect();
-
     let app_state = state
         .app_state
         .lock()
@@ -220,7 +252,21 @@ pub async fn setup_apply_config(
         .clone()
         .ok_or_else(|| "the server is not running".to_string())?;
 
-    app_state.config.write().unwrap().music_dirs = dirs.clone();
+    let dirs = {
+        let mut cfg = app_state.config.write().unwrap();
+        let remove: Vec<PathBuf> = input.remove.iter().map(PathBuf::from).collect();
+        cfg.music_dirs.retain(|d| !remove.contains(d));
+        for a in input.add {
+            let p = PathBuf::from(a);
+            if !cfg.music_dirs.contains(&p) {
+                cfg.music_dirs.push(p);
+            }
+        }
+        if cfg.music_dirs.is_empty() {
+            return Err("At least one music folder is required.".to_string());
+        }
+        cfg.music_dirs.clone()
+    };
 
     let path = ServerConfig::resolve_path(None).map_err(|e| e.to_string())?;
     let mut on_disk = ServerConfig::load(&path).unwrap_or_default();
@@ -245,6 +291,55 @@ pub async fn setup_apply_config(
         .await;
     crate::api::spawn_scan_job(app_state, job, guard);
     Ok(())
+}
+
+#[derive(Serialize, Default)]
+pub struct LiveScanStats {
+    albums: i64,
+    artists: i64,
+    tracks: i64,
+    /// The most recently cataloged album (by insertion order), so the
+    /// Status view can show "scanning… last added: <album>" — a per-album
+    /// sense of progress without the scanner needing its own event stream.
+    last_album: Option<String>,
+    last_album_artist: Option<String>,
+}
+
+/// Live catalog counts, polled by the Status view while a scan is running.
+/// Reads straight from the DB rather than the scanner's own file-level
+/// progress, so it reflects exactly what's actually been committed so far.
+#[tauri::command]
+pub async fn setup_live_scan_stats(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<LiveScanStats, String> {
+    let Some(app_state) = state.app_state.lock().unwrap().clone() else {
+        return Ok(LiveScanStats::default());
+    };
+    let pool = &app_state.pool;
+    let albums: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM albums")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let artists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artists")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let tracks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let last: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT title, artist FROM albums ORDER BY id DESC LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(LiveScanStats {
+        albums,
+        artists,
+        tracks,
+        last_album: last.as_ref().map(|(t, _)| t.clone()),
+        last_album_artist: last.and_then(|(_, a)| a),
+    })
 }
 
 /// The most recent scan jobs (successes and failures alike), for the Status
@@ -322,6 +417,28 @@ pub async fn setup_start_server(
     let path = ServerConfig::resolve_path(None).map_err(|e| e.to_string())?;
     let config = ServerConfig::load(&path).map_err(|e| e.to_string())?;
     spawn_and_check(state.inner().clone(), config).await
+}
+
+/// Stops the server process (not the desktop app) without quitting: aborts
+/// the running task and drops the `AppState` handle. `setup_start_server` /
+/// `setup_restart_server` can bring it back up without relaunching the app.
+#[tauri::command]
+pub fn setup_stop_server(state: tauri::State<'_, DesktopState>) {
+    if let Some(handle) = state.server_task.lock().unwrap().take() {
+        handle.inner().abort();
+    }
+    *state.app_state.lock().unwrap() = None;
+    *state.bind.lock().unwrap() = None;
+}
+
+/// Stop, then start again from the on-disk config — e.g. after an Advanced
+/// settings change (bind/database) that can't be hot-applied.
+#[tauri::command]
+pub async fn setup_restart_server(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<ServerStatus, String> {
+    setup_stop_server(state.clone());
+    setup_start_server(state).await
 }
 
 #[tauri::command]

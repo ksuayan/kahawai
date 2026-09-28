@@ -1,9 +1,18 @@
 <script setup lang="ts">
-/** Page frame shared by every main view: padding, title, subtitle, actions. */
-withDefaults(defineProps<{ title?: string; subtitle?: string; width?: "wide" | "medium" | "narrow" }>(), {
-  width: "wide",
-});
-const widths = { wide: "max-w-[1200px]", medium: "max-w-[900px]", narrow: "max-w-[640px]" } as const;
+/** Page frame shared by every main view: padding, title, subtitle, actions.
+ *  `full` is for card grids (Albums): with `auto-fill` columns, giving it
+ *  the whole panel means more columns show up on a wide display instead of
+ *  capping out at a fixed width regardless of window size. */
+withDefaults(
+  defineProps<{ title?: string; subtitle?: string; width?: "full" | "wide" | "medium" | "narrow" }>(),
+  { width: "wide" },
+);
+const widths = {
+  full: "max-w-none",
+  wide: "max-w-[1200px]",
+  medium: "max-w-[900px]",
+  narrow: "max-w-[640px]",
+} as const;
 </script>
 
 <template>

@@ -8,9 +8,9 @@ function inTauri(): void {
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
 }
 
-const okValidation = { exists: true, is_dir: true, readable: true, writable: true, audio_files: 12 };
-const emptyValidation = { exists: true, is_dir: true, readable: true, writable: true, audio_files: 0 };
-const badValidation = { exists: false, is_dir: false, readable: false, writable: false, audio_files: 0 };
+const okValidation = { exists: true, is_dir: true, readable: true, writable: true, audio_files: 12, truncated: false };
+const emptyValidation = { exists: true, is_dir: true, readable: true, writable: true, audio_files: 0, truncated: false };
+const badValidation = { exists: false, is_dir: false, readable: false, writable: false, audio_files: 0, truncated: false };
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -233,12 +233,13 @@ describe("setup store: start server", () => {
     await setup.addRunningDirFromPicker();
     vi.useFakeTimers();
     await setup.applyAndRescan();
-    await vi.advanceTimersByTimeAsync(500); // let the settle-poll clear itself
+    await vi.advanceTimersByTimeAsync(1000); // let the settle-poll clear itself
     vi.useRealTimers();
 
-    expect(tauri.callsTo("setup_apply_config")).toEqual([
-      { input: { music_dirs: ["/music/a", "/music/b"] } },
-    ]);
+    // Only the delta is sent — the backend merges it against the *live*
+    // config, so "/music/a" (never touched) can't be dropped even if this
+    // payload didn't repeat it.
+    expect(tauri.callsTo("setup_apply_config")).toEqual([{ input: { add: ["/music/b"], remove: [] } }]);
   });
 });
 
@@ -282,7 +283,10 @@ describe("setup store: live config (running server)", () => {
     expect(setup.runningDirs.map((d) => d.path)).toEqual(["/music/a", "/music/b"]);
     expect(setup.runningDbPath).toBe("/data/music.db");
     expect(setup.runningBind).toBe("0.0.0.0:8080");
-    expect(setup.canApply).toBe(true);
+    // Loading re-syncs to the authoritative source, so there's nothing
+    // pending yet — canApply only turns on once something's actually added
+    // or removed.
+    expect(setup.canApply).toBe(false);
   });
 
   it("adds a picked folder to the running list via the same picker as the wizard", async () => {
@@ -302,19 +306,25 @@ describe("setup store: live config (running server)", () => {
     expect(setup.runningDirs).toHaveLength(0);
   });
 
-  it("applies the folder list, then polls until the rescan settles", async () => {
+  it("applies the pending add, then polls until the rescan settles", async () => {
     vi.useFakeTimers();
+    inTauri();
     tauri.on("setup_apply_config", undefined);
     const setup = useSetupStore();
-    setup.runningDirs = [{ path: "/music/a", validating: false, validation: okValidation }];
+    dialog.nextPath = "/music/a";
+    tauri.on("setup_validate_dir", okValidation);
+    await setup.addRunningDirFromPicker();
 
     tauri.on("setup_recent_scans", [
       { id: "job-0002", kind: "scan", label: "Library scan", progress: 0.5, status: "running" },
     ]);
     const applied = setup.applyAndRescan();
     await vi.advanceTimersByTimeAsync(0); // let setupApplyConfig's await resolve
-    expect(setup.applying).toBe(true);
-    expect(tauri.callsTo("setup_apply_config")).toEqual([{ input: { music_dirs: ["/music/a"] } }]);
+    await applied;
+    expect(setup.applying).toBe(false); // resolves once the request itself is done
+    expect(setup.isScanning).toBe(true); // still true from the freshly-loaded job list
+    expect(tauri.callsTo("setup_apply_config")).toEqual([{ input: { add: ["/music/a"], remove: [] } }]);
+    expect(setup.pendingAdds).toEqual([]);
 
     tauri.on("setup_recent_scans", [
       {
@@ -326,9 +336,8 @@ describe("setup store: live config (running server)", () => {
         message: "scan complete: 3 added",
       },
     ]);
-    await vi.advanceTimersByTimeAsync(500);
-    await applied;
-    expect(setup.applying).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(setup.isScanning).toBe(false);
     expect(setup.recentScans[0]).toMatchObject({ status: "done" });
     vi.useRealTimers();
   });

@@ -3,24 +3,9 @@ import { X } from "lucide-vue-next";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import { useSetupStore } from "../stores/setup";
-import { dirStatus } from "../types";
-import type { DirValidation } from "../types";
+import { dirChipClass, dirChipText } from "../types";
 
 const setup = useSetupStore();
-
-function chipText(v: DirValidation): string {
-  const status = dirStatus(v);
-  if (status === "err") return "not accessible";
-  if (status === "warn") return "no audio files found";
-  return `${v.audio_files} audio file${v.audio_files === 1 ? "" : "s"}`;
-}
-
-function chipClass(v: DirValidation): string {
-  const status = dirStatus(v);
-  if (status === "err") return "text-danger-fg";
-  if (status === "warn") return "text-warn-fg";
-  return "text-ok";
-}
 </script>
 
 <template>
@@ -39,8 +24,12 @@ function chipClass(v: DirValidation): string {
       >
         <div class="min-w-0">
           <div class="truncate text-[13px]">{{ d.path }}</div>
-          <div class="text-xs" :class="d.validation ? chipClass(d.validation) : 'text-faint'">
-            {{ d.validating ? "checking…" : d.validation ? chipText(d.validation) : "" }}
+          <div
+            class="text-xs"
+            :class="d.validation ? dirChipClass(d.validation) : 'text-faint'"
+            :title="d.validation?.truncated ? 'This is a lower bound — the folder has more files than this quick check counts. The actual scan is never capped.' : undefined"
+          >
+            {{ d.validating ? "checking…" : d.validation ? dirChipText(d.validation) : "" }}
           </div>
         </div>
         <UiButton variant="icon-danger" aria-label="Remove folder" @click="setup.removeDir(d.path)">

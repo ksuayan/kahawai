@@ -5,7 +5,7 @@ import { dialog } from "../test/dialog-mock";
 import WizardView from "./WizardView.vue";
 import { useSetupStore } from "../stores/setup";
 
-const okValidation = { exists: true, is_dir: true, readable: true, writable: true, audio_files: 3 };
+const okValidation = { exists: true, is_dir: true, readable: true, writable: true, audio_files: 3, truncated: false };
 
 function boot() {
   return mountApp(WizardView);

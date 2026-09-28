@@ -50,7 +50,7 @@ describe("App", () => {
       .on("setup_quit", undefined);
     const { wrapper } = mountApp(App);
     await settle();
-    await wrapper.findAll("button").find((b) => b.text() === "Quit Server")!.trigger("click");
+    await wrapper.findAll("button").find((b) => b.text() === "Quit App")!.trigger("click");
     expect(tauri.callsTo("setup_quit")).toHaveLength(1);
   });
 });
