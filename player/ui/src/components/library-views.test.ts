@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { makeAlbum, makeTrack, mockFetch } from "../test/fixtures";
 import { mountApp, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
+import { ResizeObserverStub } from "../test/resizeobserver-mock";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { useQueueStore } from "../stores/queue";
@@ -19,29 +20,37 @@ describe("AlbumsView", () => {
     useLibraryStore().albums = albums;
   };
 
-  it("shows a card per album with artist, year and a correctly pluralised track count", () => {
+  // Virtualization (@tanstack/vue-virtual) realizes its first rows via a
+  // watcher that fires once the scroll element ref attaches (a microtask,
+  // Vue's default 'pre' flush) — one tick later than the old plain v-for,
+  // hence the `await settle()` these didn't need before.
+
+  it("shows a card per album with artist, year and a correctly pluralised track count", async () => {
     const { wrapper } = mountApp(AlbumsView, {}, {}, seed([
       makeAlbum({ title: "One Track", artist: "A", year: 2001, track_count: 1 }),
       makeAlbum({ title: "Three Tracks", artist: "B", year: null, track_count: 3 }),
     ]));
+    await settle();
     expect(wrapper.text()).toContain("2 albums in library");
     expect(wrapper.text()).toContain("A · 2001 · 1 track");
     expect(wrapper.text()).not.toContain("1 tracks");
     expect(wrapper.text()).toContain("B · 3 tracks");
   });
 
-  it("sorts by artist, then year", () => {
+  it("sorts by artist, then year", async () => {
     const { wrapper } = mountApp(AlbumsView, {}, {}, seed([
       makeAlbum({ title: "Late", artist: "Z", year: 2020 }),
       makeAlbum({ title: "Second", artist: "A", year: 2010 }),
       makeAlbum({ title: "First", artist: "A", year: 2000 }),
     ]));
+    await settle();
     expect(wrapper.findAll(".font-semibold.truncate").map((t) => t.text())).toEqual(["First", "Second", "Late"]);
   });
 
   it("opens an album when its card is clicked", async () => {
     const album = makeAlbum({ id: 77 });
     const { wrapper } = mountApp(AlbumsView, {}, {}, seed([album]));
+    await settle();
     await wrapper.get("button").trigger("click");
     expect(useNavStore().view).toEqual({ name: "album", id: 77 });
   });
@@ -54,9 +63,47 @@ describe("AlbumsView", () => {
     expect(mountApp(AlbumsView).wrapper.text()).toContain("No albums found.");
   });
 
-  // The grid uses auto-fill columns, so giving it the full panel (not a
-  // fixed max-width like the other views) is what lets more columns show up
-  // on a wide display instead of the grid capping out regardless of window size.
+  // Regression, confirmed live (window resized from 900px to 1900px, grid
+  // stayed at the same column count with each cell stretched instead of
+  // more columns appearing): the grid's resize observer used to attach
+  // once, in onMounted. Mounting while the library was still loading meant
+  // the scroll element (on the `v-else` branch) wasn't there yet, so that
+  // one attempt was a silent no-op — nothing ever retried once the grid
+  // appeared, and it stayed pinned at containerWidth's seeded default width
+  // forever, never reflecting the real window size.
+  it("reflows to more (not larger) columns as the container widens, even when mounted while the library was still loading", async () => {
+    const albums = Array.from({ length: 20 }, (_, i) => makeAlbum({ id: i, title: `Album ${i}` }));
+    const { wrapper } = mountApp(AlbumsView, {}, {}, () => {
+      useLibraryStore().loading = true;
+    });
+    await settle();
+    expect(wrapper.text()).toContain("Loading albums…"); // the buggy scenario: not there yet
+
+    useLibraryStore().loading = false;
+    useLibraryStore().albums = albums;
+    await settle();
+
+    const scrollEl = wrapper.find(".overflow-y-auto").element;
+    // @tanstack/vue-virtual also resize-observes this same element (for its
+    // own viewport tracking), so more than one stub instance may exist —
+    // trigger every one watching it, the same as a real window resize would
+    // fire every observer on that element, not just "the latest" mock.
+    const lanesAt = async (width: number): Promise<number> => {
+      for (const ro of ResizeObserverStub.instances) ro.trigger(scrollEl, width);
+      await settle();
+      const grid = wrapper.find(".grid");
+      const cols = (grid.attributes("style") ?? "").match(/repeat\((\d+),/);
+      return cols ? Number(cols[1]) : 0;
+    };
+    const narrow = await lanesAt(900);
+    const wide = await lanesAt(1900);
+    expect(wide).toBeGreaterThan(narrow);
+  });
+
+  // The grid's lane count is computed from the container's actual width, so
+  // giving it the full panel (not a fixed max-width like the other views)
+  // is what lets more columns show up on a wide display instead of the
+  // grid capping out regardless of window size.
   it("takes the full panel width instead of capping out like other views", () => {
     const { wrapper } = mountApp(AlbumsView, {}, {}, seed([makeAlbum()]));
     expect(wrapper.get(".px-6.pb-10.pt-5").classes()).toContain("max-w-none");

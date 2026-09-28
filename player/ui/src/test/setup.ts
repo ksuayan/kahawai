@@ -3,6 +3,7 @@ import { afterEach, beforeEach, vi } from "vitest";
 import { tauri } from "./tauri-mock";
 import { MockEventSource, resetEventSourceMock } from "./eventsource-mock";
 import { resetServerEventListenersForTest } from "../api";
+import { resetResizeObserverMock, ResizeObserverStub } from "./resizeobserver-mock";
 
 vi.mock("@tauri-apps/api/core", async () => {
   const { tauri } = await import("./tauri-mock");
@@ -21,11 +22,6 @@ vi.mock("@tauri-apps/api/event", async () => {
 
 // Browser APIs Reka UI (floating-ui, pointer capture, focus handling) expects
 // and happy-dom does not implement.
-class ResizeObserverStub {
-  observe(): void {}
-  unobserve(): void {}
-  disconnect(): void {}
-}
 vi.stubGlobal("ResizeObserver", ResizeObserverStub);
 // `setBaseUrl` (api.ts) opens a catalog-events SSE connection on every call,
 // including in every test's setup — happy-dom has no EventSource at all.
@@ -34,6 +30,13 @@ Element.prototype.hasPointerCapture ??= () => false;
 Element.prototype.setPointerCapture ??= () => {};
 Element.prototype.releasePointerCapture ??= () => {};
 Element.prototype.scrollIntoView ??= () => {};
+// happy-dom has no real layout engine, so every element's offsetWidth/Height
+// is 0. @tanstack/vue-virtual reads these synchronously on mount (before its
+// ResizeObserver — itself a no-op above — ever fires) to get an initial
+// viewport size; without this, AlbumsView's virtualizer would see a 0×0
+// viewport and never realize any rows, in every test that mounts it.
+Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, value: 1200 });
+Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, value: 900 });
 window.matchMedia ??= ((q: string) => ({
   matches: false,
   media: q,
@@ -81,6 +84,7 @@ beforeEach(() => {
   localStorage.clear();
   tauri.reset();
   resetEventSourceMock();
+  resetResizeObserverMock();
   resetServerEventListenersForTest();
   // Outside Tauri unless a test opts in.
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;

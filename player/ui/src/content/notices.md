@@ -213,6 +213,7 @@ These licenses require that the component's own source remain available and that
 |---|---|---|
 | @fontsource/ibm-plex-sans | 5.3.0 | OFL-1.1 |
 | @fontsource/ibm-plex-serif | 5.3.0 | OFL-1.1 |
+| @tanstack/vue-virtual | 3.13.39 | MIT |
 | @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT |
 | lucide-vue-next | 1.0.0 | ISC |
 | marked | 18.0.14 | MIT |
