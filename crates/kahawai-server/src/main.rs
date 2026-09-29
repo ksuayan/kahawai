@@ -94,7 +94,9 @@ pub fn app(state: AppState) -> Router {
         .route("/api/playlists/import", post(api::import_playlist))
         .route(
             "/api/playlists/{id}",
-            get(api::get_playlist).delete(api::delete_playlist).patch(api::rename_playlist),
+            get(api::get_playlist)
+                .delete(api::delete_playlist)
+                .patch(api::rename_playlist),
         )
         .route("/api/playlists/{id}/tracks", put(api::set_playlist_tracks))
         .route("/api/artwork/{hash}", get(api::artwork))

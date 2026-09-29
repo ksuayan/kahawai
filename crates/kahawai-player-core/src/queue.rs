@@ -525,7 +525,11 @@ mod tests {
         assert_eq!(q.current().unwrap().id, 2);
         assert!(q.move_track(1, 3)); // move the current one itself: [1,3,5,2,4]
         assert_eq!(q.ordered_ids(), [1, 3, 5, 2, 4]);
-        assert_eq!(q.current().unwrap().id, 2, "moving the playing track keeps it playing");
+        assert_eq!(
+            q.current().unwrap().id,
+            2,
+            "moving the playing track keeps it playing"
+        );
     }
 
     #[test]
@@ -546,7 +550,11 @@ mod tests {
         let before = upcoming(&q);
         assert!(q.move_track(5, 0));
         assert_eq!(q.current().unwrap().id, current);
-        assert_eq!(upcoming(&q), before, "the shuffled sequence is untouched by a reorder of the list");
+        assert_eq!(
+            upcoming(&q),
+            before,
+            "the shuffled sequence is untouched by a reorder of the list"
+        );
     }
 
     #[test]
@@ -601,7 +609,11 @@ mod tests {
         q.set_shuffle(true);
         q.next_track();
         let current = q.current().unwrap().id;
-        let victim = q.ordered_ids().iter().position(|&id| id != current).unwrap();
+        let victim = q
+            .ordered_ids()
+            .iter()
+            .position(|&id| id != current)
+            .unwrap();
         let victim_id = q.ordered_ids()[victim];
         assert_eq!(q.remove_at(victim), Some(Removed::Other));
         assert_eq!(q.current().unwrap().id, current);

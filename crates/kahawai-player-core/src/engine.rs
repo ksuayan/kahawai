@@ -28,13 +28,16 @@ use kahawai_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::analog::{AnalogSettings, AnalogStage};
 use crate::bitperfect::{f32_to_i24_le, BitPerfect};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
-use crate::quality::{QualityMode, BLOCKER_ANALOG, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS, BLOCKER_VOLUME};
-use crate::analog::{AnalogSettings, AnalogStage};
-use crate::dsp::{headroom_guard, DspStage, LoudnessMeter, LookaheadLimiter,
-    scan_track_levels, EqBand, GainRamp, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
+use crate::dsp::{
+    headroom_guard, scan_track_levels, DspStage, EqBand, GainRamp, LookaheadLimiter, LoudnessMeter,
+    LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
+};
+use crate::quality::{
+    QualityMode, BLOCKER_ANALOG, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS, BLOCKER_VOLUME,
 };
 use crate::queue::{Queue, RepeatMode};
 use crate::resample::CubicResampler;
@@ -1088,7 +1091,8 @@ impl Player {
             Some(AudioFormat::Dsf | AudioFormat::Dff)
         );
         // Only a setting that follows the mode, and applies to this track, cares.
-        let follows_mode = self.bit_perfect == BitPerfect::Auto || (is_dsd && self.dsd_story == DsdStory::Auto);
+        let follows_mode =
+            self.bit_perfect == BitPerfect::Auto || (is_dsd && self.dsd_story == DsdStory::Auto);
         if follows_mode && self.auto_wants_exclusive() != self.exclusive_decision {
             self.reopen_live();
         }
@@ -1293,7 +1297,9 @@ impl Player {
     fn open_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
         let dop_rate = match self.dop_capable_rate(track) {
             Some(r) => r,
-            None => return Err("your DAC doesn't accept the sample rate this DSD file needs".into()),
+            None => {
+                return Err("your DAC doesn't accept the sample rate this DSD file needs".into())
+            }
         };
         let next_id = self.queue.peek_next().map(|t| t.id);
         let opts = StreamOptions {
@@ -1339,7 +1345,9 @@ impl Player {
 
         if let Err(e) = self.sink.open(track) {
             tracing::warn!(error = %e, "DoP sink open failed");
-            return Err("your DAC couldn't be set up for native DSD (another app may be using it)".into());
+            return Err(
+                "your DAC couldn't be set up for native DSD (another app may be using it)".into(),
+            );
         }
         if let Err(e) = self.sink.play() {
             tracing::warn!(error = %e, "DoP sink start failed");
@@ -1390,8 +1398,9 @@ impl Player {
             // Plan the gain against the track's peak and the EQ's worst-case
             // boost, so the result cannot clip at the output.
             let eq_boost = self.eq.max_boost_db();
-            self.loudness
-                .gain_for_levels(track_id, fmt, eq_boost, || scan_track_levels(transport, track_id, fmt))
+            self.loudness.gain_for_levels(track_id, fmt, eq_boost, || {
+                scan_track_levels(transport, track_id, fmt)
+            })
         } else {
             0.0
         };
@@ -1606,7 +1615,7 @@ impl Player {
                 Ok(n) => n,
                 Err(e) => {
                     tracing::warn!(error = %e, "decode failed");
-                self.fail("Couldn't decode this file.");
+                    self.fail("Couldn't decode this file.");
                     return;
                 }
             }
@@ -1716,7 +1725,9 @@ impl Player {
             // 5 ms duck is still on screen at the next snapshot.
             let dt = (chunk.len() / channels.max(1)) as f32 / active.sink_rate.max(1) as f32;
             let gr = self.limiter.take_reduction_db();
-            self.limiter_gr_db = gr.max(self.limiter_gr_db - GR_DECAY_DB_PER_SEC * dt).max(0.0);
+            self.limiter_gr_db = gr
+                .max(self.limiter_gr_db - GR_DECAY_DB_PER_SEC * dt)
+                .max(0.0);
         } else {
             self.limiter_gr_db = 0.0;
             // Off: drain anything it was still holding in front of this chunk,
@@ -1732,14 +1743,15 @@ impl Player {
 
         let sink_rate = active.sink_rate;
         let ch = active.spec.channels;
-        if !chunk.is_empty() && self
-            .sink
-            .write(PcmChunk {
-                frames: chunk,
-                sample_rate: sink_rate,
-                channels: ch as u8,
-            })
-            .is_err()
+        if !chunk.is_empty()
+            && self
+                .sink
+                .write(PcmChunk {
+                    frames: chunk,
+                    sample_rate: sink_rate,
+                    channels: ch as u8,
+                })
+                .is_err()
         {
             self.fail("The audio output stopped responding.");
             return;
@@ -1878,28 +1890,29 @@ impl Player {
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
-        let (track, position_ms, duration_ms, buffered_ms, output_rate_hz, format, chain) = match &self.active {
-            Some(a) => {
-                let t = a.display_track().clone();
-                let pos = self.position_ms();
-                (
-                    Some(t.clone()),
-                    pos,
-                    t.duration_ms,
-                    a.buffered_ms(pos),
-                    Some(a.output_rate_hz()),
-                    Some(a.format_used()),
-                    a.chain().clone(),
-                )
-            }
-            None => {
-                // Idle. A restored queue shows where it will resume.
-                let t = self.queue.current().cloned();
-                let at = self.resume_at_ms.unwrap_or(0);
-                let dur = t.as_ref().and_then(|t| t.duration_ms).filter(|_| at > 0);
-                (t, at, dur, None, None, None, None)
-            }
-        };
+        let (track, position_ms, duration_ms, buffered_ms, output_rate_hz, format, chain) =
+            match &self.active {
+                Some(a) => {
+                    let t = a.display_track().clone();
+                    let pos = self.position_ms();
+                    (
+                        Some(t.clone()),
+                        pos,
+                        t.duration_ms,
+                        a.buffered_ms(pos),
+                        Some(a.output_rate_hz()),
+                        Some(a.format_used()),
+                        a.chain().clone(),
+                    )
+                }
+                None => {
+                    // Idle. A restored queue shows where it will resume.
+                    let t = self.queue.current().cloned();
+                    let at = self.resume_at_ms.unwrap_or(0);
+                    let dur = t.as_ref().and_then(|t| t.duration_ms).filter(|_| at > 0);
+                    (t, at, dur, None, None, None, None)
+                }
+            };
         PlayerSnapshot {
             status: self.status,
             track,
@@ -1927,7 +1940,11 @@ impl Player {
             volume: self.volume,
             error: self.error.clone(),
             notice: self.notice.clone(),
-            exclusive_blockers: self.exclusive_blockers().into_iter().map(String::from).collect(),
+            exclusive_blockers: self
+                .exclusive_blockers()
+                .into_iter()
+                .map(String::from)
+                .collect(),
             repeat: self.queue.repeat,
             shuffle: self.queue.shuffle,
         }
@@ -2556,7 +2573,9 @@ fn playback_loop(
         let snap = player.snapshot();
         let key = snapshot_key(&snap);
         let changed = key != last_key;
-        if player.status() == PlayerStatus::Playing && last_saved.elapsed() >= Duration::from_secs(5) {
+        if player.status() == PlayerStatus::Playing
+            && last_saved.elapsed() >= Duration::from_secs(5)
+        {
             last_saved = Instant::now();
             player.persist_position();
         }

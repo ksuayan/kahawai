@@ -347,7 +347,10 @@ async fn playlist_by_id(s: &AppState, id: i64) -> Result<Playlist, ApiError> {
     })
 }
 
-pub async fn get_playlist(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Json<Playlist>, ApiError> {
+pub async fn get_playlist(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Playlist>, ApiError> {
     Ok(Json(playlist_by_id(&s, id).await?))
 }
 

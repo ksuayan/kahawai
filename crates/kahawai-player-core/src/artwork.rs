@@ -76,7 +76,10 @@ impl ArtworkCache {
     pub fn new(dir: impl Into<PathBuf>, max_bytes: u64) -> Result<Self, MusicError> {
         let dir = dir.into();
         fs::create_dir_all(&dir).map_err(MusicError::Io)?;
-        Ok(Self { dir, max_bytes: AtomicU64::new(max_bytes) })
+        Ok(Self {
+            dir,
+            max_bytes: AtomicU64::new(max_bytes),
+        })
     }
 
     pub fn dir(&self) -> &Path {
