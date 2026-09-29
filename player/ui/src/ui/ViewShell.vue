@@ -7,7 +7,11 @@
  *  body) instead of a naturally-growing block — a virtualized grid needs
  *  its own bounded, self-scrolling container rather than relying on some
  *  distant ancestor's scrollbar, the way every other (non-virtualized)
- *  view does today. */
+ *  view does today. It fills its parent with flex (`flex-1`), not `h-full`:
+ *  percentage heights on flex children are resolved differently across
+ *  engines (WebKit vs Chromium), and a wrong guess there is what makes the
+ *  parent scroll too. So the parent must be a flex column (App.vue makes
+ *  <main> one, and non-scrolling, while Albums is showing). */
 withDefaults(
   defineProps<{ title?: string; subtitle?: string; width?: "full" | "wide" | "medium" | "narrow" }>(),
   { width: "wide" },
@@ -23,7 +27,7 @@ const widths = {
 <template>
   <div
     class="px-6 pb-10 pt-5"
-    :class="[widths[width], width === 'full' && 'flex h-full flex-col']"
+    :class="[widths[width], width === 'full' && 'flex min-h-0 flex-1 flex-col']"
   >
     <div
       v-if="title || $slots.actions"

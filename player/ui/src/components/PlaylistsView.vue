@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Pencil, Plus, X } from "lucide-vue-next";
 import { onMounted, ref } from "vue";
+import { useMainScrollMemory } from "../lib/mainScroll";
 import { useNavStore } from "../stores/nav";
 import { usePlaylistsStore } from "../stores/playlists";
 import { useToastsStore } from "../stores/toasts";
@@ -14,6 +15,8 @@ import ViewShell from "../ui/ViewShell.vue";
 const nav = useNavStore();
 const playlists = usePlaylistsStore();
 const toasts = useToastsStore();
+
+useMainScrollMemory("playlists", () => playlists.loaded && !playlists.loading);
 
 const creating = ref(false);
 const newName = ref("");
