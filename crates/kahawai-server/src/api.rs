@@ -347,7 +347,10 @@ async fn playlist_by_id(s: &AppState, id: i64) -> Result<Playlist, ApiError> {
     })
 }
 
-pub async fn get_playlist(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Json<Playlist>, ApiError> {
+pub async fn get_playlist(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Playlist>, ApiError> {
     Ok(Json(playlist_by_id(&s, id).await?))
 }
 
@@ -798,25 +801,25 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
         let job_id = job.id.clone();
         jobs.set_status(&job_id, JobStatus::Running).await;
 
-        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<(u64, Option<u64>)>();
         let jobs2 = jobs.clone();
         let job_id2 = job_id.clone();
         let fwd = tokio::spawn(async move {
             let mut last_written = -1.0f64;
-            while let Some((done, total)) = prx.recv().await {
-                let p = if total == 0 {
-                    0.0
-                } else {
-                    (done as f64 / total as f64).clamp(0.0, 1.0)
-                };
-                if p - last_written >= 0.01 || done == total {
+            while let Some((done, estimate)) = prx.recv().await {
+                // The total is only an estimate (last scan's count), so cap
+                // below 1: finishing the job is what reports completion. A
+                // first scan has no estimate and stays at 0 until it's done.
+                let Some(total) = estimate else { continue };
+                let p = (done as f64 / total as f64).clamp(0.0, 0.99);
+                if p - last_written >= 0.01 {
                     last_written = p;
                     jobs2.set_progress(&job_id2, p as f32).await;
                 }
             }
         });
-        let report = scanner::run_scan_with_progress(&s.pool, &s.music_dirs(), |done, total| {
-            let _ = ptx.send((done, total));
+        let report = scanner::run_scan_with_progress(&s.pool, &s.music_dirs(), |done, estimate| {
+            let _ = ptx.send((done, estimate));
         })
         .await;
         // The progress closure only borrowed `ptx`, so the sender is still
@@ -840,12 +843,17 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                     &job_id,
                     true,
                     Some(format!(
-                        "scan complete: {} files seen, {} added, {} updated, {} skipped, {} missing",
+                        "scan complete: {} files seen, {} added, {} updated, {} skipped, {} missing{}",
                         r.files_seen,
                         r.files_added,
                         r.files_updated,
                         r.files_skipped,
-                        r.files_missing
+                        r.files_missing,
+                        if r.walk_errors > 0 {
+                            format!(", {} unreadable", r.walk_errors)
+                        } else {
+                            String::new()
+                        }
                     )),
                 )
                 .await;
@@ -855,6 +863,10 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                 // idle would otherwise never surface there. No receivers is
                 // not an error; `send` just reports how many got it.
                 let _ = s.catalog_events.send(crate::ServerEvent::CatalogUpdated);
+                // Phase B: hash what the scan left pending.
+                if let Err(e) = queue_hash_job(&s, "Content hashing").await {
+                    tracing::warn!(error = %e, "could not queue content hashing");
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, "background scan failed");
@@ -963,6 +975,15 @@ pub async fn create_job(
             spawn_scan_job(s, job.clone(), guard);
             Ok((StatusCode::ACCEPTED, Json(job)).into_response())
         }
+        JobKind::HashFiles => {
+            let guard =
+                s.hash_lock.clone().try_lock_owned().map_err(|_| {
+                    MusicError::Conflict("content hashing already running".to_string())
+                })?;
+            let job = s.jobs.create(JobKind::HashFiles, body.label, None).await;
+            spawn_hash_job(s, job.clone(), guard);
+            Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+        }
         JobKind::Transcode => {
             let job = s.jobs.create(body.kind, body.label, None).await;
             // Demo worker: ticks progress to Done. Real bulk-transcode
@@ -979,6 +1000,75 @@ pub async fn create_job(
             Ok(Json(job).into_response())
         }
     }
+}
+
+/// Queue the content-hashing job (Phase B) unless one is already running or
+/// nothing is pending. Returns the job when one was queued.
+pub(crate) async fn queue_hash_job(s: &AppState, label: &str) -> Result<Option<Job>, MusicError> {
+    let Ok(guard) = s.hash_lock.clone().try_lock_owned() else {
+        return Ok(None);
+    };
+    if crate::hashing::pending_count(&s.pool).await? == 0 {
+        return Ok(None);
+    }
+    let job = s
+        .jobs
+        .create(JobKind::HashFiles, label.to_string(), None)
+        .await;
+    spawn_hash_job(s.clone(), job.clone(), guard);
+    Ok(Some(job))
+}
+
+/// Worker for the `hash_files` job. Holds `guard` so only one runs at a time.
+/// Progress is throttled to 1% steps like the scan's.
+pub(crate) fn spawn_hash_job(s: AppState, job: Job, guard: tokio::sync::OwnedMutexGuard<()>) {
+    tokio::spawn(async move {
+        let _guard = guard;
+        let jobs = s.jobs.clone();
+        let job_id = job.id.clone();
+        jobs.set_status(&job_id, JobStatus::Running).await;
+
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+        let jobs2 = jobs.clone();
+        let job_id2 = job_id.clone();
+        let fwd = tokio::spawn(async move {
+            let mut last_written = -1.0f64;
+            while let Some((done, total)) = prx.recv().await {
+                if total == 0 {
+                    continue;
+                }
+                let p = (done as f64 / total as f64).clamp(0.0, 0.99);
+                if p - last_written >= 0.01 {
+                    last_written = p;
+                    jobs2.set_progress(&job_id2, p as f32).await;
+                }
+            }
+        });
+        let report = crate::hashing::hash_pending(&s.pool, |done, total| {
+            let _ = ptx.send((done, total));
+        })
+        .await;
+        drop(ptx);
+        let _ = fwd.await;
+
+        match report {
+            Ok(r) => {
+                let message = if r.skipped > 0 {
+                    format!(
+                        "hashed {} files; {} left pending (changed since the scan, or unreadable)",
+                        r.hashed, r.skipped
+                    )
+                } else {
+                    format!("hashed {} files", r.hashed)
+                };
+                jobs.finish(&job_id, true, Some(message)).await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "content hashing failed");
+                jobs.finish(&job_id, false, Some(e.to_string())).await;
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

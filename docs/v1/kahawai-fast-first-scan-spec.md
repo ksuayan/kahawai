@@ -1,5 +1,9 @@
 # Spec: fast first-time SMB ingestion (server)
 
+**Status: implemented** (Phases A and B). "Current state" below describes
+the code before this work; see "Status and measurements" at the end for what
+landed and how it measured.
+
 ## Goal
 
 First scan of a 2.5 TB / ~125k-file SMB share reaches a browsable library
@@ -90,6 +94,38 @@ as a background job without blocking use.
   library browsable immediately after.
 - Kill -9 mid-Phase-B → restart resumes with zero rehash of completed files.
 - Existing gates green: server tests, clippy `-D warnings`, `cargo fmt`.
+
+## Status and measurements
+
+Phases A and B are implemented on the `tune-up` branch: migrations 005 and
+006 and `scanner.rs` (A), `hashing.rs` and the `hash_files` job kind (B).
+Not done: the `catalog_rev` bump (the player-catalog-cache spec that defines
+it doesn't exist in code yet), and a Phase B timing on the real share.
+
+First scan into an empty catalog: 105,248 files (81,316 audio), local
+`_Dev-Media` plus the `NetMusic` SMB share on 1 GbE, release build. Measured
+with the ignored `first_scan_benchmark` test in `scanner.rs`.
+
+| Run | Workers | Wall time | Audio files/s | Avg analyze | Commits/s |
+| --- | --- | --- | --- | --- | --- |
+| Phase A | 16 | 31.7 min | 43 | 316 ms | 27.0 (falling) |
+| + `albums(title)` index (006) | 16 | 30.9 min | 44 | 303 ms | 40.7 (flat) |
+| same, NAS under other load | 16 | 45.3 min | 30 | 475 ms | 27.4 (keeping up) |
+| + index, 64 workers (stopped at 12k files) | 64 | — | 40 | 1,388 ms | 36.8 |
+
+- Per-file tag reads over SMB (~300 ms each) set the pace, and vary a lot
+  with whatever else the NAS is doing: compare runs made close together.
+- More workers don't help. At 64, per-file time rose about fourfold and
+  files/s stayed at ~40: the share (or the macOS SMB client) is saturated
+  at ~40–45 files/s, so it is throughput-bound, not latency-bound. 16 stays
+  the default. Further gains would have to come from reading less per file.
+- The catalog writer was the second bottleneck: the album match for files
+  without an album-artist tag scanned every track. Migration 006 fixed it.
+- Around 120 files with accented names, and one folder, were intermittently
+  unreadable through the macOS SMB mount: `readdir` lists them, `stat` fails
+  under every Unicode normalization. It depends on the SMB session (a later
+  run read them all), not the scanner. The scan now logs and counts these
+  (`walk_errors`, "stat failed" warnings) instead of skipping them silently.
 
 ## Non-goals
 

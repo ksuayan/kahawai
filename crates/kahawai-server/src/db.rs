@@ -44,44 +44,74 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         (2, include_str!("../migrations/002_scan_columns.sql")),
         (3, include_str!("../migrations/003_jobs.sql")),
         (4, include_str!("../migrations/004_mqa.sql")),
+        (5, include_str!("../migrations/005_hash_pending.sql")),
+        (6, include_str!("../migrations/006_albums_title_index.sql")),
     ];
+    // One connection throughout: `PRAGMA foreign_keys` is per connection, and
+    // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off
+    // (dropping a referenced table would otherwise fail or cascade).
+    let mut conn = pool.acquire().await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     // Backfill: if the catalog tables already exist but no version was ever
     // recorded, 001 was applied by the old runner.
     let has_tracks: bool =
         sqlx::query("SELECT COUNT(*) > 0 FROM sqlite_master WHERE name = 'tracks'")
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?
             .get(0);
     let applied: Vec<i64> = sqlx::query("SELECT version FROM schema_migrations")
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?
         .iter()
         .map(|r| r.get(0))
         .collect();
     if has_tracks && !applied.contains(&1) {
         sqlx::query("INSERT OR IGNORE INTO schema_migrations (version) VALUES (1)")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
     }
-    for (version, sql) in MIGRATIONS {
-        if applied.contains(version) || (*version == 1 && has_tracks) {
-            continue;
+    let pending: Vec<&(i64, &str)> = MIGRATIONS
+        .iter()
+        .filter(|(v, _)| !applied.contains(v) && !(*v == 1 && has_tracks))
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
+        .await?;
+    let result = async {
+        for (version, sql) in pending {
+            let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+            apply_sql(&mut tx, sql).await?;
+            sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+                .bind(version)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
-        apply_sql(pool, sql).await?;
-        sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
-            .bind(version)
-            .execute(pool)
+        let broken = sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&mut *conn)
             .await?;
+        anyhow::ensure!(
+            broken.is_empty(),
+            "migrations left {} foreign-key violations",
+            broken.len()
+        );
+        anyhow::Ok(())
     }
-    Ok(())
+    .await;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await?;
+    result
 }
 
 /// Execute a migration file: strip full-line comments (the naive statement
 /// splitter would trip on semicolons inside comments), then split on ';'.
-async fn apply_sql(pool: &SqlitePool, sql: &str) -> anyhow::Result<()> {
+async fn apply_sql(conn: &mut sqlx::SqliteConnection, sql: &str) -> anyhow::Result<()> {
     let cleaned: String = sql
         .lines()
         .filter(|l| !l.trim_start().starts_with("--"))
@@ -91,7 +121,7 @@ async fn apply_sql(pool: &SqlitePool, sql: &str) -> anyhow::Result<()> {
         if stmt.trim().is_empty() {
             continue;
         }
-        sqlx::query(stmt).execute(pool).await?;
+        sqlx::query(stmt).execute(&mut *conn).await?;
     }
     Ok(())
 }
@@ -209,9 +239,12 @@ mod tests {
             .filename(&db_path)
             .create_if_missing(true);
         let pool = SqlitePool::connect_with(opts).await.unwrap();
-        apply_sql(&pool, include_str!("../migrations/001_init.sql"))
-            .await
-            .unwrap();
+        apply_sql(
+            &mut pool.acquire().await.unwrap(),
+            include_str!("../migrations/001_init.sql"),
+        )
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO tracks (path, hash, format) VALUES ('/m/a.flac', 'abc', 'flac')")
             .execute(&pool)
             .await
@@ -219,7 +252,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
 
         // Old row survived; new columns carry their defaults.
         let r = sqlx::query(
@@ -276,7 +309,9 @@ mod tests {
             (2, include_str!("../migrations/002_scan_columns.sql")),
             (3, include_str!("../migrations/003_jobs.sql")),
         ] {
-            apply_sql(&pool, sql).await.unwrap();
+            apply_sql(&mut pool.acquire().await.unwrap(), sql)
+                .await
+                .unwrap();
             sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
                 .bind(v)
                 .execute(&pool)
@@ -299,7 +334,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
             .await
@@ -319,15 +354,119 @@ mod tests {
         );
     }
 
+    /// Migration 005 rebuilds `tracks` to make `hash` nullable. Existing rows,
+    /// their hashes (now labelled BLAKE3), and every row that points at a
+    /// track by id survive; new rows can be written without a hash.
+    #[tokio::test]
+    async fn migration_005_makes_hash_nullable_and_keeps_every_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("v4.db");
+        let pool = SqlitePool::connect_with(
+            SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (v, sql) in [
+            (1, include_str!("../migrations/001_init.sql")),
+            (2, include_str!("../migrations/002_scan_columns.sql")),
+            (3, include_str!("../migrations/003_jobs.sql")),
+            (4, include_str!("../migrations/004_mqa.sql")),
+        ] {
+            apply_sql(&mut pool.acquire().await.unwrap(), sql)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+                .bind(v)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for stmt in [
+            "INSERT INTO albums (id, title) VALUES (1, 'Blue Train')",
+            "INSERT INTO artists (id, name) VALUES (1, 'John Coltrane')",
+            "INSERT INTO tracks (id, path, hash, format, title, album_id, file_size, mqa, mqa_checked)
+             VALUES (7, '/m/a.flac', 'abc123', 'flac', 'Moment''s Notice', 1, 100, 1, 1)",
+            "INSERT INTO track_artists (track_id, artist_id) VALUES (7, 1)",
+            "INSERT INTO playlists (id, name) VALUES (1, 'mix')",
+            "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (1, 0, 7)",
+            "INSERT INTO search_fts (rowid, title, album, artist) VALUES (7, 'Moment''s Notice', 'Blue Train', 'John Coltrane')",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        let pool = open(&db_path).await.unwrap();
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
+        let r =
+            sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(r.get::<i64, _>("id"), 7);
+        assert_eq!(
+            r.get::<Option<String>, _>("hash").as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            r.get::<Option<String>, _>("hash_algo").as_deref(),
+            Some("blake3-v1")
+        );
+        assert_eq!(r.get::<String, _>("title"), "Moment's Notice");
+        assert_eq!(r.get::<i64, _>("album_id"), 1);
+        assert_eq!(r.get::<i64, _>("file_size"), 100);
+        assert_eq!(r.get::<i64, _>("mqa"), 1);
+        for q in [
+            "SELECT COUNT(*) FROM track_artists WHERE track_id = 7",
+            "SELECT COUNT(*) FROM playlist_tracks WHERE track_id = 7",
+            "SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH 'coltrane'",
+        ] {
+            let n: i64 = sqlx::query(q).fetch_one(&pool).await.unwrap().get(0);
+            assert_eq!(n, 1, "{q}");
+        }
+        let t = get_track(&pool, 7).await.unwrap().unwrap();
+        assert_eq!(t.hash.as_deref(), Some("abc123"));
+
+        // A row with its hash still pending.
+        sqlx::query("INSERT INTO tracks (path, format) VALUES ('/m/b.flac', 'flac')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id: i64 = sqlx::query("SELECT id FROM tracks WHERE path = '/m/b.flac'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(get_track(&pool, id).await.unwrap().unwrap().hash, None);
+
+        // Foreign keys are back on after the rebuild.
+        let fk: i64 = sqlx::query("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(fk, 1);
+        // scan_log has the walk-error counter.
+        sqlx::query("INSERT INTO scan_log (started_at, walk_errors) VALUES ('t', 3)")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
     /// Fresh databases get every migration, and reopening is idempotent.
     #[tokio::test]
     async fn fresh_database_gets_all_migrations_idempotently() {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("fresh.db");
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
     }
 }

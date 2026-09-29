@@ -14,7 +14,7 @@ fn track(id: i64) -> Track {
     Track {
         id,
         path: format!("/m/{id}.flac"),
-        hash: "h".into(),
+        hash: Some("h".into()),
         format: AudioFormat::Flac,
         sample_rate: Some(44100),
         bit_depth: Some(16),

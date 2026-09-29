@@ -34,13 +34,15 @@ SACD ISO is cataloged but never decoded — see `SACD-Extraction.md`.
 ## 3. Server components
 
 ### 3.1 Scanner
-- Walk configured music dirs → **BLAKE3** content hash per file (dedupe, change detection — same identity scheme as Koa).
-- Metadata via **lofty** (tags, embedded artwork) → SQLite.
-- Incremental: rescan detects new/changed/missing; missing files marked, not deleted (relink-friendly).
-- Runs as a background task; initial ~1 TB scan is expected to take a while — report progress (files/min) in logs.
+- One walk over the configured music dirs feeds a bounded pool of 16 blocking workers; a single writer commits their results 500 tracks per SQLite transaction. There is no counting pre-walk: over a network share it costs as much as the scan itself.
+- Metadata via **lofty** (tags, technical properties, embedded artwork) → SQLite. The file size and mtime come from the walk's own stat.
+- **No content hashing during the scan.** `tracks.hash` is NULL ("hash pending") for rows the scan writes; `tracks.hash_algo` names the algorithm of any hash that is present (rows hashed by earlier versions are `blake3-v1`). Hashing a whole library over SMB takes hours and gives nothing on a first scan.
+- **Content hashing is a separate background job** (`hash_files`, docs/v1/kahawai-fast-first-scan-spec.md Phase B). Every completed scan queues it; it can also be started with `POST /api/jobs` (`kind: "hash_files"`), one at a time, and it never blocks a rescan. It hashes pending rows with 4 workers and 1 MiB reads, writing each hash (with `hash_algo`) as soon as it is computed: the NULL marker is the checkpoint, so a killed run resumes with no rehashing. With `scan_on_startup` off, startup resumes it directly. A file whose size/mtime changed since the scan is left pending for the next scan to re-read. Until a row is hashed, change detection is size + mtime only.
+- Incremental: an unchanged (path, size, mtime) is skipped; a changed file's row is re-read in place (its hash reset to pending); missing files are marked, not deleted (relink-friendly).
+- Runs as a background job. Progress is estimated from the previous scan's track count (a first scan has no estimate). Unreadable directory entries are logged and counted (`scan_log.walk_errors`, and in the job's result message). Every 5 s the scan logs its throughput: files/sec, average per-file analysis time, DB commits/sec.
 
 ### 3.2 Catalog (SQLite)
-Tables: `tracks` (id, path, hash, format, sample_rate, bit_depth, channels, duration_ms, bitrate), `albums`, `artists`, `album_artists`, `track_artists` (multi-artist), `artwork` (hash → blob, deduped), `playlists`, `playlist_tracks` (positioned), `scan_log`. FTS5 virtual table for search across title/album/artist.
+Tables: `tracks` (id, path, hash (nullable: pending), hash_algo, format, sample_rate, bit_depth, channels, duration_ms, bitrate), `albums`, `artists`, `album_artists`, `track_artists` (multi-artist), `artwork` (hash → blob, deduped), `playlists`, `playlist_tracks` (positioned), `scan_log`. FTS5 virtual table for search across title/album/artist.
 
 ### 3.3 Browse API (REST, JSON)
 - `GET /api/albums`, `/api/albums/{id}`, `/api/artists`, `/api/artists/{id}`

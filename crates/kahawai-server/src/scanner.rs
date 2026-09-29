@@ -1,15 +1,19 @@
-//! Library scanner: walk music dirs, BLAKE3-hash, extract metadata via lofty,
-//! write the SQLite catalog, incremental rescan. (Spec §3.1, S1.)
+//! Library scanner: walk music dirs, extract metadata via lofty, write the
+//! SQLite catalog, incremental rescan. (Spec §3.1, S1; fast first scan:
+//! docs/v1/kahawai-fast-first-scan-spec.md, Phase A.)
 //!
 //! Design notes:
-//! - The walk + per-file analysis (hash + lofty) run in `spawn_blocking`
-//!   workers; all SQLite I/O stays on the async side. One scan at a time is
-//!   enforced by the `scan_lock` in `AppState`.
+//! - One walk (blocking) feeds a bounded pool of `spawn_blocking` workers
+//!   (lofty tags + properties); a single writer task commits their results
+//!   in batches. All SQLite I/O stays on the async side. One scan at a time
+//!   is enforced by the `scan_lock` in `AppState`.
+//! - The scan does not hash file contents: `tracks.hash` is NULL ("pending")
+//!   for every row it writes. Hashing a whole library over a network share
+//!   takes hours and buys nothing on a first scan.
 //! - Incremental rescan: a file whose (path, size, mtime) is unchanged is
-//!   skipped without hashing. A changed file is re-hashed; if the content
-//!   hash matches, only the stat columns are refreshed, otherwise the full
-//!   metadata row is rewritten. Files gone from disk are marked
-//!   `missing = 1`, never deleted (relink-friendly, spec §3.1).
+//!   skipped. A changed file has its metadata row rewritten (and its hash
+//!   reset to pending). Files gone from disk are marked `missing = 1`, never
+//!   deleted (relink-friendly, spec §3.1).
 //! - Technical properties (duration, sample rate, bit depth, channels,
 //!   bitrate) come from **lofty** alone, not symphonia: one metadata path,
 //!   and lofty's `FileProperties` proved reliable against ffmpeg-generated
@@ -23,15 +27,20 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io::Read,
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
-    time::{Instant, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use kahawai_core::{AudioFormat, MusicError};
 use lofty::prelude::*;
 use lofty::tag::{Accessor, ItemKey};
 use sqlx::{sqlite::SqlitePool, Row};
+use tokio::sync::{mpsc, Semaphore};
 use tracing::{info, warn};
 
 use crate::db;
@@ -45,13 +54,15 @@ pub struct ScanReport {
     pub files_updated: u64,
     pub files_skipped: u64,
     pub files_missing: u64,
+    /// Directory entries the walk could not read (permissions, a dropped
+    /// share); logged one by one, counted here.
+    pub walk_errors: u64,
     pub elapsed_secs: f64,
 }
 
 /// Everything the blocking worker learns about one file.
 struct FileAnalysis {
     path: String,
-    hash: String,
     size: i64,
     mtime: Option<i64>,
     format: AudioFormat,
@@ -82,30 +93,114 @@ struct ArtworkData {
     hash: String,
 }
 
-/// Run a full scan of `dirs`, writing to the catalog. Async; per-file
-/// analysis is offloaded to blocking workers.
-/// [`run_scan`] with a progress callback. `on_progress(processed, total)`
-/// fires once per audio file, so `processed / total` is monotonic 0→1.
-/// Total comes from a first metadata-only walk (S9: "two-phase walk, count
-/// then scan"); the hashing walk below dominates the cost.
+/// Blocking workers analyzing files at once. Directory enumeration and tag
+/// reads over SMB are latency-bound, so keeping many in flight is what makes
+/// a first scan of a network share fast.
+const SCAN_WORKERS: usize = 16;
+/// Catalog writes per SQLite transaction.
+const WRITE_BATCH: usize = 500;
+/// How often a running scan logs its throughput.
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// One audio file found by the walk. `stat` is `None` when it could not be read.
+struct Walked {
+    path: PathBuf,
+    stat: Option<(i64, Option<i64>)>,
+}
+
+/// What the walk counted besides the audio files it sent on.
+#[derive(Default)]
+struct WalkTotals {
+    files_seen: u64,
+    walk_errors: u64,
+}
+
+/// Work for one blocking worker.
+enum Work {
+    /// A new or changed file: read everything.
+    Analyze {
+        path: PathBuf,
+        size: i64,
+        mtime: Option<i64>,
+        is_new: bool,
+    },
+    /// An unchanged row cataloged before MQA detection: read its tags only.
+    MqaBackfill { path: PathBuf },
+}
+
+/// One catalog change, applied by the single writer task.
+enum CatalogWrite {
+    Track {
+        analysis: Box<FileAnalysis>,
+        is_new: bool,
+    },
+    Mqa {
+        path: String,
+        mqa: bool,
+        original: Option<u32>,
+    },
+}
+
+/// Throughput counters, so the next bottleneck is measured rather than guessed.
+#[derive(Default)]
+struct ScanMetrics {
+    analyzed: AtomicU64,
+    analyze_nanos: AtomicU64,
+    commits: AtomicU64,
+}
+
+impl ScanMetrics {
+    fn avg_analyze_ms(&self) -> f64 {
+        let n = self.analyzed.load(Ordering::Relaxed);
+        let nanos = self.analyze_nanos.load(Ordering::Relaxed);
+        if n == 0 {
+            0.0
+        } else {
+            nanos as f64 / n as f64 / 1e6
+        }
+    }
+
+    fn log(&self, what: &str, audio_files: u64, elapsed: Duration) {
+        let secs = elapsed.as_secs_f64().max(1e-9);
+        let commits = self.commits.load(Ordering::Relaxed);
+        info!(
+            audio_files,
+            files_per_sec = (audio_files as f64 / secs).round() as u64,
+            analyzed = self.analyzed.load(Ordering::Relaxed),
+            avg_analyze_ms = (self.avg_analyze_ms() * 10.0).round() / 10.0,
+            db_commits = commits,
+            db_commits_per_sec = (commits as f64 / secs * 10.0).round() / 10.0,
+            "{what}"
+        );
+    }
+}
+
+/// Run a full scan of `dirs`, writing to the catalog.
+///
+/// One walk over the tree feeds a pool of [`SCAN_WORKERS`] blocking workers
+/// (metadata and tags, no content hashing), whose results go to a single
+/// writer committing [`WRITE_BATCH`] rows per transaction.
+///
+/// `on_progress(done, estimate)` fires once per audio file. There is no
+/// counting pre-walk (over SMB it costs as much as the scan's own walk), so
+/// `estimate` is the number of tracks the previous scan found, and `None` on
+/// a first scan.
 pub async fn run_scan_with_progress(
     pool: &SqlitePool,
     dirs: &[PathBuf],
-    on_progress: impl Fn(u64, u64) + Send + Sync,
+    on_progress: impl Fn(u64, Option<u64>) + Send + Sync,
+) -> Result<ScanReport, MusicError> {
+    scan_with_workers(pool, dirs, SCAN_WORKERS, on_progress).await
+}
+
+/// [`run_scan_with_progress`] with an explicit worker count (benchmarking).
+async fn scan_with_workers(
+    pool: &SqlitePool,
+    dirs: &[PathBuf],
+    workers: usize,
+    on_progress: impl Fn(u64, Option<u64>) + Send + Sync,
 ) -> Result<ScanReport, MusicError> {
     let start = Instant::now();
-    let total_audio: u64 = dirs
-        .iter()
-        .map(|dir| {
-            walkdir::WalkDir::new(dir)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file() && is_audio(e.path()))
-                .count() as u64
-        })
-        .sum();
-    let mut processed_audio: u64 = 0;
     let scan_id: i64 =
         sqlx::query("INSERT INTO scan_log (started_at) VALUES (datetime('now')) RETURNING id")
             .fetch_one(pool)
@@ -113,13 +208,19 @@ pub async fn run_scan_with_progress(
             .map_err(db::cvt)?
             .get("id");
 
-    // path -> (hash, size, mtime, missing) for change detection.
-    let rows = sqlx::query("SELECT path, hash, file_size, file_mtime, missing FROM tracks")
+    // path -> (size, mtime, missing) for change detection.
+    let rows = sqlx::query("SELECT path, file_size, file_mtime, missing FROM tracks")
         .fetch_all(pool)
         .await
         .map_err(db::cvt)?;
-    let mut known: HashMap<String, (String, Option<i64>, Option<i64>, i64)> =
+    let mut known: HashMap<String, (Option<i64>, Option<i64>, i64)> =
         HashMap::with_capacity(rows.len());
+    for r in &rows {
+        known.insert(
+            r.get("path"),
+            (r.get("file_size"), r.get("file_mtime"), r.get("missing")),
+        );
+    }
     // DSD rows cataloged before DSD support (no rate = never analyzed) are
     // re-read even though the file itself is unchanged.
     let stale: HashSet<String> = sqlx::query(
@@ -131,20 +232,8 @@ pub async fn run_scan_with_progress(
     .iter()
     .map(|r| r.get::<String, _>("path"))
     .collect();
-    for r in &rows {
-        known.insert(
-            r.get("path"),
-            (
-                r.get("hash"),
-                r.get("file_size"),
-                r.get("file_mtime"),
-                r.get("missing"),
-            ),
-        );
-    }
-
-    // Rows cataloged before MQA detection existed: tags are read (no hashing)
-    // the next time the file is visited.
+    // Rows cataloged before MQA detection existed: tags are read the next
+    // time the file is visited.
     let mut mqa_unchecked: HashSet<String> =
         sqlx::query("SELECT path FROM tracks WHERE mqa_checked = 0")
             .fetch_all(pool)
@@ -153,139 +242,106 @@ pub async fn run_scan_with_progress(
             .iter()
             .map(|r| r.get::<String, _>("path"))
             .collect();
+    let estimate = known
+        .values()
+        .filter(|(_, _, missing)| *missing == 0)
+        .count() as u64;
+    let estimate = (estimate > 0).then_some(estimate);
+
+    let metrics = Arc::new(ScanMetrics::default());
+    let (walk_tx, mut walk_rx) = mpsc::channel::<Walked>(1024);
+    let walk_dirs = dirs.to_vec();
+    let walker = tokio::task::spawn_blocking(move || walk(&walk_dirs, &walk_tx));
+    let (write_tx, write_rx) = mpsc::channel::<CatalogWrite>(WRITE_BATCH * 2);
+    let writer = tokio::spawn(write_catalog(pool.clone(), write_rx, metrics.clone()));
+    let workers = Arc::new(Semaphore::new(workers.max(1)));
 
     let mut report = ScanReport::default();
     let mut seen: HashSet<String> = HashSet::with_capacity(known.len().max(1024));
+    let mut last_log = Instant::now();
 
-    for dir in dirs {
-        let walker = walkdir::WalkDir::new(dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok());
-        for entry in walker {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            report.files_seen += 1;
-            let path = entry.path();
-            if !is_audio(path) {
-                continue;
-            }
-            report.audio_files += 1;
-            processed_audio += 1;
-            on_progress(processed_audio, total_audio);
-            let path_str = path.to_string_lossy().to_string();
-            // The file exists on disk; record that before analysis so a
-            // failed read doesn't mark a present file as missing.
-            seen.insert(path_str.clone());
-
-            let (size, mtime) = match std::fs::metadata(path) {
-                Ok(m) => (
-                    m.len() as i64,
-                    m.modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64),
-                ),
-                Err(e) => {
-                    warn!(path = %path_str, error = %e, "stat failed; skipping");
-                    continue;
-                }
-            };
-
-            // Fast path: unchanged since last scan.
-            match known.get(&path_str) {
-                Some((_, ksize, kmtime, _))
-                    if *ksize == Some(size) && *kmtime == mtime && !stale.contains(&path_str) =>
-                {
-                    report.files_skipped += 1;
-                    if mqa_unchecked.remove(&path_str) {
-                        let owned = path.to_path_buf();
-                        let (mqa, original) = tokio::task::spawn_blocking(move || read_mqa(&owned))
-                            .await
-                            .map_err(|e| {
-                                MusicError::JobFailed(format!("scan worker panicked: {e}"))
-                            })?;
-                        sqlx::query(
-                            "UPDATE tracks SET mqa = ?, original_sample_rate = ?, mqa_checked = 1
-                             WHERE path = ?",
-                        )
-                        .bind(i64::from(mqa))
-                        .bind(original.map(i64::from))
-                        .bind(&path_str)
-                        .execute(pool)
-                        .await
-                        .map_err(db::cvt)?;
-                    }
-                }
-                previous => {
-                    let is_new = previous.is_none();
-                    let owned = path.to_path_buf();
-                    let analysis = tokio::task::spawn_blocking(move || analyze_file(&owned))
-                        .await
-                        .map_err(|e| MusicError::JobFailed(format!("scan worker panicked: {e}")))?;
-                    match analysis {
-                        Ok(a) => {
-                            let hash_changed =
-                                previous.map(|(h, _, _, _)| h.as_str()) != Some(a.hash.as_str());
-                            if is_new || hash_changed || stale.contains(&path_str) {
-                                // One transaction per track: track row, album,
-                                // artists, artwork, and FTS all land together.
-                                let mut tx = pool.begin().await.map_err(db::cvt)?;
-                                upsert_track(&mut tx, &a).await?;
-                                tx.commit().await.map_err(db::cvt)?;
-                                if is_new {
-                                    report.files_added += 1;
-                                } else {
-                                    report.files_updated += 1;
-                                }
-                            } else {
-                                // Touched but identical content: refresh stat columns only.
-                                sqlx::query(
-                                    "UPDATE tracks SET file_size = ?, file_mtime = ?, missing = 0 WHERE path = ?",
-                                )
-                                .bind(a.size)
-                                .bind(a.mtime)
-                                .bind(&path_str)
-                                .execute(pool)
-                                .await
-                                .map_err(db::cvt)?;
-                                report.files_updated += 1;
-                            }
-                        }
-                        Err(e) => {
-                            warn!(path = %path_str, error = %e, "analyze failed; skipping file");
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            if report.files_seen % 200 == 0 {
-                let mins = (start.elapsed().as_secs_f64() / 60.0).max(1e-9);
-                info!(
-                    files_seen = report.files_seen,
-                    audio_files = report.audio_files,
-                    files_per_min = (report.files_seen as f64 / mins) as u64,
-                    "scan progress"
-                );
-            }
+    while let Some(Walked { path, stat }) = walk_rx.recv().await {
+        if write_tx.is_closed() {
+            break; // the writer failed: its error is returned below
         }
+        report.audio_files += 1;
+        on_progress(report.audio_files, estimate);
+        if last_log.elapsed() >= PROGRESS_LOG_INTERVAL {
+            last_log = Instant::now();
+            metrics.log("scan progress", report.audio_files, start.elapsed());
+        }
+        let path_str = path.to_string_lossy().to_string();
+        // The file exists on disk; record that before analysis so a failed
+        // read doesn't mark a present file as missing.
+        seen.insert(path_str.clone());
+        let Some((size, mtime)) = stat else {
+            continue;
+        };
+
+        let unchanged = !stale.contains(&path_str)
+            && matches!(known.get(&path_str),
+                Some((ksize, kmtime, _)) if *ksize == Some(size) && *kmtime == mtime);
+        let work = if unchanged {
+            report.files_skipped += 1;
+            if !mqa_unchecked.remove(&path_str) {
+                continue;
+            }
+            Work::MqaBackfill { path }
+        } else {
+            let is_new = !known.contains_key(&path_str);
+            Work::Analyze {
+                path,
+                size,
+                mtime,
+                is_new,
+            }
+        };
+
+        let permit = workers
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the worker semaphore is never closed");
+        let tx = write_tx.clone();
+        let metrics = metrics.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if let Some(write) = do_work(work, &metrics) {
+                // A send error means the writer failed; the scan reports it.
+                let _ = tx.blocking_send(write);
+            }
+        });
     }
+    // Stop the walk early if the loop ended on a writer failure, then let the
+    // writer drain what the workers still have in flight.
+    drop(walk_rx);
+    drop(write_tx);
+    let totals = walker
+        .await
+        .map_err(|e| MusicError::JobFailed(format!("scan walker panicked: {e}")))?;
+    let (added, updated) = writer
+        .await
+        .map_err(|e| MusicError::JobFailed(format!("scan writer panicked: {e}")))??;
+    report.files_seen = totals.files_seen;
+    report.walk_errors = totals.walk_errors;
+    report.files_added = added;
+    report.files_updated = updated;
 
     // Anything in the catalog but not on disk is marked missing, not deleted.
     // files_missing counts newly-missing files only, matching the delta
     // semantics of files_added / files_updated.
-    for (path_str, (_, _, _, was_missing)) in &known {
+    let mut tx = pool.begin().await.map_err(db::cvt)?;
+    for (path_str, (_, _, was_missing)) in &known {
         if !seen.contains(path_str) && *was_missing == 0 {
             sqlx::query("UPDATE tracks SET missing = 1 WHERE path = ?")
                 .bind(path_str)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(db::cvt)?;
             report.files_missing += 1;
         }
     }
+    tx.commit().await.map_err(db::cvt)?;
 
     let merged = consolidate_albums(pool).await?;
     if merged > 0 {
@@ -295,19 +351,21 @@ pub async fn run_scan_with_progress(
     report.elapsed_secs = start.elapsed().as_secs_f64();
     sqlx::query(
         "UPDATE scan_log SET finished_at = datetime('now'), files_scanned = ?,
-         files_added = ?, files_updated = ?, files_missing = ?, files_skipped = ?
-         WHERE id = ?",
+         files_added = ?, files_updated = ?, files_missing = ?, files_skipped = ?,
+         walk_errors = ? WHERE id = ?",
     )
     .bind(report.files_seen as i64)
     .bind(report.files_added as i64)
     .bind(report.files_updated as i64)
     .bind(report.files_missing as i64)
     .bind(report.files_skipped as i64)
+    .bind(report.walk_errors as i64)
     .bind(scan_id)
     .execute(pool)
     .await
     .map_err(db::cvt)?;
 
+    metrics.log("scan throughput", report.audio_files, start.elapsed());
     info!(
         files_seen = report.files_seen,
         audio_files = report.audio_files,
@@ -315,10 +373,149 @@ pub async fn run_scan_with_progress(
         updated = report.files_updated,
         skipped = report.files_skipped,
         missing = report.files_missing,
+        walk_errors = report.walk_errors,
         elapsed_secs = report.elapsed_secs,
         "scan complete"
     );
     Ok(report)
+}
+
+/// The single walk over `dirs` (blocking). Sends every audio file on, with
+/// the stat walkdir already has; counts everything else. Unreadable entries
+/// are logged and counted rather than silently dropped.
+fn walk(dirs: &[PathBuf], tx: &mpsc::Sender<Walked>) -> WalkTotals {
+    let mut totals = WalkTotals::default();
+    'dirs: for dir in dirs {
+        for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    totals.walk_errors += 1;
+                    warn!(dir = %dir.display(), error = %e, "walk error; entry skipped");
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            totals.files_seen += 1;
+            if !is_audio(entry.path()) {
+                continue;
+            }
+            let stat = match entry.metadata() {
+                Ok(m) => Some((m.len() as i64, mtime_secs(&m))),
+                Err(e) => {
+                    warn!(path = %entry.path().display(), error = %e, "stat failed; skipping");
+                    None
+                }
+            };
+            let walked = Walked {
+                path: entry.into_path(),
+                stat,
+            };
+            if tx.blocking_send(walked).is_err() {
+                break 'dirs; // the scan stopped
+            }
+        }
+    }
+    totals
+}
+
+pub(crate) fn mtime_secs(m: &std::fs::Metadata) -> Option<i64> {
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+}
+
+/// Run one unit of [`Work`] on a blocking worker. A file that can't be read,
+/// or makes a tag parser panic, is logged and skipped: one bad file never
+/// fails the whole scan.
+fn do_work(work: Work, metrics: &ScanMetrics) -> Option<CatalogWrite> {
+    match work {
+        Work::Analyze {
+            path,
+            size,
+            mtime,
+            is_new,
+        } => {
+            let t = Instant::now();
+            let result =
+                std::panic::catch_unwind(AssertUnwindSafe(|| analyze_meta(&path, size, mtime)));
+            metrics.analyzed.fetch_add(1, Ordering::Relaxed);
+            metrics
+                .analyze_nanos
+                .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            match result {
+                Ok(Ok(analysis)) => Some(CatalogWrite::Track {
+                    analysis: Box::new(analysis),
+                    is_new,
+                }),
+                Ok(Err(e)) => {
+                    warn!(path = %path.display(), error = %e, "analyze failed; skipping file");
+                    None
+                }
+                Err(_) => {
+                    warn!(path = %path.display(), "analyze panicked; skipping file");
+                    None
+                }
+            }
+        }
+        Work::MqaBackfill { path } => {
+            let (mqa, original) = std::panic::catch_unwind(AssertUnwindSafe(|| read_mqa(&path)))
+                .unwrap_or((false, None));
+            Some(CatalogWrite::Mqa {
+                path: path.to_string_lossy().to_string(),
+                mqa,
+                original,
+            })
+        }
+    }
+}
+
+/// The single catalog writer: applies worker results in batches of up to
+/// [`WRITE_BATCH`] per transaction. Returns (added, updated).
+async fn write_catalog(
+    pool: SqlitePool,
+    mut rx: mpsc::Receiver<CatalogWrite>,
+    metrics: Arc<ScanMetrics>,
+) -> Result<(u64, u64), MusicError> {
+    let (mut added, mut updated) = (0u64, 0u64);
+    let mut batch = Vec::with_capacity(WRITE_BATCH);
+    while rx.recv_many(&mut batch, WRITE_BATCH).await > 0 {
+        let mut tx = pool.begin().await.map_err(db::cvt)?;
+        for write in batch.drain(..) {
+            match write {
+                CatalogWrite::Track { analysis, is_new } => {
+                    upsert_track(&mut tx, &analysis).await?;
+                    if is_new {
+                        added += 1;
+                    } else {
+                        updated += 1;
+                    }
+                }
+                CatalogWrite::Mqa {
+                    path,
+                    mqa,
+                    original,
+                } => {
+                    sqlx::query(
+                        "UPDATE tracks SET mqa = ?, original_sample_rate = ?, mqa_checked = 1
+                         WHERE path = ?",
+                    )
+                    .bind(i64::from(mqa))
+                    .bind(original.map(i64::from))
+                    .bind(&path)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db::cvt)?;
+                }
+            }
+        }
+        tx.commit().await.map_err(db::cvt)?;
+        metrics.commits.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok((added, updated))
 }
 
 pub(crate) fn is_audio(path: &Path) -> bool {
@@ -328,39 +525,18 @@ pub(crate) fn is_audio(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Hash + read one file. Runs on a blocking worker: no `.await` here.
-fn analyze_file(path: &Path) -> Result<FileAnalysis, MusicError> {
-    let meta = std::fs::metadata(path).map_err(MusicError::Io)?;
-    let size = meta.len() as i64;
-    let mtime = meta
-        .modified()
-        .map_err(MusicError::Io)?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| MusicError::Io(std::io::Error::other(e)))
-        .map(|d| d.as_secs() as i64)
-        .ok();
+/// Read one file's tags and technical properties (no content hashing: the
+/// hash is filled in later). `size`/`mtime` come from the walk's own stat.
+/// Runs on a blocking worker: no `.await` here.
+fn analyze_meta(path: &Path, size: i64, mtime: Option<i64>) -> Result<FileAnalysis, MusicError> {
     let format = path
         .extension()
         .and_then(|s| s.to_str())
         .map(AudioFormat::from_extension)
         .unwrap_or(AudioFormat::Unknown);
 
-    // Stream through BLAKE3 in 64 KiB chunks: O(1) memory regardless of size.
-    let mut f = std::fs::File::open(path).map_err(MusicError::Io)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = f.read(&mut buf).map_err(MusicError::Io)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let hash = hasher.finalize().to_hex().to_string();
-
     let mut a = FileAnalysis {
         path: path.to_string_lossy().to_string(),
-        hash,
         size,
         mtime,
         format,
@@ -871,14 +1047,13 @@ async fn upsert_track(
         Some(r) => {
             let id: i64 = r.get("id");
             sqlx::query(
-                "UPDATE tracks SET hash = ?, format = ?, sample_rate = ?, bit_depth = ?,
+                "UPDATE tracks SET hash = NULL, hash_algo = NULL, format = ?, sample_rate = ?, bit_depth = ?,
                      channels = ?, duration_ms = ?, bitrate = ?, title = ?, album = ?,
                      artist = ?, album_id = ?, track_no = ?, disc_no = ?, genre = ?,
                      year = ?, artwork_hash = ?, file_size = ?, file_mtime = ?,
                      missing = 0, decodable = ?, mqa = ?, original_sample_rate = ?,
                      mqa_checked = 1 WHERE id = ?",
             )
-            .bind(&a.hash)
             .bind(a.format.wire_name())
             .bind(a.sample_rate.map(i64::from))
             .bind(a.bit_depth.map(i64::from))
@@ -911,15 +1086,14 @@ async fn upsert_track(
             id
         }
         None => sqlx::query(
-            "INSERT INTO tracks (path, hash, format, sample_rate, bit_depth, channels,
+            "INSERT INTO tracks (path, format, sample_rate, bit_depth, channels,
                      duration_ms, bitrate, title, album, artist, album_id, track_no, disc_no,
                      genre, year, artwork_hash, file_size, file_mtime, missing, decodable,
                      mqa, original_sample_rate, mqa_checked)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1)
                      RETURNING id",
         )
         .bind(&a.path)
-        .bind(&a.hash)
         .bind(a.format.wire_name())
         .bind(a.sample_rate.map(i64::from))
         .bind(a.bit_depth.map(i64::from))
@@ -1527,8 +1701,8 @@ mod scan_tests {
         assert_eq!(r.get::<i64, _>("decodable"), 1);
         assert_eq!(r.get::<i64, _>("missing"), 0);
         assert_eq!(r.get::<String, _>("format"), "flac");
-        let hash: String = r.get("hash");
-        assert_eq!(hash.len(), 64, "BLAKE3 hex digest");
+        // The scan catalogs from metadata alone: the content hash is pending.
+        assert_eq!(r.get::<Option<String>, _>("hash"), None);
 
         // Multi-artist ";" split recorded in track_artists.
         let duo: i64 = sqlx::query(
@@ -1677,7 +1851,7 @@ mod scan_tests {
             .get("missing");
         assert_eq!(missing, 1);
 
-        // Changed file: rewritten with a new title tag -> re-hashed, updated.
+        // Changed file: rewritten with a new title tag -> re-read, updated.
         std::fs::remove_file(lib.join("Kind of Blue").join("01.mp3")).unwrap();
         make_track(
             &lib,
@@ -1716,13 +1890,15 @@ mod scan_tests {
                 .get(0);
         assert_eq!(fts, 1);
 
-        // Touched file (mtime changed, content identical): stat refresh, same hash.
+        // Touched file (mtime changed, content identical): with no hash to
+        // compare, size+mtime is the change signal, so the row is re-read.
+        // Its metadata comes out the same and it keeps its id.
         let wav = lib.join("Blue Train").join("03.wav");
-        let before: String = sqlx::query("SELECT hash FROM tracks WHERE title = 'Locomotion'")
+        let before: i64 = sqlx::query("SELECT id FROM tracks WHERE title = 'Locomotion'")
             .fetch_one(&pool)
             .await
             .unwrap()
-            .get("hash");
+            .get("id");
         let new_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         std::fs::File::options()
             .write(true)
@@ -1734,12 +1910,12 @@ mod scan_tests {
             .await
             .unwrap();
         assert_eq!(r.files_updated, 1);
-        let after: String = sqlx::query("SELECT hash FROM tracks WHERE title = 'Locomotion'")
+        let after: i64 = sqlx::query("SELECT id FROM tracks WHERE title = 'Locomotion'")
             .fetch_one(&pool)
             .await
             .unwrap()
-            .get("hash");
-        assert_eq!(before, after, "identical content keeps its hash");
+            .get("id");
+        assert_eq!(before, after, "the same row, re-read in place");
 
         // scan_log has one row per run.
         let runs: i64 = sqlx::query("SELECT COUNT(*) FROM scan_log")
@@ -1749,6 +1925,137 @@ mod scan_tests {
             .get(0);
         assert_eq!(runs, 5);
         let _ = dir; // keep tempdir alive
+    }
+
+    /// More files than several write batches: every one lands exactly once.
+    /// A first scan has no progress estimate (there is no counting pre-walk);
+    /// a rescan estimates from the previous scan's count.
+    #[tokio::test]
+    async fn a_large_scan_commits_every_file_and_rescans_estimate_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let n = WRITE_BATCH * 2 + 37;
+        for i in 0..n {
+            let album = lib.join(format!("album{:03}", i / 50));
+            std::fs::create_dir_all(&album).unwrap();
+            // Not decodable audio: cataloged from the file name alone.
+            std::fs::write(album.join(format!("{i:04}.mp3")), b"not really audio").unwrap();
+        }
+        std::fs::write(lib.join("cover.jpg"), b"jpeg").unwrap();
+        let pool = db::open(&dir.path().join("t.db")).await.unwrap();
+
+        let ticks = std::sync::Mutex::new(Vec::new());
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |done, est| {
+            ticks.lock().unwrap().push((done, est))
+        })
+        .await
+        .unwrap();
+        assert_eq!((r.files_seen, r.audio_files), (n as u64 + 1, n as u64));
+        assert_eq!(r.files_added, n as u64);
+        assert_eq!(count(&pool, "tracks").await, n as i64);
+        assert_eq!(count(&pool, "search_fts").await, n as i64);
+        let ticks = ticks.into_inner().unwrap();
+        assert_eq!(ticks.len(), n);
+        assert_eq!(ticks.last().unwrap().0, n as u64);
+        assert!(
+            ticks.iter().all(|(_, est)| est.is_none()),
+            "first scan: no estimate"
+        );
+
+        let ticks = std::sync::Mutex::new(Vec::new());
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |done, est| {
+            ticks.lock().unwrap().push((done, est))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            (r.files_added, r.files_updated, r.files_skipped),
+            (0, 0, n as u64)
+        );
+        let ticks = ticks.into_inner().unwrap();
+        assert!(ticks.iter().all(|(_, est)| *est == Some(n as u64)));
+    }
+
+    /// First-scan benchmark against a real library, into an empty catalog.
+    /// Not run by default (it reads a whole library). Release mode:
+    ///
+    /// ```text
+    /// KAHAWAI_BENCH_DIRS=/Volumes/NetMusic:/other/dir \
+    /// KAHAWAI_BENCH_DB=/local/disk/bench.db \
+    /// KAHAWAI_BENCH_WORKERS=32 \
+    /// cargo test --release -p kahawai-server first_scan_benchmark -- --ignored --nocapture
+    /// ```
+    ///
+    /// `KAHAWAI_BENCH_DB` must not exist yet, and must be on local disk.
+    /// `KAHAWAI_BENCH_WORKERS` is optional (default [`SCAN_WORKERS`]).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "reads a whole real library; run by hand"]
+    async fn first_scan_benchmark() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .try_init();
+        let dirs: Vec<PathBuf> = std::env::var("KAHAWAI_BENCH_DIRS")
+            .expect("KAHAWAI_BENCH_DIRS: colon-separated music dirs")
+            .split(':')
+            .map(PathBuf::from)
+            .collect();
+        let db_path = PathBuf::from(std::env::var("KAHAWAI_BENCH_DB").expect("KAHAWAI_BENCH_DB"));
+        assert!(
+            !db_path.exists(),
+            "{} exists: a first scan needs an empty catalog",
+            db_path.display()
+        );
+        let pool = db::open(&db_path).await.unwrap();
+        let workers = std::env::var("KAHAWAI_BENCH_WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SCAN_WORKERS);
+        let r = scan_with_workers(&pool, &dirs, workers, |_, _| {})
+            .await
+            .unwrap();
+        println!(
+            "FIRST SCAN ({workers} workers): {} files seen, {} audio, {} added, {} walk errors in {:.1} s ({:.0} audio files/s)",
+            r.files_seen,
+            r.audio_files,
+            r.files_added,
+            r.walk_errors,
+            r.elapsed_secs,
+            r.audio_files as f64 / r.elapsed_secs.max(1e-9)
+        );
+    }
+
+    /// A directory the walk can't read is logged and counted (report and
+    /// scan_log), not silently dropped; everything else is still scanned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_directories_are_counted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let open_dir = lib.join("Open");
+        let locked = lib.join("Locked");
+        std::fs::create_dir_all(&open_dir).unwrap();
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(open_dir.join("01.mp3"), b"x").unwrap();
+        std::fs::write(locked.join("01.mp3"), b"x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: permissions don't stop the walk here.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let pool = db::open(&dir.path().join("t.db")).await.unwrap();
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {}).await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = r.unwrap();
+        assert_eq!(r.walk_errors, 1);
+        assert_eq!(r.files_added, 1);
+        let logged: i64 = sqlx::query("SELECT walk_errors FROM scan_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(logged, 1);
     }
 }
 
@@ -2674,7 +2981,7 @@ mod mqa_tests {
     }
 
     /// Catalogs built before the column existed: the next scan reads just the
-    /// tags (the file is not re-hashed) and the row is never revisited.
+    /// tags (the row is not re-analyzed) and the row is never revisited.
     #[tokio::test]
     async fn a_scan_backfills_mqa_for_rows_cataloged_before_detection_existed() {
         let dir = tempfile::tempdir().unwrap();
@@ -2689,17 +2996,14 @@ mod mqa_tests {
         flac(&lib, "A", "02.flac", "Plain FLAC", None);
         let db_path = dir.path().join("t.db");
         let (pool, _) = scan(&lib, &db_path).await;
-        // Back to the pre-detection state.
-        sqlx::query("UPDATE tracks SET mqa = 0, original_sample_rate = NULL, mqa_checked = 0")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let hash_before: String =
-            sqlx::query("SELECT hash FROM tracks WHERE title = 'Brahms Lullaby'")
-                .fetch_one(&pool)
-                .await
-                .unwrap()
-                .get(0);
+        // Back to the pre-detection state (with a hash, as those rows had).
+        sqlx::query(
+            "UPDATE tracks SET mqa = 0, original_sample_rate = NULL, mqa_checked = 0,
+             hash = 'feedface'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
             .await
@@ -2723,8 +3027,8 @@ mod mqa_tests {
         assert_eq!(rows[1].get::<i64, _>("mqa"), 0);
         assert!(rows.iter().all(|r| r.get::<i64, _>("mqa_checked") == 1));
         assert_eq!(
-            rows[0].get::<String, _>("hash"),
-            hash_before,
+            rows[0].get::<Option<String>, _>("hash").as_deref(),
+            Some("feedface"),
             "hash untouched"
         );
 

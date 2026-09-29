@@ -10,8 +10,10 @@ use crate::format::AudioFormat;
 pub struct Track {
     pub id: i64,
     pub path: String,
-    /// BLAKE3 hex digest — the file's identity for dedupe and change detection.
-    pub hash: String,
+    /// BLAKE3 hex digest of the file's contents. `None` until it has been
+    /// hashed: the scan catalogs from metadata alone and hashing comes later.
+    #[serde(default)]
+    pub hash: Option<String>,
     pub format: AudioFormat,
     pub sample_rate: Option<u32>,
     pub bit_depth: Option<u8>,
@@ -175,6 +177,9 @@ pub enum JobKind {
     /// Library scan (`POST /api/scan`). Progress is files_processed /
     /// files_total; the result message carries the scan counts (S9).
     Scan,
+    /// Content-hash the tracks a scan left pending (`hash IS NULL`). Queued
+    /// after every scan; resumes where it left off after a restart.
+    HashFiles,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,7 +243,7 @@ mod tests {
         Track {
             id: 42,
             path: "/mnt/music/Kind of Blue/01 - So What.flac".into(),
-            hash: "deadbeef".into(),
+            hash: Some("deadbeef".into()),
             format: AudioFormat::Flac,
             sample_rate: Some(96000),
             bit_depth: Some(24),
@@ -348,6 +353,22 @@ mod tests {
         assert!(!t.mqa);
         assert_eq!(t.original_sample_rate, None);
         assert!(t.decodable);
+    }
+
+    #[test]
+    fn a_track_not_yet_hashed_has_no_hash() {
+        let json = r#"{"id":1,"path":"/a.flac","hash":null,"format":"flac","sample_rate":null,
+            "bit_depth":null,"channels":null,"duration_ms":null,"bitrate":null,"title":"t",
+            "album":null,"artist":null,"album_id":null,"track_no":null,"disc_no":null}"#;
+        let t: Track = serde_json::from_str(json).unwrap();
+        assert_eq!(t.hash, None);
+        let saved_queue = r#"{"id":1,"path":"/a.flac","format":"flac","sample_rate":null,
+            "bit_depth":null,"channels":null,"duration_ms":null,"bitrate":null,"title":"t",
+            "album":null,"artist":null,"album_id":null,"track_no":null,"disc_no":null}"#;
+        assert_eq!(
+            serde_json::from_str::<Track>(saved_queue).unwrap().hash,
+            None
+        );
     }
 
     #[test]
