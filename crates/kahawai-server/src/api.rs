@@ -347,6 +347,10 @@ async fn playlist_by_id(s: &AppState, id: i64) -> Result<Playlist, ApiError> {
     })
 }
 
+pub async fn get_playlist(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Json<Playlist>, ApiError> {
+    Ok(Json(playlist_by_id(&s, id).await?))
+}
+
 pub async fn list_playlists(State(s): State<AppState>) -> Result<Json<Vec<Playlist>>, ApiError> {
     let rows = sqlx::query("SELECT id FROM playlists ORDER BY id")
         .fetch_all(&s.pool)

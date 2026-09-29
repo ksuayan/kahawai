@@ -608,21 +608,41 @@ describe("Settings: album-art cache", () => {
     expect(w.text()).not.toContain("Album art cache");
   });
 
-  it("shows the cache size and clears it", async () => {
+  const GB = 1024 * 1024 * 1024;
+  const sizeOptions = [512 * 1024 * 1024, GB, 2 * GB];
+
+  it("shows the cache size, its limit, free disk space, and clears it", async () => {
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
-    let stats = { bytes: 5 * 1024 * 1024, files: 42 };
+    let stats = { bytes: 5 * 1024 * 1024, files: 42, max_bytes: 2 * GB, size_options: sizeOptions, free_bytes: 100 * GB };
     tauri.on("artwork_cache_stats", () => stats).on("clear_artwork_cache", () => {
-      stats = { bytes: 0, files: 0 };
+      stats = { ...stats, bytes: 0, files: 0 };
       return 42;
     });
     mockFetch({ "/api/health": { status: "ok" }, "/api/albums": { items: [], page: 1, per_page: 500, total: 0 }, "/api/artists": [] });
     const w = await mountSettings();
-    expect(w.text()).toContain("42 images · 5.0 MB");
+    expect(w.text()).toContain("42 images · 5.0 MB of 2.0 GB");
+    expect(w.get('[data-testid="artwork-cache-free"]').text()).toBe("100.0 GB free on disk");
     await button(w, "Clear cache").trigger("click");
     await settle();
     expect(tauri.callsTo("clear_artwork_cache")).toHaveLength(1);
-    expect(w.text()).toContain("0 images · 1 KB");
+    expect(w.text()).toContain("0 images · 1 KB of 2.0 GB");
     expect(button(w, "Clear cache").attributes("disabled")).toBeDefined();
+  });
+
+  it("offers 512 MB / 1 GB / 2 GB and changes the limit through the core", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const stats = { bytes: 5 * 1024 * 1024, files: 42, max_bytes: 512 * 1024 * 1024, size_options: sizeOptions, free_bytes: 100 * GB };
+    tauri
+      .on("artwork_cache_stats", () => stats)
+      .on("set_artwork_cache_max_bytes", () => ({ ...stats, max_bytes: 2 * GB }));
+    mockFetch({ "/api/health": { status: "ok" }, "/api/albums": { items: [], page: 1, per_page: 500, total: 0 }, "/api/artists": [] });
+    const w = await mountSettings();
+    await openSelect(select(w, "Album art cache limit"));
+    expect(optionLabels()).toEqual(["512.0 MB", "1.0 GB", "2.0 GB"]);
+    await pick(options()[2]!);
+    await settle();
+    expect(tauri.callsTo("set_artwork_cache_max_bytes").at(-1)).toMatchObject({ max_bytes: 2 * GB });
+    expect(w.text()).toContain("of 2.0 GB");
   });
 });
 

@@ -52,7 +52,7 @@ The webview never holds the server token and never streams audio itself — play
 ## 4. Library & artwork caching
 
 - Server browse results paged (100/page); Pinia caches pages in-memory per session.
-- Artwork: fetched via `/api/artwork/{hash}`, cached on disk (content-addressed by hash — same dedup logic as Koa), LRU-capped (default 2 GB), ETag-aware.
+- Artwork: fetched via `/api/artwork/{hash}`, cached on disk (content-addressed by hash — same dedup logic as Koa), LRU-capped (default 2 GB, user-configurable to 512 MB/1 GB/2 GB in Settings → Album art cache, alongside a free-disk-space readout), ETag-aware.
 - Offline is **not** v1 — but the disk cache layout is designed so v2 mobile can promote cached tracks to offline downloads without re-fetching.
 
 ## 5. Built-in DSP (v1)

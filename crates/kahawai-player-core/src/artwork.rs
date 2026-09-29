@@ -39,10 +39,12 @@ pub struct CachedArt {
     pub from_cache: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ArtworkCache {
     dir: PathBuf,
-    max_bytes: u64,
+    /// Atomic so the cap can be changed from the Settings UI without a
+    /// `Mutex` around the whole cache.
+    max_bytes: AtomicU64,
 }
 
 /// Content hashes are hex digests; anything else is rejected before it
@@ -74,11 +76,23 @@ impl ArtworkCache {
     pub fn new(dir: impl Into<PathBuf>, max_bytes: u64) -> Result<Self, MusicError> {
         let dir = dir.into();
         fs::create_dir_all(&dir).map_err(MusicError::Io)?;
-        Ok(Self { dir, max_bytes })
+        Ok(Self { dir, max_bytes: AtomicU64::new(max_bytes) })
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Change the cap (Settings UI). Evicts immediately if the new cap is
+    /// smaller than what's already on disk, rather than waiting for the
+    /// next write.
+    pub fn set_max_bytes(&self, max_bytes: u64) {
+        self.max_bytes.store(max_bytes, Ordering::Relaxed);
+        self.evict();
     }
 
     fn path_for(&self, hash: &str) -> PathBuf {
@@ -213,14 +227,15 @@ impl ArtworkCache {
                 }
             }
         }
+        let max_bytes = self.max_bytes();
         let mut entries = self.entries();
         let mut total: u64 = entries.iter().map(|(_, len, _)| len).sum();
-        if total <= self.max_bytes {
+        if total <= max_bytes {
             return;
         }
         entries.sort_by_key(|(_, _, mtime)| *mtime);
         for (path, len, _) in entries {
-            if total <= self.max_bytes {
+            if total <= max_bytes {
                 break;
             }
             if fs::remove_file(&path).is_ok() {
@@ -375,6 +390,27 @@ mod tests {
         assert!(c.get("02").is_none(), "LRU entry evicted");
         assert!(c.get("03").is_some());
         assert!(c.stats().0 <= 250);
+    }
+
+    #[test]
+    fn lowering_the_cap_evicts_immediately_not_on_the_next_write() {
+        let img = |n: u8| {
+            let mut v = JPEG.to_vec();
+            v.resize(100, n);
+            v
+        };
+        let (_d, c) = cache(1 << 20); // room for plenty
+        c.put("01", &img(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        c.put("02", &img(2)).unwrap();
+        assert_eq!(c.stats(), (200, 2));
+
+        // Settings UI drops the cap below what's already on disk.
+        c.set_max_bytes(150);
+        assert_eq!(c.max_bytes(), 150);
+        assert!(c.get("01").is_none(), "oldest entry evicted right away");
+        assert!(c.get("02").is_some());
+        assert!(c.stats().0 <= 150);
     }
 
     #[test]

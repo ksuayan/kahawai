@@ -19,7 +19,7 @@ use std::sync::Arc;
 use axum::{
     error_handling::HandleErrorLayer,
     http::StatusCode,
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     BoxError, Router,
 };
 use kahawai_core::config::ServerConfig;
@@ -94,7 +94,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/playlists/import", post(api::import_playlist))
         .route(
             "/api/playlists/{id}",
-            delete(api::delete_playlist).patch(api::rename_playlist),
+            get(api::get_playlist).delete(api::delete_playlist).patch(api::rename_playlist),
         )
         .route("/api/playlists/{id}/tracks", put(api::set_playlist_tracks))
         .route("/api/artwork/{hash}", get(api::artwork))
@@ -2182,6 +2182,29 @@ mod integration_tests {
         (status, v)
     }
 
+    /// GET a single playlist by id returns its name and ordered track ids;
+    /// a nonexistent id 404s.
+    #[tokio::test]
+    async fn get_playlist_returns_tracks_or_404() {
+        let (app, _dir) = playlist_app().await;
+        let (status, v) = post_json(
+            &app,
+            "/api/playlists",
+            serde_json::json!({ "name": "Chill Bill", "track_ids": [2, 1, 3] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let pid = v["id"].as_i64().unwrap();
+
+        let (status, v) = get_json(&app, &format!("/api/playlists/{pid}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["name"], serde_json::json!("Chill Bill"));
+        assert_eq!(v["track_ids"], serde_json::json!([2, 1, 3]));
+
+        let (status, _) = get_json(&app, "/api/playlists/9999").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
     /// PUT tracks defaults to append; explicit append adds; replace swaps.
     /// Positions stay dense (0..n).
     #[tokio::test]
@@ -2223,8 +2246,8 @@ mod integration_tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(v["track_ids"], serde_json::json!([2]));
 
-        // Positions are dense 0..n in the DB (verified directly; the API
-        // has no GET single-playlist route, only the list).
+        // Positions are dense 0..n in the DB — checked directly, since
+        // track_ids order alone wouldn't rule out sparse positions.
         let pool = crate::db::open(&dir.path().join("test.db")).await.unwrap();
         let rows: Vec<(i64, i64)> = sqlx::query_as(
             "SELECT position, track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position",
@@ -2322,27 +2345,10 @@ mod integration_tests {
         assert_eq!(unmatched[0], serde_json::json!("/nonexistent/ghost.mp3"));
         assert_eq!(unmatched[1], serde_json::json!("nope.mp3"));
 
-        // The playlist exists with the matched tracks in file order
-        // (verified via the list endpoint; there is no GET single-playlist).
+        // The playlist exists with the matched tracks in file order.
         let pid = v["playlist_id"].as_i64().unwrap();
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/playlists")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let body = body_bytes(res).await;
-        let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let pl = list
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["id"] == pid)
-            .expect("imported playlist in list");
+        let (status, pl) = get_json(&app, &format!("/api/playlists/{pid}")).await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(pl["name"], serde_json::json!("imported"));
         assert_eq!(pl["track_ids"], serde_json::json!([1, 2]));
     }

@@ -7,6 +7,7 @@ import {
   clearArtworkCache,
   dopStatus,
   inTauri,
+  setArtworkCacheMaxBytes,
   setDsdDeviceConfirmed,
   type ArtworkCacheStats,
 } from "../tauri";
@@ -156,14 +157,30 @@ async function onConfirmDsdDevice(on: boolean): Promise<void> {
 
 const artStats = ref<ArtworkCacheStats | null>(null);
 const artClearing = ref(false);
+const artResizing = ref(false);
 
 async function refreshArtStats(): Promise<void> {
   artStats.value = (await artworkCacheStats()) ?? null;
 }
 
+/** KB under 1 MB, MB under 1 GB, GB above — matches how people think about disk space. */
 function fmtBytes(n: number): string {
   if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+const sizeOptions = computed<UiSelectOption[]>(() =>
+  (artStats.value?.size_options ?? []).map((b) => ({ value: String(b), label: fmtBytes(b) })),
+);
+
+async function onChangeMaxSize(v: string): Promise<void> {
+  artResizing.value = true;
+  try {
+    artStats.value = (await setArtworkCacheMaxBytes(Number(v))) ?? artStats.value;
+  } finally {
+    artResizing.value = false;
+  }
 }
 
 async function onClearArt(): Promise<void> {
@@ -491,11 +508,29 @@ const dopRates = computed(() =>
     <SettingsSection v-if="inTauri()" title="Album art cache">
       <UiHint>
         Covers are saved on disk the first time they are shown, so they load instantly afterwards and still appear if
-        the server is offline. Older ones are dropped automatically once the cache passes 512&nbsp;MB.
+        the server is offline. Older ones are dropped automatically once the cache passes its limit below.
       </UiHint>
       <UiHint v-if="artStats">
-        {{ artStats.files }} {{ artStats.files === 1 ? "image" : "images" }} · {{ fmtBytes(artStats.bytes) }}
+        {{ artStats.files }} {{ artStats.files === 1 ? "image" : "images" }} · {{ fmtBytes(artStats.bytes) }} of
+        {{ fmtBytes(artStats.max_bytes) }}
       </UiHint>
+      <div class="flex flex-wrap items-center gap-3">
+        <label class="flex items-center gap-2 text-dim">
+          Limit
+          <UiSelect
+            aria-label="Album art cache limit"
+            trigger-class="w-[90px]"
+            :model-value="String(artStats?.max_bytes ?? '')"
+            :options="sizeOptions"
+            :disabled="artResizing || !artStats"
+            data-testid="artwork-cache-limit"
+            @update:model-value="(v) => v && onChangeMaxSize(v)"
+          />
+        </label>
+        <span v-if="artStats?.free_bytes != null" class="text-xs text-dim" data-testid="artwork-cache-free">
+          {{ fmtBytes(artStats.free_bytes) }} free on disk
+        </span>
+      </div>
       <UiButton variant="icon" :disabled="artClearing || !artStats?.files" @click="onClearArt">
         {{ artClearing ? "Clearing…" : "Clear cache" }}
       </UiButton>

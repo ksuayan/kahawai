@@ -41,10 +41,49 @@ struct AppState {
 struct ArtworkState {
     cache: ArtworkCache,
     engine: Arc<EngineController>,
+    /// Where the chosen cap (`ArtworkCacheConfig`) is persisted.
+    config_path: PathBuf,
 }
 
-/// Upper bound for the on-disk cover cache (least recently used go first).
-const ARTWORK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+/// Default upper bound for the on-disk cover cache (least recently used go
+/// first), used the first time the app runs. User-configurable afterwards
+/// (Settings → Album art cache) among `ARTWORK_CACHE_SIZE_OPTIONS`.
+const ARTWORK_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Choices offered in the Settings dropdown.
+const ARTWORK_CACHE_SIZE_OPTIONS: [u64; 3] =
+    [512 * 1024 * 1024, 1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024];
+
+/// The one setting this cache needs persisted, kept in its own small file
+/// rather than `engine-settings.json` — the cache is a shell-only concern,
+/// with nothing for the playback engine to know about.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ArtworkCacheConfig {
+    #[serde(default = "default_artwork_cache_bytes")]
+    max_bytes: u64,
+}
+
+fn default_artwork_cache_bytes() -> u64 {
+    ARTWORK_CACHE_BYTES
+}
+
+impl ArtworkCacheConfig {
+    fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| Self { max_bytes: default_artwork_cache_bytes() })
+    }
+
+    fn save(&self, path: &std::path::Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(t) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(path, t);
+        }
+    }
+}
 
 /// `artwork://localhost/<hash>` → cached bytes, fetching from the server on
 /// a miss. Runs on a worker thread: the request handler must not block the
@@ -98,17 +137,42 @@ fn serve_artwork(
 struct ArtworkCacheStats {
     bytes: u64,
     files: usize,
+    max_bytes: u64,
+    /// Options for the Settings dropdown.
+    size_options: Vec<u64>,
+    /// Free space on the volume holding the cache dir; `None` if it
+    /// couldn't be read (e.g. an exotic filesystem).
+    free_bytes: Option<u64>,
+}
+
+fn artwork_cache_stats_for(cache: &ArtworkCache) -> ArtworkCacheStats {
+    let (bytes, files) = cache.stats();
+    ArtworkCacheStats {
+        bytes,
+        files,
+        max_bytes: cache.max_bytes(),
+        size_options: ARTWORK_CACHE_SIZE_OPTIONS.to_vec(),
+        free_bytes: fs4::available_space(cache.dir()).ok(),
+    }
 }
 
 #[tauri::command]
 fn artwork_cache_stats(state: State<'_, ArtworkState>) -> ArtworkCacheStats {
-    let (bytes, files) = state.cache.stats();
-    ArtworkCacheStats { bytes, files }
+    artwork_cache_stats_for(&state.cache)
 }
 
 #[tauri::command]
 fn clear_artwork_cache(state: State<'_, ArtworkState>) -> usize {
     state.cache.clear()
+}
+
+/// Settings → Album art cache: change the cap. Evicts immediately if the
+/// cache is already over the new limit.
+#[tauri::command]
+fn set_artwork_cache_max_bytes(state: State<'_, ArtworkState>, max_bytes: u64) -> ArtworkCacheStats {
+    state.cache.set_max_bytes(max_bytes);
+    ArtworkCacheConfig { max_bytes }.save(&state.config_path);
+    artwork_cache_stats_for(&state.cache)
 }
 
 /// The analog stage's effect on the level (matches `AnalogLevel` in the UI types).
@@ -784,16 +848,24 @@ fn main() {
             let api = Mutex::new(ApiClient::new(server_url));
 
             // Album-art cache: the OS cache dir (safe for the OS to purge).
+            // The cap itself is a shell-only setting, kept in its own small
+            // file next to engine-settings.json.
             let art_dir = app
                 .path()
                 .app_cache_dir()
                 .unwrap_or_else(|_| std::env::temp_dir().join("kahawai-player"))
                 .join("artwork");
-            let cache = ArtworkCache::new(art_dir, ARTWORK_CACHE_BYTES)
-                .map_err(|e| format!("artwork cache: {e}"))?;
+            let artwork_config_path = app
+                .path()
+                .app_config_dir()
+                .map(|d| d.join("artwork-cache.json"))
+                .unwrap_or_else(|_| std::env::temp_dir().join("kahawai-player-artwork-cache.json"));
+            let max_bytes = ArtworkCacheConfig::load(&artwork_config_path).max_bytes;
+            let cache = ArtworkCache::new(art_dir, max_bytes).map_err(|e| format!("artwork cache: {e}"))?;
             app.manage(ArtworkState {
                 cache,
                 engine: engine.clone(),
+                config_path: artwork_config_path,
             });
 
             let handle = app.handle();
@@ -837,6 +909,7 @@ fn main() {
             get_server_url,
             artwork_cache_stats,
             clear_artwork_cache,
+            set_artwork_cache_max_bytes,
             set_server_url,
             play_track,
             queue_play,

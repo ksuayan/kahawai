@@ -118,7 +118,7 @@ The audio callback never blocks or allocates: it drains a lock-free (`ringbuf`) 
 
 ### 3.4 What the client deliberately does not do
 
-No crossfade (gapless-only in v1). No remote control of other instances. No PCM exclusive-mode toggle. No offline mode. No artwork disk cache beyond browser HTTP caching (ETag/304). Output-device selection is display-only; PCM always uses the system default device.
+No crossfade (gapless-only in v1). No remote control of other instances. No PCM exclusive-mode toggle. No offline mode. Output-device selection is display-only; PCM always uses the system default device.
 
 ---
 

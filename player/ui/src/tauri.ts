@@ -46,6 +46,11 @@ export function cachedArtworkUrl(hash: string): string {
 export interface ArtworkCacheStats {
   bytes: number;
   files: number;
+  max_bytes: number;
+  /** Choices for the Settings dropdown (bytes), smallest first. */
+  size_options: number[];
+  /** Free space on the volume holding the cache dir; null if unreadable. */
+  free_bytes: number | null;
 }
 
 export async function artworkCacheStats(): Promise<ArtworkCacheStats | undefined> {
@@ -55,6 +60,11 @@ export async function artworkCacheStats(): Promise<ArtworkCacheStats | undefined
 /** Returns how many cached images were deleted. */
 export async function clearArtworkCache(): Promise<number | undefined> {
   return cmd<number>("clear_artwork_cache");
+}
+
+/** Change the cache's cap; returns the refreshed stats. */
+export async function setArtworkCacheMaxBytes(maxBytes: number): Promise<ArtworkCacheStats | undefined> {
+  return cmd<ArtworkCacheStats>("set_artwork_cache_max_bytes", { max_bytes: maxBytes });
 }
 
 export async function getServerUrl(): Promise<string | undefined> {
