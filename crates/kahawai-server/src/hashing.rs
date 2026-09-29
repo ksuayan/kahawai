@@ -20,7 +20,7 @@ use std::{
     fs::File,
     io::{self, Read},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use kahawai_core::MusicError;
@@ -38,6 +38,8 @@ const HASH_WORKERS: usize = 4;
 const HASH_BATCH: i64 = 200;
 /// Read size: large reads keep a network share streaming.
 const READ_BUF: usize = 1 << 20;
+/// How often a running hash job logs its throughput.
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Outcome of one hashing run.
 #[derive(Debug, Default)]
@@ -47,6 +49,8 @@ pub struct HashReport {
     /// Rows left pending: the file changed since the scan, or couldn't be
     /// read. They are tried again on the next run.
     pub skipped: u64,
+    /// Bytes read for the rows that got their hash.
+    pub bytes: u64,
     pub elapsed_secs: f64,
 }
 
@@ -108,6 +112,7 @@ pub async fn hash_pending(
     let mut after_id = 0i64;
     let mut exhausted = false;
     let mut queue: VecDeque<Pending> = VecDeque::new();
+    let mut last_log = Instant::now();
 
     loop {
         if queue.is_empty() && !exhausted {
@@ -169,20 +174,34 @@ pub async fn hash_pending(
         };
         if hashed {
             report.hashed += 1;
+            report.bytes += p.size.unwrap_or(0).max(0) as u64;
         } else {
             report.skipped += 1;
         }
         on_progress(report.hashed + report.skipped, total);
+        if last_log.elapsed() >= PROGRESS_LOG_INTERVAL {
+            last_log = Instant::now();
+            log_throughput("hash progress", &report, total, start.elapsed());
+        }
     }
 
     report.elapsed_secs = start.elapsed().as_secs_f64();
-    info!(
-        hashed = report.hashed,
-        skipped = report.skipped,
-        elapsed_secs = report.elapsed_secs,
-        "content hashing complete"
-    );
+    log_throughput("content hashing complete", &report, total, start.elapsed());
     Ok(report)
+}
+
+fn log_throughput(what: &str, r: &HashReport, total: u64, elapsed: Duration) {
+    let secs = elapsed.as_secs_f64().max(1e-9);
+    info!(
+        hashed = r.hashed,
+        skipped = r.skipped,
+        remaining = total.saturating_sub(r.hashed + r.skipped),
+        files_per_sec = (r.hashed as f64 / secs * 10.0).round() / 10.0,
+        mb_per_sec = (r.bytes as f64 / 1e6 / secs * 10.0).round() / 10.0,
+        gb_hashed = (r.bytes as f64 / 1e8).round() / 10.0,
+        elapsed_secs = secs.round() as u64,
+        "{what}"
+    );
 }
 
 #[cfg(test)]
@@ -213,6 +232,36 @@ mod tests {
             .await
             .unwrap();
         (r.get("hash"), r.get("hash_algo"))
+    }
+
+    /// Phase B benchmark against a real catalog (e.g. one written by
+    /// `scanner::first_scan_benchmark`). Not run by default: it reads every
+    /// pending file. Release mode:
+    ///
+    /// ```text
+    /// KAHAWAI_BENCH_DB=/local/disk/bench.db \
+    /// cargo test --release -p kahawai-server hash_benchmark -- --ignored --nocapture
+    /// ```
+    ///
+    /// Safe to kill at any point and start again: it resumes.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "reads a whole real library; run by hand"]
+    async fn hash_benchmark() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .try_init();
+        let db_path = PathBuf::from(std::env::var("KAHAWAI_BENCH_DB").expect("KAHAWAI_BENCH_DB"));
+        assert!(db_path.exists(), "{} does not exist", db_path.display());
+        let pool = db::open(&db_path).await.unwrap();
+        let r = hash_pending(&pool, |_, _| {}).await.unwrap();
+        println!(
+            "HASH RUN: {} hashed, {} skipped, {:.1} GB in {:.1} s ({:.1} MB/s)",
+            r.hashed,
+            r.skipped,
+            r.bytes as f64 / 1e9,
+            r.elapsed_secs,
+            r.bytes as f64 / 1e6 / r.elapsed_secs.max(1e-9)
+        );
     }
 
     #[test]
