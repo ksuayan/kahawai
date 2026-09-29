@@ -2194,6 +2194,9 @@ pub struct EngineController {
     bit_perfect: Arc<RwLock<BitPerfect>>,
     global_format: Arc<RwLock<Option<StreamFormat>>>,
     settings_path: PathBuf,
+    /// Signalled by the playback thread once it has saved and is about to
+    /// exit; taken by the first [`shutdown`](Self::shutdown).
+    stopped: Mutex<Option<mpsc::Receiver<()>>>,
     _thread: JoinHandle<()>,
 }
 
@@ -2275,9 +2278,13 @@ impl EngineController {
 
         let snap2 = snapshot.clone();
         let ev2 = events.clone();
+        let (stopped_tx, stopped_rx) = mpsc::channel::<()>();
         let thread = std::thread::Builder::new()
             .name("player-playback".into())
-            .spawn(move || playback_loop(rx, player, snap2, ev2))
+            .spawn(move || {
+                playback_loop(rx, player, snap2, ev2);
+                let _ = stopped_tx.send(());
+            })
             .expect("spawn playback thread");
 
         Self {
@@ -2292,6 +2299,7 @@ impl EngineController {
             bit_perfect: Arc::new(RwLock::new(BitPerfect::default())),
             global_format: Arc::new(RwLock::new(None)),
             settings_path,
+            stopped: Mutex::new(Some(stopped_rx)),
             _thread: thread,
         }
     }
@@ -2522,9 +2530,27 @@ impl EngineController {
     }
 }
 
+impl EngineController {
+    /// Stop the playback thread and wait (up to [`SHUTDOWN_WAIT`]) for it to
+    /// save the queue and live playhead. Call this when the app is quitting:
+    /// the periodic save only runs every 5 s, so without it a quit loses up
+    /// to that much position. Safe to call more than once.
+    pub fn shutdown(&self) {
+        let _ = self.tx.send(EngineCommand::Shutdown);
+        let rx = self.stopped.lock().expect("stopped lock").take();
+        if let Some(rx) = rx {
+            let _ = rx.recv_timeout(SHUTDOWN_WAIT);
+        }
+    }
+}
+
+/// How long [`EngineController::shutdown`] waits for the final save. The
+/// thread only has to write one small JSON file; this bounds a wedged sink.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
 impl Drop for EngineController {
     fn drop(&mut self) {
-        let _ = self.tx.send(EngineCommand::Shutdown);
+        self.shutdown();
     }
 }
 
@@ -2589,6 +2615,10 @@ fn playback_loop(
                 .push(PlayerEvent::State(snap));
         }
     }
+    // Shutting down (quit, or the controller was dropped): save the live
+    // playhead now rather than leaving up to 5 s of it to the periodic save.
+    // A stopped player has no position, so this is harmless when idle.
+    player.persist_position();
 }
 
 /// Would the playback thread publish `b` after `a`? (The UI-visible identity

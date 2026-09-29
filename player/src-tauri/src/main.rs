@@ -948,6 +948,16 @@ fn main() {
             set_quality_mode,
             output_live_state,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Quitting: let the engine save the live playhead now. The
+            // periodic save only runs every 5 s, and Tauri does not drop
+            // managed state on exit, so the engine's Drop never runs.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.engine.shutdown();
+                }
+            }
+        });
 }

@@ -1806,6 +1806,92 @@ fn pausing_saves_the_playhead_in_queue_json() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Playhead saved in `queue.json`, in ms.
+fn saved_position_ms(dir: &std::path::Path) -> u64 {
+    let raw = std::fs::read_to_string(dir.join("queue.json")).expect("queue.json readable");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+    v["position_ms"].as_u64().expect("position_ms")
+}
+
+/// A reader that hands out its bytes slowly, so a stub track keeps playing
+/// for a couple of seconds instead of decoding into the [`VecSink`] at once.
+struct Throttled(Box<dyn std::io::Read + Send>);
+
+impl std::io::Read for Throttled {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(Duration::from_millis(5));
+        let n = buf.len().min(4096);
+        self.0.read(&mut buf[..n])
+    }
+}
+
+/// [`StubTransport`] with paced streams.
+struct SlowTransport(StubTransport);
+
+impl Transport for SlowTransport {
+    fn open_stream(&self, track_id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+        let mut info = self.0.open_stream(track_id, opts)?;
+        info.reader = Box::new(Throttled(info.reader));
+        Ok(info)
+    }
+}
+
+/// A controller that is still playing track 1 well after it starts (about
+/// 30 s of audio, delivered at several times real time), with the queue file
+/// in the returned temp dir.
+fn playing_controller(dir_suffix: &str) -> (EngineController, std::path::PathBuf) {
+    let stub = StubTransport::new(None);
+    stub.add(1, &[(440.0, (RATE as usize) * 30)]);
+    let dir = std::env::temp_dir().join(format!("kahawai-player-core-{dir_suffix}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ctl = EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(SlowTransport(stub)),
+        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
+        dir.join("settings.json"),
+    );
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| {
+        ctl.snapshot().status == PlayerStatus::Playing && ctl.snapshot().position_ms >= 200
+    });
+    (ctl, dir)
+}
+
+#[test]
+fn shutting_down_while_playing_saves_the_playhead() {
+    // The periodic save runs every 5 s, so a quit in between used to lose up
+    // to that much position. `shutdown` must write the live playhead first.
+    let (ctl, dir) = playing_controller("shutdown-saves");
+    assert_eq!(
+        saved_position_ms(&dir),
+        0,
+        "no periodic save has happened yet"
+    );
+    ctl.shutdown();
+    let saved = saved_position_ms(&dir);
+    assert!(
+        saved >= 200,
+        "shutdown saved the live playhead, got {saved} ms"
+    );
+    ctl.shutdown(); // a second call is harmless
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dropping_the_controller_while_playing_saves_the_playhead() {
+    // Same guarantee when the controller is simply dropped (no explicit call).
+    let (ctl, dir) = playing_controller("drop-saves");
+    assert_eq!(
+        saved_position_ms(&dir),
+        0,
+        "no periodic save has happened yet"
+    );
+    drop(ctl);
+    let saved = saved_position_ms(&dir);
+    assert!(saved >= 200, "drop saved the live playhead, got {saved} ms");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn restored_queue_resumes_from_its_saved_position_once() {
     let mut h = Harness::new(None);
