@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EQ_LIMITS } from "../eqResponse";
-import { makeAlbum, makeState, mockFetch } from "../test/fixtures";
+import { makeAlbum, makeState, makeTrack, mockFetch } from "../test/fixtures";
 import { $$, mountApp, openSelect, options, pick, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
 import { useAnalogStore } from "../stores/analog";
@@ -324,6 +324,7 @@ describe("Settings: section order", () => {
       "Server",
       "Audio output",
       "Sound quality",
+      "Crossfeed",
       "Parametric EQ",
       "Loudness normalization",
       "Limiter",
@@ -410,11 +411,10 @@ describe("Settings: server URL", () => {
 });
 
 describe("Settings: EQ and loudness", () => {
-  const sw = (w: Awaited<ReturnType<typeof mountSettings>>) => w.findAll('[role="switch"]');
 
   it("toggles EQ through the core", async () => {
     const w = await mountSettings();
-    const eq = sw(w)[0];
+    const eq = w.findAll("label").find((l) => l.text() === "EQ enabled")!.get('[role="switch"]');
     expect(eq.attributes("aria-checked")).toBe("true");
     await eq.trigger("click");
     await settle();
@@ -489,6 +489,77 @@ describe("Settings: EQ and loudness", () => {
     target.dispatchEvent(new Event("change", { bubbles: true }));
     await settle();
     expect(w.text()).toContain("Target must be −40…−1 LUFS.");
+  });
+});
+
+describe("Settings: crossfeed", () => {
+  async function mountWithCrossfeed(crossfeed: Record<string, unknown>, over: Partial<ReturnType<typeof makeState>> = {}) {
+    tauri
+      .on("get_dsp_settings", { eq_bands: [], eq_enabled: true, loudness_enabled: false, loudness_target: -14, crossfeed })
+      .on("get_output_devices", devices)
+      .on("get_output_device", null)
+      .on("dop_status", DEFAULT_DOP);
+    const { wrapper } = mountApp(SettingsView, {}, {}, () => {
+      usePlayerStore().raw = makeState({ status: "playing", output_path: "pcm-shared", ...over });
+    });
+    await useDspStore().init();
+    await settle();
+    return wrapper;
+  }
+  const section = (w: Awaited<ReturnType<typeof mountSettings>>) =>
+    w.findAll("section").find((x) => x.find("h3").text() === "Crossfeed")!;
+  const lastSent = () => tauri.callsTo("set_crossfeed").at(-1) as { settings: Record<string, unknown> } | undefined;
+
+  it("is off by default, on Bauer, and turns on through the core", async () => {
+    const w = await mountSettings();
+    const sw = section(w).get('[role="switch"]');
+    expect(sw.attributes("aria-checked")).toBe("false");
+    expect(select(w, "Crossfeed preset").textContent).toContain("Bauer");
+    expect(section(w).get('[data-testid="crossfeed-cutoff"]').text()).toBe("700 Hz");
+    expect(section(w).get('[data-testid="crossfeed-feed"]').text()).toBe("4.5 dB");
+    await sw.trigger("click");
+    await settle();
+    expect(lastSent()).toEqual({ settings: { enabled: true, preset: "bauer", cutoff_hz: 700, feed_db: 4.5 } });
+  });
+
+  it("offers the three classic presets and Custom (no Linkwitz until its values are verified)", async () => {
+    const w = await mountSettings();
+    await openSelect(select(w, "Crossfeed preset"));
+    expect(optionLabels()).toEqual(["Bauer", "Chu Moy", "Jan Meier", "Custom"]);
+  });
+
+  it("choosing a preset fills the cutoff and feed with its values", async () => {
+    const w = await mountWithCrossfeed({ enabled: true, preset: "bauer", cutoff_hz: 700, feed_db: 4.5 });
+    await openSelect(select(w, "Crossfeed preset"));
+    pick(options().find((o) => o.textContent?.trim() === "Jan Meier")!);
+    await settle();
+    expect(lastSent()).toEqual({ settings: { enabled: true, preset: "meier", cutoff_hz: 650, feed_db: 9.5 } });
+    expect(section(w).get('[data-testid="crossfeed-cutoff"]').text()).toBe("650 Hz");
+    expect(section(w).get('[data-testid="crossfeed-blurb"]').text()).toContain("Corda");
+  });
+
+  it("moving a slider switches to Custom, starting from the preset's values", async () => {
+    const w = await mountWithCrossfeed({ enabled: true, preset: "chu_moy", cutoff_hz: 700, feed_db: 6 });
+    const feed = section(w).get('[role="slider"][aria-label="Crossfeed feed"]').element as HTMLElement;
+    feed.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+    await settle();
+    expect(lastSent()).toEqual({ settings: { enabled: true, preset: "custom", cutoff_hz: 700, feed_db: 6.5 } });
+    expect(select(w, "Crossfeed preset").textContent).toContain("Custom");
+  });
+
+  it("says it is bypassed on exclusive output", async () => {
+    const w = await mountWithCrossfeed({ enabled: true, preset: "bauer", cutoff_hz: 700, feed_db: 4.5 }, { output_path: "pcm-exclusive" });
+    expect(section(w).get('[data-testid="crossfeed-note"]').text()).toContain("Bypassed");
+  });
+
+  it("shows in the signal path before the EQ", async () => {
+    const { audioPathLabel } = await import("../signalPath");
+    const label = audioPathLabel(
+      makeTrack(),
+      { activeFormat: "flac", isDopExclusive: false, isBitPerfect: false, isExclusive: false },
+      { crossfeed: { enabled: true, preset: "meier" }, eqEnabled: true, activeBands: [{}], loudnessEnabled: false, loudnessTarget: -14 },
+    );
+    expect(label).toContain("PCM shared · Crossfeed Jan Meier · EQ 1 bands");
   });
 });
 

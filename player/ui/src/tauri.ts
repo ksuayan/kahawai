@@ -7,6 +7,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AnalogSettings,
+  CrossfeedSettings,
   BitPerfectMode,
   DsdStory,
   DopStatus,
@@ -253,6 +254,11 @@ export async function setLoudnessEnabled(enabled: boolean): Promise<void> {
 
 export async function setLimiterEnabled(enabled: boolean): Promise<void> {
   await cmd("set_limiter_enabled", { enabled });
+}
+
+/** Headphone crossfeed; the engine clamps, saves and applies it live. */
+export async function setCrossfeed(settings: CrossfeedSettings): Promise<void> {
+  await cmd("set_crossfeed", { settings });
 }
 
 export async function getDspSettings(): Promise<DspSettings | undefined> {

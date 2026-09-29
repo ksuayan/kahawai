@@ -56,6 +56,7 @@ New here? Read top to bottom. Already know the codebase? Jump to whichever group
 
 - `docs/v1/Audiophile-Mode.md` — what the Settings screen's "Best quality" means: bit-perfect playback, native DSD, and the fallback decision tree.
 - `docs/v1/EQ.md` — how the player's EQ works today, what it doesn't do, and how Audio Units could extend it later.
+- `docs/v1/kahawai-crossfeed-dsp-spec.md` — headphone crossfeed: the bs2b algorithm, the presets, and where it sits in the chain.
 - `docs/v1/Analog-Emulation.md` — research and design for adding tube/transistor analog character to the playback chain (branch: `analog-poc`). Built and tested; see `docs/Backlog.md` for the listening-review follow-up.
 - `docs/users/Euphonics-Vacuum-Tube-Primer.md` — background primer on why tube gear sounds the way it does; companion reading for Analog Emulation, written for a general audience.
 - `docs/v1/SACD-Extraction.md` — a scope decision, not a roadmap item: why SACD ISO decoding is permanently out of scope.

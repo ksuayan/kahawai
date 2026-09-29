@@ -9,6 +9,7 @@
 pub mod analog;
 pub mod artwork;
 pub mod bitperfect;
+pub mod crossfeed;
 pub mod decode;
 pub mod dop;
 pub mod dsd_devices;
@@ -26,6 +27,7 @@ pub use analog::{
 };
 pub use artwork::{fetch_from_server as fetch_artwork, ArtworkCache, CachedArt};
 pub use bitperfect::{f32_to_i24_le, BitPerfect};
+pub use crossfeed::{CrossfeedPreset, CrossfeedSettings, CrossfeedStage};
 pub use decode::{DecodedSpec, StreamDecoder};
 pub use dop::{dop_pcm_rate, parse_wav_header, DopSpec, DopStream, DOP_BITS_PER_SAMPLE};
 pub use dsd_devices::is_known_dsd_device;

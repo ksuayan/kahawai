@@ -8,13 +8,17 @@ import {
   setOutputDevice,
   setEqBands,
   setEqEnabled,
+  setCrossfeed,
   setLimiterEnabled,
   setLoudnessEnabled,
   setLoudnessTarget,
 } from "../tauri";
 import { BUILTIN_PRESETS, sameBands, type EqPreset } from "../eqPresets";
 import {
+  clampCrossfeed,
+  DEFAULT_CROSSFEED_SETTINGS,
   DEFAULT_DSP_SETTINGS,
+  type CrossfeedSettings,
   MAX_EQ_BANDS,
   type DopStatus,
   type EqBand,
@@ -58,6 +62,8 @@ export const useDspStore = defineStore("dsp", () => {
   const loudnessEnabled = ref(false);
   /** Clip protection on the shared path; off by default, like loudness. */
   const limiterEnabled = ref(false);
+  /** Headphone crossfeed; off by default, like the other stages. */
+  const crossfeed = ref<CrossfeedSettings>({ ...DEFAULT_CROSSFEED_SETTINGS });
   const loudnessTarget = ref(-14);
   const devices = ref<OutputDevice[]>([]);
   /** Chosen output device (exact name); null = follow the system default. */
@@ -102,6 +108,7 @@ export const useDspStore = defineStore("dsp", () => {
     eqEnabled.value = dsp.eq_enabled;
     loudnessEnabled.value = dsp.loudness_enabled;
     limiterEnabled.value = dsp.limiter_enabled ?? false;
+    crossfeed.value = clampCrossfeed(dsp.crossfeed ?? DEFAULT_CROSSFEED_SETTINGS);
     loudnessTarget.value = dsp.loudness_target;
     devices.value = devs ?? [];
     dop.value = d ?? null;
@@ -250,6 +257,11 @@ export const useDspStore = defineStore("dsp", () => {
     await setLimiterEnabled(v);
   }
 
+  async function saveCrossfeed(next: CrossfeedSettings): Promise<void> {
+    crossfeed.value = clampCrossfeed(next);
+    await setCrossfeed(crossfeed.value);
+  }
+
   /** Returns false when the target is out of the −40…−1 LUFS range. */
   async function saveLoudnessTarget(v: number): Promise<boolean> {
     if (!isFinite(v) || v < -40 || v > -1) return false;
@@ -263,6 +275,7 @@ export const useDspStore = defineStore("dsp", () => {
     eqEnabled,
     loudnessEnabled,
     limiterEnabled,
+    crossfeed,
     loudnessTarget,
     devices,
     outputDevice,
@@ -290,6 +303,7 @@ export const useDspStore = defineStore("dsp", () => {
     saveEqEnabled,
     saveLoudnessEnabled,
     saveLimiterEnabled,
+    saveCrossfeed,
     saveLoudnessTarget,
   };
 });

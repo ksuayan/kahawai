@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use kahawai_core::{api::StreamFormat, format::AudioFormat, MusicError, Track};
 use kahawai_player_core::{
-    AnalogFlavour, AnalogSettings, AntiAliasChoice, resolve_format, valid_formats, AudioSink, BitPerfect, EngineController, EqBand, EqBandType,
+    AnalogFlavour, AnalogSettings, AntiAliasChoice, CrossfeedPreset, CrossfeedSettings, resolve_format, valid_formats, AudioSink, BitPerfect, EngineController, EqBand, EqBandType,
     OutputPath, PcmChunk, Player, PlayerStatus, StreamInfo, StreamOptions, Transport, VecSink, LIMITER_CEILING,
 };
 
@@ -1344,6 +1344,51 @@ fn the_level_meter_reports_what_the_analog_stage_does_to_the_loudness() {
 }
 
 #[test]
+fn crossfeed_is_off_by_default_and_changes_the_pcm_path_when_on() {
+    let run = |crossfeed: Option<CrossfeedSettings>| {
+        let mut h = Harness::new(None);
+        h.stub.add(1, &[(440.0, 44100)]);
+        if let Some(c) = crossfeed {
+            h.player.set_crossfeed(c);
+        }
+        h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+        h.pump_until_done(100);
+        h.samples()
+    };
+    let dry = run(None);
+    assert_eq!(run(Some(CrossfeedSettings::default())), dry, "off: the audio is untouched");
+    let wet = run(Some(CrossfeedSettings { enabled: true, preset: CrossfeedPreset::Meier, ..Default::default() }));
+    assert_eq!(wet.len(), dry.len(), "the stage adds no samples");
+    let diff = wet.iter().zip(&dry).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+    assert!(diff > 1e-3, "on: the audio changes (max difference {diff})");
+}
+
+#[test]
+fn crossfeed_settings_are_saved_clamped_and_old_files_default_to_off() {
+    let dir = std::env::temp_dir().join("kahawai-player-core-test-crossfeed-settings");
+    let _ = std::fs::remove_dir_all(&dir);
+    let settings_path = dir.join("settings.json");
+    let url_lock = Arc::new(std::sync::RwLock::new("http://stub".to_string()));
+    let ctl = EngineController::with_transport(Box::new(VecSink::new()), Box::new(StubTransport::new(None)), url_lock, settings_path.clone());
+    ctl.set_crossfeed(CrossfeedSettings { enabled: true, preset: CrossfeedPreset::Custom, cutoff_hz: 900.0, feed_db: 99.0 });
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("saved")).expect("json");
+    assert_eq!(v["dsp"]["crossfeed"]["enabled"], true);
+    assert_eq!(v["dsp"]["crossfeed"]["preset"], "custom");
+    assert_eq!(v["dsp"]["crossfeed"]["cutoff_hz"], 900.0);
+    assert_eq!(v["dsp"]["crossfeed"]["feed_db"], 15.0, "clamped before saving");
+    // Not finite: ignored, the saved value stays.
+    ctl.set_crossfeed(CrossfeedSettings { feed_db: f32::NAN, ..Default::default() });
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert_eq!(v["dsp"]["crossfeed"]["enabled"], true);
+
+    let old = r#"{"eq_bands":[],"eq_enabled":true,"loudness_enabled":false,"loudness_target":-14.0}"#;
+    let dsp: kahawai_player_core::DspSettings = serde_json::from_str(old).expect("old dsp block parses");
+    assert_eq!(dsp.crossfeed, CrossfeedSettings::default());
+    assert!(!dsp.crossfeed.enabled);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn analog_settings_persist_and_old_files_default_to_off() {
     let dir = std::env::temp_dir().join("kahawai-player-core-test-analog-settings");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2638,6 +2683,26 @@ fn tweaking_a_slider_that_does_not_flip_the_answer_leaves_playback_alone() {
     h.player.set_analog(AnalogSettings { drive: 0.9, ..analog_on() });
     h.player.set_analog(AnalogSettings { drive: 0.3, mix: 0.5, ..analog_on() });
     assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "still on: nothing re-opens");
+}
+
+/// Crossfeed is DSP like the others: while it is on, Auto stays on the
+/// shared path and says why; off again, bit-perfect comes back.
+#[test]
+fn crossfeed_holds_bit_perfect_back_like_the_other_stages() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.stub.add(1, &[(440.0, 44100 * 4)]);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    for _ in 0..10 {
+        h.player.pump();
+    }
+    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
+    let on = CrossfeedSettings { enabled: true, ..Default::default() };
+    h.player.set_crossfeed(on);
+    let s = h.player.snapshot();
+    assert_eq!(s.output_path, OutputPath::Pcm);
+    assert_eq!(s.exclusive_blockers, vec!["Crossfeed".to_string()]);
+    h.player.set_crossfeed(CrossfeedSettings { enabled: false, ..on });
+    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
 }
 
 #[test]

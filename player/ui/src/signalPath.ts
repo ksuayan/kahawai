@@ -1,4 +1,4 @@
-import { formatBadge, type Track } from "./types";
+import { CROSSFEED_PRESET_INFO, formatBadge, type CrossfeedPreset, type Track } from "./types";
 
 /** What the tag needs to know about playback (the player store satisfies this). */
 export interface PathPlayer {
@@ -10,6 +10,7 @@ export interface PathPlayer {
 
 /** What the tag needs to know about the user's processing (the dsp store satisfies this). */
 export interface PathDsp {
+  crossfeed?: { enabled: boolean; preset: CrossfeedPreset };
   eqEnabled: boolean;
   activeBands: unknown[];
   loudnessEnabled: boolean;
@@ -33,6 +34,8 @@ export function audioPathLabel(t: Track | null, player: PathPlayer, dsp: PathDsp
       : "PCM shared";
   const dspBits: string[] = [];
   if (!player.isExclusive) {
+    // Chain order: crossfeed runs before the EQ.
+    if (dsp.crossfeed?.enabled) dspBits.push(`Crossfeed ${CROSSFEED_PRESET_INFO[dsp.crossfeed.preset].label}`);
     if (dsp.eqEnabled && dsp.activeBands.length > 0) dspBits.push(`EQ ${dsp.activeBands.length} bands`);
     if (dsp.loudnessEnabled) dspBits.push(`Loudness ${dsp.loudnessTarget} LUFS`);
   }

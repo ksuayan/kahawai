@@ -29,9 +29,13 @@ use kahawai_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::bitperfect::{f32_to_i24_le, BitPerfect};
+use crate::crossfeed::{CrossfeedSettings, CrossfeedStage};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
-use crate::quality::{QualityMode, BLOCKER_ANALOG, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS, BLOCKER_VOLUME};
+use crate::quality::{
+    QualityMode, BLOCKER_ANALOG, BLOCKER_CROSSFEED, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS,
+    BLOCKER_VOLUME,
+};
 use crate::analog::{AnalogSettings, AnalogStage};
 use crate::dsp::{headroom_guard, DspStage, LoudnessMeter, LookaheadLimiter,
     scan_track_levels, EqBand, GainRamp, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
@@ -254,6 +258,10 @@ pub struct DspSettings {
     /// box on a fresh install.
     #[serde(default)]
     pub limiter_enabled: bool,
+    /// Headphone crossfeed. Older settings files have none: it defaults to
+    /// off, like the other stages.
+    #[serde(default)]
+    pub crossfeed: CrossfeedSettings,
 }
 
 impl Default for DspSettings {
@@ -265,6 +273,7 @@ impl Default for DspSettings {
             loudness_target: DEFAULT_LOUDNESS_TARGET,
             analog: AnalogSettings::default(),
             limiter_enabled: false,
+            crossfeed: CrossfeedSettings::default(),
         }
     }
 }
@@ -525,6 +534,7 @@ pub struct Player {
     /// against an infinite skip loop on a poison track with repeat-all.
     empty_streak: u32,
     // -- v1 DSP (PCM only; the DoP path never touches these) --
+    crossfeed: CrossfeedStage,
     eq: ParametricEq,
     analog: AnalogStage,
     /// Level before and after the analog stage, to compare them.
@@ -581,6 +591,7 @@ impl Player {
             queue_path: None,
             resume_at_ms: None,
             empty_streak: 0,
+            crossfeed: CrossfeedStage::new(44100),
             eq: ParametricEq::new(44100),
             analog: AnalogStage::new(44100),
             meter_in: LoudnessMeter::new(44100),
@@ -736,6 +747,9 @@ impl Player {
     /// now (names for the UI). Empty means exclusive output costs nothing.
     pub fn exclusive_blockers(&self) -> Vec<&'static str> {
         let mut b = Vec::new();
+        if self.crossfeed.settings().enabled {
+            b.push(BLOCKER_CROSSFEED);
+        }
         // An enabled EQ with only flat bands changes nothing, so it does not
         // count.
         if self.eq.enabled() && self.eq.bands().iter().any(|band| band.gain_db.abs() > 0.05) {
@@ -1138,6 +1152,13 @@ impl Player {
         self.reconsider_exclusive();
     }
 
+    /// Headphone crossfeed (PCM shared path only). DSP like the others, so
+    /// while it is on, Auto does not choose exclusive output.
+    pub fn set_crossfeed(&mut self, settings: CrossfeedSettings) {
+        self.crossfeed.set_settings(settings);
+        self.reconsider_exclusive();
+    }
+
     pub fn set_loudness_enabled(&mut self, enabled: bool) {
         self.loudness.set_enabled(enabled);
         self.reconsider_exclusive();
@@ -1193,6 +1214,7 @@ impl Player {
             loudness_target: self.loudness.target(),
             analog: self.analog.settings(),
             limiter_enabled: self.limiter_enabled,
+            crossfeed: self.crossfeed.settings(),
         }
     }
 
@@ -1527,6 +1549,8 @@ impl Player {
         // The EQ runs on what the sink receives (after any resampling), so
         // it is designed at the sink rate, not the file's.
         self.eq.set_sample_rate(sink_rate);
+        self.crossfeed.prepare(sink_rate);
+        self.crossfeed.reset();
         self.analog.prepare(sink_rate);
         self.meter_in.set_sample_rate(sink_rate);
         self.meter_out.set_sample_rate(sink_rate);
@@ -1667,10 +1691,13 @@ impl Player {
             }
             None => frames,
         };
-        // v1 DSP chain, fixed order: EQ -> analog -> loudness gain (ramped)
-        // -> volume -> look-ahead limiter -> headroom guard (belt and
-        // suspenders; a no-op once the limiter holds the ceiling).
+        // v1 DSP chain, fixed order: crossfeed -> EQ -> analog -> loudness
+        // gain (ramped) -> volume -> look-ahead limiter -> headroom guard
+        // (belt and suspenders; a no-op once the limiter holds the ceiling).
+        // Crossfeed first: it models speakers, and the EQ corrects the
+        // headphones, so the EQ shapes what the ear will actually receive.
         let mut chunk: Vec<f32> = out.to_vec();
+        self.crossfeed.process(&mut chunk, channels);
         self.eq.process(&mut chunk, channels);
         // Meter continuously, dry or wet: A/B level-matching needs a reading
         // on the dry slot too, not just while the stage is processing.
@@ -2015,6 +2042,7 @@ pub enum EngineCommand {
     /// PCM only; enables the pre-scan (one extra stream per first-play).
     SetLoudnessEnabled(bool),
     SetLimiterEnabled(bool),
+    SetCrossfeed(CrossfeedSettings),
     SetServerUrl(String),
     Shutdown,
 }
@@ -2166,6 +2194,7 @@ impl EngineController {
         ctrl.send(EngineCommand::SetLoudnessTarget(dsp.loudness_target));
         ctrl.send(EngineCommand::SetLoudnessEnabled(dsp.loudness_enabled));
         ctrl.send(EngineCommand::SetLimiterEnabled(dsp.limiter_enabled));
+        ctrl.send(EngineCommand::SetCrossfeed(dsp.crossfeed));
         // Playback preferences (persisted; default preserves pre-C3 behavior).
         ctrl.send(EngineCommand::SetDsdStory(settings.dsd_story));
         ctrl.send(EngineCommand::SetGlobalFormat(settings.global_format));
@@ -2441,6 +2470,16 @@ impl EngineController {
         self.send(EngineCommand::SetLimiterEnabled(enabled));
     }
 
+    /// Headphone crossfeed, clamped before it is saved or applied. Values
+    /// that aren't finite are ignored.
+    pub fn set_crossfeed(&self, settings: CrossfeedSettings) {
+        let Some(settings) = settings.clamped() else {
+            return;
+        };
+        self.update_dsp_settings(|dsp| dsp.crossfeed = settings);
+        self.send(EngineCommand::SetCrossfeed(settings));
+    }
+
     /// Read-modify-write the DSP section of the settings file. Each setter
     /// passes the complete new value, so this never needs the engine's
     /// current state.
@@ -2628,6 +2667,7 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
         EngineCommand::SetLoudnessTarget(t) => player.set_loudness_target(t),
         EngineCommand::SetLoudnessEnabled(b) => player.set_loudness_enabled(b),
         EngineCommand::SetLimiterEnabled(b) => player.set_limiter_enabled(b),
+        EngineCommand::SetCrossfeed(c) => player.set_crossfeed(c),
         EngineCommand::SetServerUrl(_) => {
             // The transport reads the shared URL lock directly; nothing to do.
         }

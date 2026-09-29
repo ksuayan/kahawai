@@ -553,6 +553,57 @@ export interface DspSettings {
   analog?: AnalogSettings;
   /** Absent in settings files from before the limiter; it defaults to off. */
   limiter_enabled?: boolean;
+  /** Absent in settings files from before crossfeed; it defaults to off. */
+  crossfeed?: CrossfeedSettings;
+}
+
+// --- Headphone crossfeed (mirrors kahawai-player-core/src/crossfeed.rs) ------
+
+export type CrossfeedPreset = "bauer" | "chu_moy" | "meier" | "custom";
+
+export interface CrossfeedSettings {
+  enabled: boolean;
+  preset: CrossfeedPreset;
+  /** Low-pass cutoff of the crossfed path, Hz (used by Custom). */
+  cutoff_hz: number;
+  /** Level of the crossfed path, dB (used by Custom). */
+  feed_db: number;
+}
+
+export const DEFAULT_CROSSFEED_SETTINGS: CrossfeedSettings = {
+  enabled: false,
+  preset: "bauer",
+  cutoff_hz: 700,
+  feed_db: 4.5,
+};
+
+/** Custom-mode ranges, as the engine clamps them. */
+export const CROSSFEED_CUTOFF_RANGE = [200, 2000] as const;
+export const CROSSFEED_FEED_RANGE = [0.5, 15] as const;
+
+export const CROSSFEED_PRESETS: CrossfeedPreset[] = ["bauer", "chu_moy", "meier", "custom"];
+
+export const CROSSFEED_PRESET_INFO: Record<
+  CrossfeedPreset,
+  { label: string; params: [cutoffHz: number, feedDb: number] | null; blurb: string }
+> = {
+  bauer: { label: "Bauer", params: [700, 4.5], blurb: "The default, via bs2b. Mild: close to listening to a pair of speakers." },
+  chu_moy: { label: "Chu Moy", params: [700, 6.0], blurb: "A DIY-era favourite. A touch more crossfeed than Bauer." },
+  meier: { label: "Jan Meier", params: [650, 9.5], blurb: "From Jan Meier's Corda headphone amps. The strongest of the three." },
+  custom: { label: "Custom", params: null, blurb: "Set the cutoff and feed yourself." },
+};
+
+/** The engine's clamp, so the UI shows what will actually be applied. */
+export function clampCrossfeed(s: CrossfeedSettings): CrossfeedSettings {
+  const num = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+  const [cutLo, cutHi] = CROSSFEED_CUTOFF_RANGE;
+  const [feedLo, feedHi] = CROSSFEED_FEED_RANGE;
+  return {
+    enabled: !!s.enabled,
+    preset: CROSSFEED_PRESETS.includes(s.preset) ? s.preset : "bauer",
+    cutoff_hz: Math.min(cutHi, Math.max(cutLo, num(s.cutoff_hz, 700))),
+    feed_db: Math.min(feedHi, Math.max(feedLo, num(s.feed_db, 4.5))),
+  };
 }
 
 export const DEFAULT_DSP_SETTINGS: DspSettings = {
@@ -562,6 +613,7 @@ export const DEFAULT_DSP_SETTINGS: DspSettings = {
   loudness_target: -14,
   analog: DEFAULT_ANALOG_SETTINGS,
   limiter_enabled: false,
+  crossfeed: DEFAULT_CROSSFEED_SETTINGS,
 };
 
 export const MAX_EQ_BANDS = 8;

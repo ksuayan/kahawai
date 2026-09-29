@@ -37,6 +37,7 @@ import UiSwitch from "../ui/UiSwitch.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import AnalogSection from "./AnalogSection.vue";
 import EqEditor from "./EqEditor.vue";
+import CrossfeedSection from "./CrossfeedSection.vue";
 import LimiterSection from "./LimiterSection.vue";
 import SettingsSection from "./SettingsSection.vue";
 
@@ -340,6 +341,10 @@ const dopRates = computed(() =>
     </SettingsSection>
 
     <SoundQualitySection />
+
+    <SettingsSection title="Crossfeed">
+      <CrossfeedSection />
+    </SettingsSection>
 
     <SettingsSection title="Parametric EQ">
       <EqEditor

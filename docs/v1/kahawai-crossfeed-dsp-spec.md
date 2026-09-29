@@ -1,6 +1,14 @@
 # Kahawai Crossfeed DSP — Design Specification
 
-**Status:** spec only — not implemented. Written against `main` at `2a6997c` (2026-09-29). **Scope:** a new `DspStage` for headphone crossfeed with a 4-option preset pulldown plus custom mode. No implementation authorized.
+**Status:** implemented on the `dsp-crossfeed` branch (`crates/kahawai-player-core/src/crossfeed.rs`, `player/ui/src/components/CrossfeedSection.vue`), with these deviations from the text below:
+
+- **No delay line; `latency_frames()` is 0.** The bs2b reference (libbs2b 3.1.0 `init()` / `cross_feed_d()`) has no delay: the timing cue comes from the filters' phase. §2.1's `LP_tau` and §4's delay-line latency describe a different topology; the code follows the reference.
+- **No Linkwitz preset yet.** Its 1971 circuit values could not be verified, and §2.2 forbids a preset under that name that isn't digitized from the real circuit. Tracked in `docs/Backlog.md`.
+- **Custom feed range is 0.5–15 dB** (not 0–12), close to bs2b's own limits and with headroom above Jan Meier's 9.5 dB.
+- **Bit-perfect blocker.** Like EQ, loudness, analog warmth and the limiter, an enabled crossfeed keeps Auto off exclusive output (`BLOCKER_CROSSFEED`).
+- **Sliders always visible,** showing the preset's values; moving one switches the menu to Custom (§2.3's convention).
+
+Originally written against `main` at `2a6997c` (2026-09-29) as a spec only.
 
 ## 1. Goal
 
