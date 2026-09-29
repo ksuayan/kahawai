@@ -335,7 +335,7 @@ mod tests {
         Track {
             id,
             path: format!("/m/{id}.mp3"),
-            hash: String::new(),
+            hash: None,
             format: AudioFormat::Mp3,
             sample_rate: None,
             bit_depth: None,

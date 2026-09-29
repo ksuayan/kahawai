@@ -18,7 +18,8 @@ export type TrackFormat =
 export interface Track {
   id: number;
   path: string;
-  hash: string;
+  /** Content hash; null until the server has hashed the file. */
+  hash?: string | null;
   format: TrackFormat;
   sample_rate?: number | null;
   bit_depth?: number | null;
@@ -745,7 +746,7 @@ export function formatDuration(ms?: number | null): string {
 // --- C3: jobs, DSD preference, playlist import -------------------------------
 
 /** Server job (`GET /api/jobs`). Shapes mirror kahawai-core (snake_case). */
-export type JobKind = "extract_iso" | "transcode" | "scan";
+export type JobKind = "extract_iso" | "transcode" | "scan" | "hash_files";
 export type JobStatus = "queued" | "running" | "done" | "failed";
 
 export interface JobInfo {

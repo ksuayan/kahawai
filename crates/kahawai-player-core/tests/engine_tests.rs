@@ -72,7 +72,7 @@ fn track(id: i64, format: AudioFormat, duration_ms: u64) -> Track {
     Track {
         id,
         path: format!("/m/{id}.wav"),
-        hash: "h".into(),
+        hash: Some("h".into()),
         format,
         sample_rate: Some(RATE),
         bit_depth: Some(16),
@@ -1000,7 +1000,7 @@ fn dsd_track(id: i64, dsd_rate: u32, duration_ms: u64) -> Track {
     Track {
         id,
         path: format!("/m/{id}.dsf"),
-        hash: "h".into(),
+        hash: Some("h".into()),
         format: AudioFormat::Dsf,
         sample_rate: Some(dsd_rate),
         bit_depth: Some(1),

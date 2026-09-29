@@ -56,6 +56,7 @@ New here? Read top to bottom. Already know the codebase? Jump to whichever group
 
 - `docs/v1/Audiophile-Mode.md` — what the Settings screen's "Best quality" means: bit-perfect playback, native DSD, and the fallback decision tree.
 - `docs/v1/EQ.md` — how the player's EQ works today, what it doesn't do, and how Audio Units could extend it later.
+- `docs/v1/kahawai-fast-first-scan-spec.md` — how the server catalogs a large network share quickly: a metadata-only scan first, content hashing afterwards as a resumable background job. Includes the benchmark measurements.
 - `docs/v1/kahawai-crossfeed-dsp-spec.md` — headphone crossfeed: the bs2b algorithm, the presets, and where it sits in the chain.
 - `docs/v1/Analog-Emulation.md` — research and design for adding tube/transistor analog character to the playback chain (branch: `analog-poc`). Built and tested; see `docs/Backlog.md` for the listening-review follow-up.
 - `docs/users/Euphonics-Vacuum-Tube-Primer.md` — background primer on why tube gear sounds the way it does; companion reading for Analog Emulation, written for a general audience.
@@ -63,7 +64,6 @@ New here? Read top to bottom. Already know the codebase? Jump to whichever group
 
 **Upcoming work** (`docs/v2/`) — specs for features not yet started; also tracked in `docs/Backlog.md`
 
-- `docs/v2/kahawai-fast-first-scan-spec.md` — faster first-time SMB ingestion.
 - `docs/v2/kahawai-genre-normalization-spec.md` — genre normalization + browse/search.
 - `docs/v2/kahawai-metadata-enrichment-spec.md` — metadata remapping & external enrichment (Phase C).
 - `docs/v2/kahawai-player-catalog-cache-spec.md` — local catalog cache so the player doesn't re-pull everything on restart.

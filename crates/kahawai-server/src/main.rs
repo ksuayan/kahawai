@@ -8,6 +8,7 @@ mod desktop;
 mod dop;
 mod dsd;
 mod dsd_meta;
+mod hashing;
 mod jobs;
 mod resample;
 mod scanner;
@@ -50,6 +51,9 @@ pub struct AppState {
     pub config: Arc<std::sync::RwLock<ServerConfig>>,
     /// Ensures only one library scan runs at a time (S1).
     pub scan_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Ensures only one content-hashing job runs at a time. Separate from
+    /// `scan_lock`: hashing can take hours and must not block a rescan.
+    pub hash_lock: Arc<tokio::sync::Mutex<()>>,
     /// `GET /api/events` (SSE): lets already-connected clients learn the
     /// catalog changed, or that the server is about to exit, without
     /// polling for either. No receivers is not an error — `send` on an
@@ -94,7 +98,9 @@ pub fn app(state: AppState) -> Router {
         .route("/api/playlists/import", post(api::import_playlist))
         .route(
             "/api/playlists/{id}",
-            get(api::get_playlist).delete(api::delete_playlist).patch(api::rename_playlist),
+            get(api::get_playlist)
+                .delete(api::delete_playlist)
+                .patch(api::rename_playlist),
         )
         .route("/api/playlists/{id}/tracks", put(api::set_playlist_tracks))
         .route("/api/artwork/{hash}", get(api::artwork))
@@ -220,6 +226,7 @@ pub async fn run_server_with_ready(
         jobs,
         config: Arc::new(std::sync::RwLock::new(config.clone())),
         scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+        hash_lock: Arc::new(tokio::sync::Mutex::new(())),
         catalog_events,
     };
     if let Some(tx) = ready {
@@ -247,6 +254,13 @@ pub async fn run_server_with_ready(
         }
     } else {
         info!("startup scan disabled (set scan_on_startup = true in config to enable)");
+        // Resume content hashing left unfinished by the last run. With a
+        // startup scan, the scan queues it when it completes.
+        match api::queue_hash_job(&state, "Content hashing").await {
+            Ok(Some(job)) => info!(job_id = %job.id, "content hashing resumed"),
+            Ok(None) => {}
+            Err(e) => warn!(error = %e, "could not queue content hashing"),
+        }
     }
 
     let addr: std::net::SocketAddr = config.bind.parse()?;
@@ -332,6 +346,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir, fixture)
@@ -355,6 +370,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir)
@@ -1051,6 +1067,69 @@ mod integration_tests {
         assert_eq!(n, 2, "background scan did not finish");
     }
 
+    /// Phase B: a scan leaves hashes pending and queues the `hash_files` job
+    /// itself, which fills them in. It can also be started through
+    /// `POST /api/jobs`, one at a time.
+    #[tokio::test]
+    async fn a_scan_queues_content_hashing_which_fills_every_hash() {
+        let (app, state, _dir) = scanned_app().await;
+        let pending = || async {
+            let n: i64 = sqlx::query("SELECT COUNT(*) FROM tracks WHERE hash IS NULL")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap()
+                .get(0);
+            n
+        };
+        assert_eq!(pending().await, 8, "the scan hashes nothing itself");
+
+        let post = |uri: &str, body: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let res = app.clone().oneshot(post("/api/scan", "")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+        let mut hash_job: Option<serde_json::Value> = None;
+        for _ in 0..100 {
+            let (_, jobs) = get_json(&app, "/api/jobs").await;
+            hash_job = jobs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["kind"] == "hash_files" && j["status"] == "done")
+                .cloned();
+            if hash_job.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let hash_job = hash_job.expect("the scan queued a hash_files job that finished");
+        assert_eq!(hash_job["message"], "hashed 8 files");
+        assert_eq!(pending().await, 0);
+        let algos: Vec<String> = sqlx::query("SELECT DISTINCT hash_algo FROM tracks")
+            .fetch_all(&state.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(algos, vec!["blake3-v1".to_string()]);
+
+        // Manual trigger: one at a time.
+        let body = r#"{"kind":"hash_files","label":"Content hashing"}"#;
+        let guard = state.hash_lock.lock().await;
+        let res = app.clone().oneshot(post("/api/jobs", body)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        drop(guard);
+        let res = app.clone().oneshot(post("/api/jobs", body)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+    }
+
     /// The desktop shell edits `AppState.config` in place (add a music
     /// folder, Apply) rather than restarting the process; this is the
     /// plumbing that makes that possible.
@@ -1253,6 +1332,7 @@ mod integration_tests {
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(config)),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state), dir)
@@ -1503,6 +1583,7 @@ mod integration_tests {
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(config)),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir, bits)
@@ -1778,6 +1859,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -1816,6 +1898,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -1865,6 +1948,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -1923,6 +2007,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -1980,6 +2065,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -2033,6 +2119,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -2129,6 +2216,7 @@ mod integration_tests {
                 ..Default::default()
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state), dir)

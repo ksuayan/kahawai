@@ -553,7 +553,7 @@ mod tests {
         Track {
             id,
             path: format!("/m/{id}.flac"),
-            hash: String::new(),
+            hash: None,
             format: AudioFormat::Flac,
             sample_rate: Some(44100),
             bit_depth: Some(16),

@@ -51,6 +51,7 @@ fn kind_to_str(kind: JobKind) -> &'static str {
         JobKind::ExtractIso => "extract_iso",
         JobKind::Transcode => "transcode",
         JobKind::Scan => "scan",
+        JobKind::HashFiles => "hash_files",
     }
 }
 
@@ -59,6 +60,7 @@ fn kind_from_str(s: &str) -> Option<JobKind> {
         "extract_iso" => Some(JobKind::ExtractIso),
         "transcode" => Some(JobKind::Transcode),
         "scan" => Some(JobKind::Scan),
+        "hash_files" => Some(JobKind::HashFiles),
         _ => None,
     }
 }
