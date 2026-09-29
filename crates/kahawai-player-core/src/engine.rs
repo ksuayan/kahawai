@@ -1369,10 +1369,15 @@ impl Player {
         // Bit-perfect plays one track per stream: the exclusive device is
         // opened at each file's own rate, so the server must not chain the
         // next track (whose rate may differ) into this response.
+        // The same goes for any next track whose output rate or channel count
+        // differs: the sink, resampler, EQ and meters are set up once per stream.
         let next_id = if want_bp {
             None
         } else {
-            self.queue.peek_next().map(|t| t.id)
+            self.queue
+                .peek_next()
+                .filter(|next| can_chain(track, next, fmt))
+                .map(|t| t.id)
         };
 
         // Loudness pre-scan (v1): one extra deterministic stream per
@@ -1945,6 +1950,34 @@ fn chain_segment(chain: &str, idx: usize) -> &str {
         return chain;
     }
     chain.split(" + ").nth(idx).map(str::trim).unwrap_or(chain)
+}
+
+/// The rate a track comes out at once the server has shaped it for `fmt`
+/// (mirrors the server's `describe_target`): Opus is always 48 kHz, MP3 tops
+/// out at 48 kHz, everything else keeps the file's rate. `None` = unknown.
+fn output_rate(track: &Track, fmt: StreamFormat) -> Option<u32> {
+    match fmt {
+        StreamFormat::Opus => Some(48_000),
+        StreamFormat::Mp3 => track.sample_rate.map(|r| r.min(48_000)),
+        _ => track.sample_rate,
+    }
+}
+
+/// Whether `next` may be chained into the response for `current`. A chained
+/// response is decoded, resampled and metered against the *first* track's
+/// spec, so a rate or channel change mid-response would play the second track
+/// at the wrong speed or with scrambled channels. Unknown metadata is given
+/// the benefit of the doubt (the previous behaviour).
+fn can_chain(current: &Track, next: &Track, fmt: StreamFormat) -> bool {
+    let same_rate = match (output_rate(current, fmt), output_rate(next, fmt)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    let same_channels = match (current.channels, next.channels) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    same_rate && same_channels
 }
 
 /// Expected frames of a track at `rate`, from catalog metadata. Only used
@@ -2734,5 +2767,82 @@ mod chain_tests {
         let both = "dsf64->flac 24/88.2 + dsf64->flac 24/88.2";
         assert_eq!(chain_segment(both, 0), "dsf64->flac 24/88.2");
         assert!(!chain_segment(both, 0).contains('+'));
+    }
+}
+
+#[cfg(test)]
+mod can_chain_tests {
+    use super::*;
+    use kahawai_core::format::AudioFormat;
+
+    fn t(rate: Option<u32>, channels: Option<u8>) -> Track {
+        Track {
+            id: 1,
+            path: "/m/1.flac".into(),
+            hash: "h".into(),
+            format: AudioFormat::Flac,
+            sample_rate: rate,
+            bit_depth: Some(16),
+            channels,
+            duration_ms: Some(1000),
+            bitrate: None,
+            title: None,
+            album: None,
+            artist: None,
+            album_id: None,
+            track_no: None,
+            disc_no: None,
+            genre: None,
+            year: None,
+            missing: false,
+            decodable: true,
+            mqa: false,
+            original_sample_rate: None,
+        }
+    }
+
+    #[test]
+    fn lossless_chains_only_at_the_same_rate() {
+        let a = t(Some(44_100), Some(2));
+        assert!(can_chain(&a, &t(Some(44_100), Some(2)), StreamFormat::Flac));
+        assert!(!can_chain(
+            &a,
+            &t(Some(96_000), Some(2)),
+            StreamFormat::Flac
+        ));
+        assert!(!can_chain(
+            &a,
+            &t(Some(96_000), Some(2)),
+            StreamFormat::Passthrough
+        ));
+    }
+
+    #[test]
+    fn opus_and_mp3_output_rates_are_capped_so_mixed_sources_still_chain() {
+        let a = t(Some(44_100), Some(2));
+        let hi = t(Some(96_000), Some(2));
+        assert!(
+            can_chain(&a, &hi, StreamFormat::Opus),
+            "Opus is always 48 kHz"
+        );
+        assert!(
+            can_chain(&t(Some(48_000), Some(2)), &hi, StreamFormat::Mp3),
+            "MP3 caps at 48 kHz"
+        );
+        assert!(
+            !can_chain(&a, &hi, StreamFormat::Mp3),
+            "44.1 vs 48 kHz differ"
+        );
+    }
+
+    #[test]
+    fn a_channel_change_never_chains_and_unknowns_are_allowed() {
+        let a = t(Some(44_100), Some(2));
+        assert!(!can_chain(
+            &a,
+            &t(Some(44_100), Some(1)),
+            StreamFormat::Opus
+        ));
+        assert!(can_chain(&a, &t(None, None), StreamFormat::Flac));
     }
 }

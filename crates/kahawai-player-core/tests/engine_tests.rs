@@ -2579,6 +2579,62 @@ fn reordering_the_next_track_refreshes_a_stale_gapless_chain() {
     assert_eq!(h.player.snapshot().current_id, Some(1));
 }
 
+/// A track whose file rate / channel count differ from the fixture default.
+fn track_with(id: i64, rate: u32, channels: u8) -> Track {
+    Track {
+        sample_rate: Some(rate),
+        channels: Some(channels),
+        ..track(id, AudioFormat::Wav, 4000)
+    }
+}
+
+fn requested_next(h: &Harness, id: i64) -> Option<i64> {
+    h.stub
+        .opened
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(t, _)| *t == id)
+        .and_then(|(_, o)| o.next)
+}
+
+#[test]
+fn a_rate_change_between_tracks_is_never_chained_into_one_response() {
+    // The stream is opened at the first track's rate and the EQ, meters and
+    // sink are configured for it, so a chained second track at another rate
+    // would play at the wrong speed. The next track must open as its own stream.
+    let mut h = Harness::new(Some("chained"));
+    h.stub.add(1, &[(440.0, 44100 * 2)]);
+    h.stub.add(2, &[(440.0, 44100 * 2)]);
+    h.player
+        .play_queue(vec![track_with(1, 44_100, 2), track_with(2, 96_000, 2)], 0);
+    assert_eq!(
+        requested_next(&h, 1),
+        None,
+        "44.1 kHz -> 96 kHz must not chain"
+    );
+}
+
+#[test]
+fn a_channel_change_between_tracks_is_never_chained() {
+    let mut h = Harness::new(Some("chained"));
+    h.stub.add(1, &[(440.0, 44100 * 2)]);
+    h.stub.add(2, &[(440.0, 44100 * 2)]);
+    h.player
+        .play_queue(vec![track_with(1, 44_100, 2), track_with(2, 44_100, 1)], 0);
+    assert_eq!(requested_next(&h, 1), None, "stereo -> mono must not chain");
+}
+
+#[test]
+fn matching_rates_still_chain() {
+    let mut h = Harness::new(Some("chained"));
+    h.stub.add(1, &[(440.0, 44100 * 2)]);
+    h.stub.add(2, &[(440.0, 44100 * 2)]);
+    h.player
+        .play_queue(vec![track_with(1, 96_000, 2), track_with(2, 96_000, 2)], 0);
+    assert_eq!(requested_next(&h, 1), Some(2));
+}
+
 // ---------------------------------------------------------------------------
 // Turning off the last thing that holds Best quality back engages it now
 // ---------------------------------------------------------------------------
