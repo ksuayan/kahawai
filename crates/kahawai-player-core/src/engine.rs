@@ -2578,10 +2578,8 @@ pub fn snapshot_key_differs(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
     snapshot_key(a) != snapshot_key(b)
 }
 
-/// UI-visible snapshot identity minus the ever-moving playhead.
-fn snapshot_key(
-    s: &PlayerSnapshot,
-) -> (
+/// Identity of the UI-visible parts of a [`PlayerSnapshot`]; see [`snapshot_key`].
+type SnapshotKey = (
     PlayerStatus,
     Option<i64>,
     Vec<i64>,
@@ -2592,7 +2590,10 @@ fn snapshot_key(
     OutputPath,
     Vec<String>,
     Option<String>,
-) {
+);
+
+/// UI-visible snapshot identity minus the ever-moving playhead.
+fn snapshot_key(s: &PlayerSnapshot) -> SnapshotKey {
     // Volume changes must reach the UI even while paused/stopped, and a
     // seek while paused moves the (otherwise static) playhead. While
     // playing the position rides the 4 Hz throttle instead.
