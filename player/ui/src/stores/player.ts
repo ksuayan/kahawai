@@ -99,6 +99,8 @@ export const usePlayerStore = defineStore("player", () => {
   const outputRateHz = computed(() => raw.value?.output_rate_hz ?? null);
   const analogPlan = computed(() => raw.value?.analog_plan ?? null);
   const analogLevel = computed(() => raw.value?.analog_level ?? null);
+  /** Limiter gain reduction in dB; null when off or on a bypassing path. */
+  const limiterGrDb = computed(() => raw.value?.limiter_gr_db ?? null);
   const chain = computed(() => raw.value?.chain ?? null);
   const activeFormat = computed(() => raw.value?.format ?? null);
   const outputPath = computed(() => raw.value?.output_path ?? "pcm-shared");
@@ -197,6 +199,7 @@ export const usePlayerStore = defineStore("player", () => {
     outputRateHz,
     analogPlan,
     analogLevel,
+    limiterGrDb,
     chain,
     activeFormat,
     outputPath,

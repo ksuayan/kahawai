@@ -20,8 +20,9 @@ pub enum QualityMode {
 }
 
 /// The user's own processing that exclusive output would bypass, named for
-/// the UI ("EQ", "Loudness", "Analog", "Volume").
+/// the UI ("EQ", "Loudness", "Analog", "Limiter", "Volume").
 pub const BLOCKER_EQ: &str = "EQ";
 pub const BLOCKER_LOUDNESS: &str = "Loudness";
 pub const BLOCKER_ANALOG: &str = "Analog";
+pub const BLOCKER_LIMITER: &str = "Limiter";
 pub const BLOCKER_VOLUME: &str = "Volume";

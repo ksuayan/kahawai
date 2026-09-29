@@ -46,7 +46,7 @@
   --color-active: #e3e3e6;
   --color-fg: #18181b;
   --color-dim: #52525b;
-  --color-faint: #8e8e96;
+  --color-faint: #6c6c74; /* 4.99:1 on --color-canvas (was #8e8e96, ~3.1:1) */
   --color-accent: #0066cc; /* 4.5:1 on the light background */
   --color-accent-hover: #0052a3;
   --color-line: #e3e3e6;

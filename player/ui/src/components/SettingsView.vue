@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Plus, RefreshCw, X } from "lucide-vue-next";
+import { RefreshCw } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { checkHealth } from "../api";
 import {
@@ -18,11 +18,9 @@ import { useLibraryStore } from "../stores/library";
 import { usePlaylistsStore } from "../stores/playlists";
 import { useSettingsStore } from "../stores/settings";
 import {
-  EQ_BAND_TYPES,
   STREAM_FORMATS,
   type BitPerfectMode,
   type DsdStory,
-  type EqBandType,
   type StreamFormat,
 } from "../types";
 import DeviceCapabilities from "./DeviceCapabilities.vue";
@@ -37,6 +35,8 @@ import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import UiSwitch from "../ui/UiSwitch.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import AnalogSection from "./AnalogSection.vue";
+import EqEditor from "./EqEditor.vue";
+import LimiterSection from "./LimiterSection.vue";
 import SettingsSection from "./SettingsSection.vue";
 
 const settings = useSettingsStore();
@@ -204,22 +204,6 @@ const KEYBOARD_MAP: [string, string][] = [
   ["1 … 6", "Albums / Artists / Playlists / Search / Queue / Settings"],
 ];
 
-// --- EQ ---------------------------------------------------------------------
-
-function bandTypeLabel(t: EqBandType): string {
-  return t
-    .split("_")
-    .map((w) => w[0].toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-const bandTypeOptions: UiSelectOption[] = EQ_BAND_TYPES.map((t) => ({ value: t, label: bandTypeLabel(t) }));
-
-function onBandNum(i: number, field: "freq" | "gain_db" | "q", e: Event): void {
-  const v = Number((e.target as HTMLInputElement).value);
-  dsp.updateRow(i, { [field]: v });
-}
-
 // --- Loudness ----------------------------------------------------------------
 
 const loudnessInput = ref("-14");
@@ -341,48 +325,16 @@ const dopRates = computed(() =>
     <SoundQualitySection />
 
     <SettingsSection title="Parametric EQ">
-      <p v-if="bypassed" class="m-0 mb-2 text-sm text-dim" role="status" data-testid="eq-bypassed">
-        Bypassed while exclusive output is playing. Switch Sound quality to Compatible to use it.
-      </p>
-      <div :class="bypassed ? 'pointer-events-none opacity-40 grayscale' : ''" :inert="bypassed || undefined">
-      <UiHint>
-        Up to 8 bands, applied to PCM only (DoP bypasses EQ). Changes apply live.
-      </UiHint>
-      <UiSwitch :model-value="dsp.eqEnabled" label="EQ enabled" @update:model-value="(v) => dsp.saveEqEnabled(v)" />
-      <StateMessage v-if="dsp.rowError" kind="error" class="mt-2">{{ dsp.rowError }}</StateMessage>
-      <div class="my-2.5 flex flex-col gap-1.5">
-        <div
-          v-for="(b, i) in dsp.rows"
-          :key="i"
-          class="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-2"
-          :class="!b.enabled && 'opacity-50'"
-          data-testid="eq-band"
-        >
-          <UiSwitch :model-value="b.enabled" aria-label="Enable this band" @update:model-value="dsp.toggleRow(i)" />
-          <UiSelect
-            aria-label="Band type"
-            trigger-class="min-w-[130px]"
-            :model-value="b.band_type"
-            :options="bandTypeOptions"
-            @update:model-value="(v) => dsp.updateRow(i, { band_type: v as EqBandType })"
-          />
-          <label class="flex items-center gap-1 text-dim" title="Frequency (Hz)">
-            Hz
-            <UiInput class="w-[76px]" type="number" :model-value="String(b.freq)" min="10" max="24000" step="1" @change="onBandNum(i, 'freq', $event)" />
-          </label>
-          <label class="flex items-center gap-1 text-dim" title="Gain (dB)">
-            dB
-            <UiInput class="w-[64px]" type="number" :model-value="String(b.gain_db)" min="-24" max="24" step="0.5" @change="onBandNum(i, 'gain_db', $event)" />
-          </label>
-          <label class="flex items-center gap-1 text-dim" title="Q (shelf slope for shelves)">
-            Q
-            <UiInput class="w-[60px]" type="number" :model-value="String(b.q)" min="0.1" max="18" step="0.1" @change="onBandNum(i, 'q', $event)" />
-          </label>
-          <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="dsp.removeBand(i)"><X /></UiButton>
-        </div>
-      </div>
-      <UiButton variant="icon" :disabled="!dsp.canAddBand" @click="dsp.addBand()"><Plus /> Add band</UiButton>
-      </div>
+      <EqEditor
+        unsupported-note="Bypassed while exclusive output is playing. Switch Sound quality to Compatible to use it."
+      >
+        <template #note>
+          <UiHint>
+            Up to 8 bands, applied to PCM only (DoP bypasses EQ). Drag a point to shape the sound,
+            double-click the graph to add a band. Changes apply live and are saved as you go.
+          </UiHint>
+        </template>
+      </EqEditor>
     </SettingsSection>
 
     <SettingsSection title="Loudness normalization">
@@ -408,6 +360,10 @@ const dopRates = computed(() =>
       </div>
       <StateMessage v-if="loudnessError" kind="error" class="mt-2">{{ loudnessError }}</StateMessage>
       </div>
+    </SettingsSection>
+
+    <SettingsSection title="Limiter">
+      <LimiterSection />
     </SettingsSection>
 
     <details class="mb-7 rounded-lg border border-line" data-testid="advanced" :open="advancedOpen" @toggle="advancedOpen = ($event.target as HTMLDetailsElement).open">

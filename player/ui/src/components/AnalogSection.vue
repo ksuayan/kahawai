@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { TriangleAlert } from "lucide-vue-next";
-import { computed, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useAbxStore } from "../stores/abx";
 import { useAnalogStore, type Slot } from "../stores/analog";
 import { usePlayerStore } from "../stores/player";
@@ -66,9 +66,34 @@ const meterState = computed<"ok" | "warn" | "bad">(() => {
   const d = Math.abs(level.value?.delta_db ?? 0);
   return d < 0.5 ? "ok" : d < 1.5 ? "warn" : "bad";
 });
-const clipping = computed(() => (level.value?.peak_dbfs ?? -99) > -0.3);
+const clippingNow = computed(() => (level.value?.peak_dbfs ?? -99) > -0.3);
+/**
+ * Held for a bit after the peak backs off, so a level hovering right at the
+ * threshold dims and reddens a couple of times a second at most — rapid
+ * flashing text is a seizure risk. Lights up immediately (no delay on the
+ * way in, only on the way out).
+ */
+const CLIP_HOLD_MS = 1500;
+const clipping = ref(false);
+let clipHoldTimer: ReturnType<typeof setTimeout> | undefined;
+watch(
+  clippingNow,
+  (now) => {
+    if (now) {
+      clearTimeout(clipHoldTimer);
+      clipHoldTimer = undefined;
+      clipping.value = true;
+    } else if (clipping.value && clipHoldTimer === undefined) {
+      clipHoldTimer = setTimeout(() => {
+        clipping.value = false;
+        clipHoldTimer = undefined;
+      }, CLIP_HOLD_MS);
+    }
+  },
+  { immediate: true },
+);
+onUnmounted(() => clearTimeout(clipHoldTimer));
 const meterMessage = computed(() => {
-  if (!analog.current.enabled) return "Slot " + analog.active.toUpperCase() + " is the dry signal: nothing to measure. Its level change is 0 dB by definition.";
   if (!player.isPlaying) return "Play music on the shared output to measure.";
   return "Measuring… (a couple of seconds of audio)";
 });
@@ -92,12 +117,9 @@ const trialOptions: UiSelectOption[] = [5, 10, 15, 20].map((n) => ({ value: Stri
 const trialCount = ref(10);
 const startAnyway = ref(false);
 const canStartBlind = computed(() => abx.slotsDiffer && (abx.levelMatched || startAnyway.value));
-const blindCheck = computed(() => {
-  if (!abx.slotsDiffer) return "A and B are identical: change one of them first.";
-  if (abx.levelDifference === null) return "Measure both slots first (play music with A, then with B) so the levels can be matched.";
-  if (!abx.levelMatched) return `The levels differ by ${abx.levelDifference.toFixed(1)} dB. Use Match B to A first: a louder side gives itself away.`;
-  return `Levels are matched (within ${abx.levelDifference.toFixed(1)} dB).`;
-});
+/** dB formatted into a fixed-width slot in the check message below, so the
+ *  live number does not reflow the sentence around it as digits change. */
+const levelDiffText = computed(() => abx.levelDifference?.toFixed(1) ?? "");
 const heardLabel = computed(() => abx.heard.toUpperCase());
 
 const status = computed(() => (player.analogPlan ? `Now playing with ${player.analogPlan}.` : "The stage is off, or nothing is playing on the shared output."));
@@ -141,7 +163,7 @@ const dimmed = computed(() => unsupported.value || !analog.masterOn);
           <span class="heading-3">Level meter</span>
           <span class="text-xs text-dim">what the stage does to the loudness of what you are hearing</span>
         </div>
-        <template v-if="level && analog.effective.enabled">
+        <template v-if="level">
           <div class="mb-2 flex flex-wrap items-baseline gap-x-6 gap-y-1 tabular-nums">
             <span class="text-dim">Before <span class="text-fg" data-testid="meter-in">{{ level.input_lufs.toFixed(1) }}</span> LUFS</span>
             <span class="text-dim">After <span class="text-fg" data-testid="meter-out">{{ level.output_lufs.toFixed(1) }}</span> LUFS</span>
@@ -166,9 +188,25 @@ const dimmed = computed(() => unsupported.value || !analog.masterOn);
             />
           </div>
           <div class="mt-1 flex justify-between text-[11px] text-faint tabular-nums"><span>−6 dB</span><span>0</span><span>+6 dB</span></div>
-          <p v-if="clipping" class="m-0 mt-2 flex items-start gap-1.5 text-xs text-danger-fg" role="status" data-testid="meter-clip">
-            <TriangleAlert class="mt-px size-3.5 shrink-0" />
-            The output peaks at {{ level.peak_dbfs.toFixed(1) }} dBFS and may clip. Lower Drive or Output.
+          <p class="m-0 mt-2 grid text-xs" role="status" data-testid="meter-clip">
+            <span
+              class="col-start-1 row-start-1 flex items-start gap-1.5 text-danger-fg transition-opacity duration-200"
+              :class="clipping ? 'opacity-100' : 'opacity-0'"
+              :aria-hidden="!clipping"
+              data-testid="meter-clip-warn"
+            >
+              <TriangleAlert class="mt-px size-3.5 shrink-0" />
+              The output peaks at <span class="inline-block min-w-[6ch] rounded-sm border border-line bg-surface px-1 text-right font-mono tabular-nums text-fg" data-testid="meter-clip-warn-peak">{{ level.peak_dbfs.toFixed(1) }}</span> dBFS and may clip. Lower Drive or Output.
+            </span>
+            <span
+              class="col-start-1 row-start-1 flex items-start gap-1.5 text-faint transition-opacity duration-200"
+              :class="clipping ? 'opacity-0' : 'opacity-100'"
+              :aria-hidden="clipping"
+              data-testid="meter-clip-ok"
+            >
+              <TriangleAlert class="mt-px size-3.5 shrink-0" />
+              Peak <span class="inline-block min-w-[6ch] rounded-sm border border-line bg-surface px-1 text-right font-mono tabular-nums text-fg" data-testid="meter-clip-ok-peak">{{ level.peak_dbfs.toFixed(1) }}</span> dBFS, within headroom.
+            </span>
           </p>
         </template>
         <p v-else class="m-0 text-xs text-dim" data-testid="meter-idle">{{ meterMessage }}</p>
@@ -249,7 +287,16 @@ const dimmed = computed(() => unsupported.value || !analog.masterOn);
         <label v-if="abx.slotsDiffer && !abx.levelMatched" class="flex items-center gap-2 text-xs text-dim">
           <input v-model="startAnyway" type="checkbox" data-testid="blind-anyway" /> Start anyway (results will be unreliable)
         </label>
-        <p class="m-0 w-full text-xs text-dim" data-testid="blind-check">{{ blindCheck }}</p>
+        <p class="m-0 w-full text-xs text-dim" data-testid="blind-check">
+          <template v-if="!abx.slotsDiffer">A and B are identical: change one of them first.</template>
+          <template v-else-if="abx.levelDifference === null">Measure both slots first (play music with A, then with B) so the levels can be matched.</template>
+          <template v-else-if="!abx.levelMatched"
+            >The levels differ by <span class="inline-block min-w-[4ch] rounded-sm border border-line bg-surface px-1 text-right font-mono tabular-nums text-fg" data-testid="blind-check-diff">{{ levelDiffText }}</span> dB. Use Match B to A first: a louder side gives itself away.</template
+          >
+          <template v-else
+            >Levels are matched (within <span class="inline-block min-w-[4ch] rounded-sm border border-line bg-surface px-1 text-right font-mono tabular-nums text-fg" data-testid="blind-check-diff">{{ levelDiffText }}</span> dB).</template
+          >
+        </p>
       </div>
 
       <div v-if="!abx.running" class="mb-3 flex flex-wrap items-center gap-3" role="group" aria-label="Listening to">

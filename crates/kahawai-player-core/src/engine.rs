@@ -31,9 +31,9 @@ use serde::{Deserialize, Serialize};
 use crate::bitperfect::{f32_to_i24_le, BitPerfect};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
-use crate::quality::{QualityMode, BLOCKER_ANALOG, BLOCKER_EQ, BLOCKER_LOUDNESS, BLOCKER_VOLUME};
+use crate::quality::{QualityMode, BLOCKER_ANALOG, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS, BLOCKER_VOLUME};
 use crate::analog::{AnalogSettings, AnalogStage};
-use crate::dsp::{headroom_guard, DspStage, LoudnessMeter, 
+use crate::dsp::{headroom_guard, DspStage, LoudnessMeter, LookaheadLimiter,
     scan_track_levels, EqBand, GainRamp, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
 };
 use crate::queue::{Queue, RepeatMode};
@@ -43,6 +43,9 @@ use crate::transport::{HttpTransport, StreamOptions, StreamProgress, Transport};
 
 /// Frames decoded per pump iteration (~93 ms at 44.1 kHz).
 const CHUNK_FRAMES: usize = 4096;
+/// How fast the limiter's gain-reduction meter falls back once the reduction
+/// eases. Fast enough to track the music, slow enough to be readable.
+const GR_DECAY_DB_PER_SEC: f32 = 20.0;
 
 /// Milliseconds of playback that count as "restart the track" for prev.
 const PREV_RESTART_MS: u64 = 3000;
@@ -180,6 +183,10 @@ pub struct PlayerSnapshot {
     /// the output peak. `None` when the stage is off or nothing has been measured yet.
     #[serde(default)]
     pub analog_level: Option<AnalogLevel>,
+    /// Look-ahead limiter gain reduction in dB (positive, 0 = not working).
+    /// `None` when the limiter is off or the path bypasses it.
+    #[serde(default)]
+    pub limiter_gr_db: Option<f32>,
     /// The rendition actually streaming (explicit `?format=` value).
     pub format: Option<StreamFormat>,
     /// `X-Transcode-Chain` of the active response.
@@ -216,6 +223,7 @@ impl Default for PlayerSnapshot {
             output_rate_hz: None,
             analog_plan: None,
             analog_level: None,
+            limiter_gr_db: None,
             format: None,
             chain: None,
             output_path: OutputPath::Pcm,
@@ -241,6 +249,11 @@ pub struct DspSettings {
     /// files have none: it defaults to off.
     #[serde(default)]
     pub analog: AnalogSettings,
+    /// Look-ahead limiter on the shared path. Off by default, like loudness
+    /// and analog, so Auto bit-perfect / native DSD still works out of the
+    /// box on a fresh install.
+    #[serde(default)]
+    pub limiter_enabled: bool,
 }
 
 impl Default for DspSettings {
@@ -251,6 +264,7 @@ impl Default for DspSettings {
             loudness_enabled: false,
             loudness_target: DEFAULT_LOUDNESS_TARGET,
             analog: AnalogSettings::default(),
+            limiter_enabled: false,
         }
     }
 }
@@ -522,6 +536,21 @@ pub struct Player {
     /// Click-free gain transitions between tracks with different
     /// loudness gains (~50 ms linear ramp).
     gain_ramp: GainRamp,
+    /// Final safety stage: catches an EQ/gain overshoot before it reaches
+    /// full scale, transparently, instead of `headroom_guard` bending into
+    /// it reactively. Flushed (not just reset) when a track's decoder is
+    /// genuinely exhausted — see `pump_pcm`.
+    limiter: LookaheadLimiter,
+    /// Off puts the shared path back on `headroom_guard` alone (a reactive
+    /// soft clip). DSP like EQ/loudness/analog, so it blocks exclusive
+    /// output the same way (`exclusive_blockers`). Off by default, like
+    /// loudness and analog, so Auto bit-perfect / native DSD still works
+    /// out of the box.
+    limiter_enabled: bool,
+    /// Gain reduction for the meter (dB, positive), peak-held then decayed
+    /// like `peak_out` so a brief duck stays visible between snapshots
+    /// (which the UI only gets about four times a second).
+    limiter_gr_db: f32,
     output_path: OutputPath,
     /// DoP format established by the last headered response; a seeked
     /// response carries raw frames and continues under this spec.
@@ -559,6 +588,9 @@ impl Player {
             peak_out: 0.0,
             loudness: LoudnessNorm::new(DEFAULT_LOUDNESS_TARGET),
             gain_ramp: GainRamp::new(2205),
+            limiter: LookaheadLimiter::new(44100),
+            limiter_enabled: false,
+            limiter_gr_db: 0.0,
             output_path: OutputPath::Pcm,
             dop_spec: None,
         }
@@ -714,6 +746,9 @@ impl Player {
         }
         if self.analog.settings().enabled {
             b.push(BLOCKER_ANALOG);
+        }
+        if self.limiter_enabled {
+            b.push(BLOCKER_LIMITER);
         }
         if self.volume < 0.999 {
             b.push(BLOCKER_VOLUME);
@@ -1108,13 +1143,35 @@ impl Player {
         self.reconsider_exclusive();
     }
 
+    /// Turning the limiter off leaves `headroom_guard` as the only protection.
+    /// It is DSP like EQ/loudness/analog, so it blocks exclusive output the
+    /// same way (see `exclusive_blockers`). Whatever the limiter is still
+    /// holding is drained by `pump_pcm` on the next chunk, so flipping this
+    /// mid-track never strands buffered audio.
+    pub fn set_limiter_enabled(&mut self, enabled: bool) {
+        self.limiter_enabled = enabled;
+        self.reconsider_exclusive();
+    }
+
+    /// Gain reduction to show on the meter, in dB. `None` when the limiter is
+    /// off, or when nothing is playing on the shared path (exclusive output
+    /// bypasses it) — the UI shows "bypassed" rather than a stale zero.
+    fn limiter_gr(&self) -> Option<f32> {
+        if !self.limiter_enabled || self.output_path != OutputPath::Pcm {
+            return None;
+        }
+        self.active.as_ref().map(|_| self.limiter_gr_db)
+    }
+
     pub fn set_loudness_target(&mut self, lufs: f32) {
         self.loudness.set_target(lufs);
     }
 
-    /// The analog stage's effect on the level, once about a second of audio is behind it.
+    /// The analog stage's effect on the level, once about a second of audio is
+    /// behind it. Reported for the dry slot too (delta 0 by construction), so
+    /// A/B level-matching has a live peak reading on both sides.
     fn analog_level(&self) -> Option<AnalogLevel> {
-        if !self.analog.is_active() || self.meter_in.seconds() < 1.0 {
+        if self.meter_in.seconds() < 1.0 {
             return None;
         }
         let (i, o) = (self.meter_in.lufs()?, self.meter_out.lufs()?);
@@ -1135,6 +1192,7 @@ impl Player {
             loudness_enabled: self.loudness.enabled(),
             loudness_target: self.loudness.target(),
             analog: self.analog.settings(),
+            limiter_enabled: self.limiter_enabled,
         }
     }
 
@@ -1472,6 +1530,7 @@ impl Player {
         self.analog.prepare(sink_rate);
         self.meter_in.set_sample_rate(sink_rate);
         self.meter_out.set_sample_rate(sink_rate);
+        self.limiter.prepare(sink_rate);
         self.peak_out = 0.0;
 
         // The playhead starts at the seek target for *both* seek styles.
@@ -1560,6 +1619,7 @@ impl Player {
                     return;
                 }
             }
+            self.flush_limiter_tail();
             self.on_stream_end();
             return;
         }
@@ -1607,33 +1667,29 @@ impl Player {
             }
             None => frames,
         };
-        let out_frames = out.len() / channels;
-
-        // v1 DSP chain, fixed order: EQ -> loudness gain (ramped) -> volume.
+        // v1 DSP chain, fixed order: EQ -> analog -> loudness gain (ramped)
+        // -> volume -> look-ahead limiter -> headroom guard (belt and
+        // suspenders; a no-op once the limiter holds the ceiling).
         let mut chunk: Vec<f32> = out.to_vec();
         self.eq.process(&mut chunk, channels);
-        let measuring = self.analog.is_active();
-        let steady_before = self.analog.is_steady();
-        let ms_in = if measuring { self.meter_in.measure(&chunk, channels) } else { 0.0 };
+        // Meter continuously, dry or wet: A/B level-matching needs a reading
+        // on the dry slot too, not just while the stage is processing.
+        // "Settled" excludes only the fade transition itself, on either side.
+        let settled_before = !self.analog.is_active() || self.analog.is_steady();
+        let ms_in = self.meter_in.measure(&chunk, channels);
         self.analog.process(&mut chunk, channels);
-        if measuring {
-            let ms_out = self.meter_out.measure(&chunk, channels);
-            let frames = chunk.len() / channels;
-            // Both meters integrate the same chunks (gated on the input), so
-            // their difference is the stage's effect on the level.
-            if steady_before && self.analog.is_steady() && ms_in >= 1.174e-7 {
-                self.meter_in.integrate(ms_in, frames);
-                self.meter_out.integrate(ms_out, frames);
-            }
-            let dt = frames as f32 / active.sink_rate.max(1) as f32;
-            let peak = chunk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            self.peak_out = peak.max(self.peak_out * 0.5f32.powf(dt));
-        } else if self.meter_in.seconds() > 0.0 || self.peak_out > 0.0 {
-            // Off: forget, so the next reading starts fresh.
-            self.meter_in.reset();
-            self.meter_out.reset();
-            self.peak_out = 0.0;
+        let settled_after = !self.analog.is_active() || self.analog.is_steady();
+        let ms_out = self.meter_out.measure(&chunk, channels);
+        let frames = chunk.len() / channels;
+        // Both meters integrate the same chunks (gated on the input), so
+        // their difference is the stage's effect on the level.
+        if settled_before && settled_after && ms_in >= 1.174e-7 {
+            self.meter_in.integrate(ms_in, frames);
+            self.meter_out.integrate(ms_out, frames);
         }
+        let dt = frames as f32 / active.sink_rate.max(1) as f32;
+        let peak = chunk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        self.peak_out = peak.max(self.peak_out * 0.5f32.powf(dt));
         self.gain_ramp.apply(&mut chunk);
         let vol = self.volume;
         if vol < 0.999 {
@@ -1642,12 +1698,36 @@ impl Player {
             }
         }
         // EQ boosts and loudness gain can lift peaks past full scale, which the
-        // output device would hard-clip; bend them instead.
+        // output device would hard-clip. The limiter ducks ahead of a peak so
+        // the ceiling is reached transparently; the guard is a cheap backstop.
+        // The limiter's block length can differ from what went in (shorter,
+        // right after a reset, while its look-ahead window fills; see its
+        // docs), so `written_frames` below - not the pre-limiter frame count -
+        // is what actually reaches the sink.
+        if self.limiter_enabled {
+            self.limiter.process(&mut chunk, channels);
+            // Meter ballistics, same shape as `peak_out`: hold the deepest
+            // reduction of this chunk, then fall back about 20 dB/s, so a
+            // 5 ms duck is still on screen at the next snapshot.
+            let dt = (chunk.len() / channels.max(1)) as f32 / active.sink_rate.max(1) as f32;
+            let gr = self.limiter.take_reduction_db();
+            self.limiter_gr_db = gr.max(self.limiter_gr_db - GR_DECAY_DB_PER_SEC * dt).max(0.0);
+        } else {
+            self.limiter_gr_db = 0.0;
+            // Off: drain anything it was still holding in front of this chunk,
+            // so switching it off mid-track loses no audio. A no-op (empty,
+            // already reset) on every chunk after the first.
+            let held = self.limiter.flush();
+            if !held.is_empty() {
+                chunk.splice(0..0, held);
+            }
+        }
         headroom_guard(&mut chunk);
+        let written_frames = chunk.len() / channels;
 
         let sink_rate = active.sink_rate;
         let ch = active.spec.channels;
-        if self
+        if !chunk.is_empty() && self
             .sink
             .write(PcmChunk {
                 frames: chunk,
@@ -1663,7 +1743,7 @@ impl Player {
             Some(ActiveStream::Pcm(a)) => a,
             _ => return,
         };
-        active.pumped_frames += out_frames as u64;
+        active.pumped_frames += written_frames as u64;
         active.advance_display();
     }
 
@@ -1711,6 +1791,40 @@ impl Player {
         }
         if let Some(ActiveStream::Dop(a)) = self.active.as_mut() {
             a.pumped_frames += (n / frame_bytes) as u64;
+            a.advance_display();
+        }
+    }
+
+    /// Writes out whatever the look-ahead limiter is still holding. Called
+    /// once a `PcmStream`'s decoder is genuinely exhausted (`pump_pcm`,
+    /// `decoded_frames == 0`) — never on an internal chained-gapless segment
+    /// boundary, where the same decoder keeps producing continuous audio and
+    /// the limiter must keep running uninterrupted. Bit-perfect streams never
+    /// touch the limiter, so there is nothing to flush for them.
+    fn flush_limiter_tail(&mut self) {
+        let active = match self.active.as_ref() {
+            Some(ActiveStream::Pcm(a)) if !a.bit_perfect => a,
+            _ => return,
+        };
+        let (sink_rate, channels) = (active.sink_rate, active.spec.channels);
+        let tail = self.limiter.flush();
+        if tail.is_empty() {
+            return;
+        }
+        let frames = tail.len() / channels as usize;
+        if self
+            .sink
+            .write(PcmChunk {
+                frames: tail,
+                sample_rate: sink_rate,
+                channels: channels as u8,
+            })
+            .is_err()
+        {
+            return; // the stream is ending anyway; nothing left to recover
+        }
+        if let Some(ActiveStream::Pcm(a)) = self.active.as_mut() {
+            a.pumped_frames += frames as u64;
             a.advance_display();
         }
     }
@@ -1801,6 +1915,7 @@ impl Player {
             } else {
                 None
             },
+            limiter_gr_db: self.limiter_gr(),
             format,
             chain,
             output_path: self.output_path,
@@ -1899,6 +2014,7 @@ pub enum EngineCommand {
     SetLoudnessTarget(f32),
     /// PCM only; enables the pre-scan (one extra stream per first-play).
     SetLoudnessEnabled(bool),
+    SetLimiterEnabled(bool),
     SetServerUrl(String),
     Shutdown,
 }
@@ -2049,6 +2165,7 @@ impl EngineController {
         ctrl.send(EngineCommand::SetAnalog(dsp.analog));
         ctrl.send(EngineCommand::SetLoudnessTarget(dsp.loudness_target));
         ctrl.send(EngineCommand::SetLoudnessEnabled(dsp.loudness_enabled));
+        ctrl.send(EngineCommand::SetLimiterEnabled(dsp.limiter_enabled));
         // Playback preferences (persisted; default preserves pre-C3 behavior).
         ctrl.send(EngineCommand::SetDsdStory(settings.dsd_story));
         ctrl.send(EngineCommand::SetGlobalFormat(settings.global_format));
@@ -2317,6 +2434,13 @@ impl EngineController {
         self.send(EngineCommand::SetLoudnessEnabled(enabled));
     }
 
+    /// Clip protection on the shared path. Persisted; off by default, like
+    /// loudness normalization.
+    pub fn set_limiter_enabled(&self, enabled: bool) {
+        self.update_dsp_settings(|dsp| dsp.limiter_enabled = enabled);
+        self.send(EngineCommand::SetLimiterEnabled(enabled));
+    }
+
     /// Read-modify-write the DSP section of the settings file. Each setter
     /// passes the complete new value, so this never needs the engine's
     /// current state.
@@ -2503,6 +2627,7 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
         EngineCommand::SetAnalog(a) => player.set_analog(a),
         EngineCommand::SetLoudnessTarget(t) => player.set_loudness_target(t),
         EngineCommand::SetLoudnessEnabled(b) => player.set_loudness_enabled(b),
+        EngineCommand::SetLimiterEnabled(b) => player.set_limiter_enabled(b),
         EngineCommand::SetServerUrl(_) => {
             // The transport reads the shared URL lock directly; nothing to do.
         }

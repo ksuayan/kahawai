@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use kahawai_core::{api::StreamFormat, format::AudioFormat, MusicError, Track};
 use kahawai_player_core::{
     AnalogFlavour, AnalogSettings, AntiAliasChoice, resolve_format, valid_formats, AudioSink, BitPerfect, EngineController, EqBand, EqBandType,
-    OutputPath, PcmChunk, Player, PlayerStatus, StreamInfo, StreamOptions, Transport, VecSink,
+    OutputPath, PcmChunk, Player, PlayerStatus, StreamInfo, StreamOptions, Transport, VecSink, LIMITER_CEILING,
 };
 
 // ---------------------------------------------------------------------------
@@ -1336,9 +1336,11 @@ fn the_level_meter_reports_what_the_analog_stage_does_to_the_loudness() {
     // With the mix at zero the stage passes the dry signal: no change.
     let (snap3, _) = run(AnalogSettings { mix: 0.0, ..loud });
     assert!(snap3.analog_level.unwrap().delta_db.abs() < 0.3, "mix 0 changes nothing");
-    // Off, there is nothing to report.
+    // Off (dry), the meter still reads — A/B level-matching needs a peak and
+    // loudness reading on the dry slot too — but the delta is ~0 by construction.
     let (off, _) = run(AnalogSettings::default());
-    assert!(off.analog_level.is_none());
+    let off_lvl = off.analog_level.expect("dry slot is still metered");
+    assert!(off_lvl.delta_db.abs() < 0.05, "dry: input and output loudness match ({})", off_lvl.delta_db);
 }
 
 #[test]
@@ -2329,10 +2331,12 @@ fn losing_the_dac_during_native_dsd_continues_on_shared_output() {
 #[test]
 fn nothing_the_shared_path_emits_exceeds_full_scale() {
     // +12 dB on a 0.7-amplitude tone is about 2.8 full scale. The device would
-    // hard-clip that; the headroom guard is the last line of defence and keeps
-    // every sample within +-1.0.
+    // hard-clip that; the look-ahead limiter holds the peak at its ceiling
+    // (headroom_guard is a backstop behind it and should not need to bend
+    // anything here).
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100)]);
+    h.player.set_limiter_enabled(true);
     h.player
         .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 12.0, q: 1.0 }])
         .unwrap();
@@ -2340,7 +2344,57 @@ fn nothing_the_shared_path_emits_exceeds_full_scale() {
     h.pump_until_done(100);
     let peak = h.samples().iter().fold(0.0f32, |a, x| a.max(x.abs()));
     assert!(peak <= 1.0, "peak {peak}");
-    assert!(peak > 0.95, "still loud, just bounded: {peak}");
+    assert!(
+        (peak - LIMITER_CEILING).abs() < 1e-3,
+        "the limiter should hold the peak right at its ceiling, not bend it lower or let it through higher: {peak}"
+    );
+}
+
+#[test]
+fn turning_the_limiter_off_falls_back_to_the_guard_and_keeps_every_frame() {
+    // Off, the same overdriven material is soft-clipped by headroom_guard
+    // instead: still bounded, but allowed above the limiter's ceiling. The
+    // frame count must not change either way - switching it off drains
+    // whatever the look-ahead was holding rather than dropping it.
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100)]);
+    h.player
+        .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 12.0, q: 1.0 }])
+        .unwrap();
+    h.player.set_limiter_enabled(false);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.pump_until_done(100);
+
+    let s = h.samples();
+    assert_eq!(s.len(), 44100 * CHANNELS, "exact total samples");
+    let peak = s.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+    assert!(peak <= 1.0, "the guard still bounds it: {peak}");
+    assert!(
+        peak > LIMITER_CEILING + 1e-3,
+        "without the limiter the guard's soft knee goes above the ceiling: {peak}"
+    );
+    assert_eq!(h.player.snapshot().limiter_gr_db, None, "no reading while off");
+}
+
+#[test]
+fn the_limiter_reports_gain_reduction_only_while_it_is_working() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100)]);
+    h.player.set_limiter_enabled(true);
+    h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.player.pump();
+    // A 0.7 FS tone with no boost stays under the ceiling: nothing to do.
+    assert_eq!(h.player.snapshot().limiter_gr_db, Some(0.0), "on, but not working");
+
+    // A large boost drives it well past the ceiling.
+    h.player
+        .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 12.0, q: 1.0 }])
+        .unwrap();
+    for _ in 0..5 {
+        h.player.pump();
+    }
+    let gr = h.player.snapshot().limiter_gr_db.expect("a reading on the shared path");
+    assert!(gr > 3.0, "a +12 dB boost on a 0.7 FS tone needs real reduction, got {gr}");
 }
 
 #[test]

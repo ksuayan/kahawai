@@ -139,6 +139,8 @@ struct PlayerStateDto {
     analog_plan: Option<String>,
     /// How the analog stage changes the level (before/after loudness, peak).
     analog_level: Option<AnalogLevelDto>,
+    /// Look-ahead limiter gain reduction, dB. None while off or bypassed.
+    limiter_gr_db: Option<f32>,
     format: Option<&'static str>,
     chain: Option<String>,
     /// "pcm-shared" | "dop-exclusive" — drives the Exclusive DoP badge.
@@ -208,6 +210,7 @@ impl From<PlayerSnapshot> for PlayerStateDto {
                 peak_dbfs: l.peak_dbfs,
                 seconds: l.seconds,
             }),
+            limiter_gr_db: s.limiter_gr_db,
             format: s.format.map(format_str),
             chain: s.chain,
             output_path: output_path_str(s.output_path),
@@ -603,6 +606,12 @@ fn set_loudness_enabled(app: AppHandle, state: State<'_, AppState>, enabled: boo
     emit_state(&app, &state.engine);
 }
 
+#[tauri::command]
+fn set_limiter_enabled(app: AppHandle, state: State<'_, AppState>, enabled: bool) {
+    state.engine.set_limiter_enabled(enabled);
+    emit_state(&app, &state.engine);
+}
+
 /// Persisted DSP settings (the settings file is the source of truth; the
 /// engine's setters write it synchronously). The UI calls this once at
 /// startup to mirror the engine.
@@ -859,6 +868,7 @@ fn main() {
             set_analog,
             set_loudness_target,
             set_loudness_enabled,
+            set_limiter_enabled,
             get_dsp_settings,
             dop_status,
             set_dsd_device_confirmed,

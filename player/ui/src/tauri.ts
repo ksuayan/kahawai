@@ -241,6 +241,10 @@ export async function setLoudnessEnabled(enabled: boolean): Promise<void> {
   await cmd("set_loudness_enabled", { enabled });
 }
 
+export async function setLimiterEnabled(enabled: boolean): Promise<void> {
+  await cmd("set_limiter_enabled", { enabled });
+}
+
 export async function getDspSettings(): Promise<DspSettings | undefined> {
   return cmd<DspSettings>("get_dsp_settings");
 }

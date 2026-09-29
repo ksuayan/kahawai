@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { makeAlbum, mockFetch } from "../test/fixtures";
+import { EQ_LIMITS } from "../eqResponse";
+import { makeAlbum, makeState, mockFetch } from "../test/fixtures";
 import { $$, mountApp, openSelect, options, pick, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
 import { useAnalogStore } from "../stores/analog";
 import { useDspStore } from "../stores/dsp";
 import { useJobsStore } from "../stores/jobs";
+import { usePlayerStore } from "../stores/player";
 import { useSettingsStore } from "../stores/settings";
 import { useToastsStore } from "../stores/toasts";
 import SettingsView from "./SettingsView.vue";
@@ -324,6 +326,7 @@ describe("Settings: section order", () => {
       "Sound quality",
       "Parametric EQ",
       "Loudness normalization",
+      "Limiter",
       "Advanced",
       "Experimental",
       "Analog warmth",
@@ -419,15 +422,16 @@ describe("Settings: EQ and loudness", () => {
     expect(useDspStore().eqEnabled).toBe(false);
   });
 
-  it("lists the EQ bands with their values and can add and remove", async () => {
+  it("draws a node per band in the shared graph editor and can add and remove", async () => {
     const w = await mountSettings();
-    expect(w.findAll('[data-testid="eq-band"]')).toHaveLength(1);
+    expect(w.findAll('[data-testid="eq-node"]')).toHaveLength(1);
     await button(w, /Add band/).trigger("click");
     await settle();
-    expect(w.findAll('[data-testid="eq-band"]')).toHaveLength(2);
-    await w.findAll('button[aria-label="Remove band"]')[0].trigger("click");
+    expect(w.findAll('[data-testid="eq-node"]')).toHaveLength(2);
+    // Adding selects the new band, so the panel's Remove acts on it.
+    await w.get('[data-testid="eq-band-panel"] button[aria-label="Remove band"]').trigger("click");
     await settle();
-    expect(w.findAll('[data-testid="eq-band"]')).toHaveLength(1);
+    expect(w.findAll('[data-testid="eq-node"]')).toHaveLength(1);
   });
 
   it("disables Add band at the eight-band limit", async () => {
@@ -438,9 +442,16 @@ describe("Settings: EQ and loudness", () => {
     expect(button(w, /Add band/).attributes("disabled")).toBeDefined();
   });
 
-  it("edits a band's frequency and applies it live", async () => {
+  /** Selects the first node, so the editor's numeric panel edits that band. */
+  async function selectFirstBand(w: Awaited<ReturnType<typeof mountSettings>>) {
+    await w.findAll('[data-testid="eq-node"]')[0].trigger("focus");
+    await settle();
+    return w.get('[data-testid="eq-band-panel"] input[type="number"]').element as HTMLInputElement;
+  }
+
+  it("edits the selected band's frequency and applies it live", async () => {
     const w = await mountSettings();
-    const freq = w.get('[data-testid="eq-band"] input[type="number"]').element as HTMLInputElement;
+    const freq = await selectFirstBand(w);
     freq.value = "2500";
     freq.dispatchEvent(new Event("change", { bubbles: true }));
     await settle();
@@ -448,13 +459,17 @@ describe("Settings: EQ and loudness", () => {
     expect(last.bands[0].freq).toBe(2500);
   });
 
-  it("rejects an out-of-range band value with a message", async () => {
+  it("clamps an out-of-range band value to the usable limit", async () => {
+    // The graph editor constrains rather than rejecting: it writes back what
+    // was actually applied, so the input can never disagree with the engine.
     const w = await mountSettings();
-    const freq = w.get('[data-testid="eq-band"] input[type="number"]').element as HTMLInputElement;
+    const freq = await selectFirstBand(w);
     freq.value = "5";
     freq.dispatchEvent(new Event("change", { bubbles: true }));
     await settle();
-    expect(w.text()).toContain("Frequency must be 10–24000 Hz.");
+    expect(freq.value).toBe(String(EQ_LIMITS.freqMin));
+    const last = tauri.callsTo("set_eq_bands").at(-1) as { bands: { freq: number }[] };
+    expect(last.bands[0].freq).toBe(EQ_LIMITS.freqMin);
   });
 
   it("toggles loudness normalisation and validates the target", async () => {
@@ -474,6 +489,80 @@ describe("Settings: EQ and loudness", () => {
     target.dispatchEvent(new Event("change", { bubbles: true }));
     await settle();
     expect(w.text()).toContain("Target must be −40…−1 LUFS.");
+  });
+});
+
+describe("Settings: limiter", () => {
+  /**
+   * Mounts Settings with the limiter enabled (off is the default, like
+   * loudness normalization) and a seeded player snapshot, so the meter has
+   * a reading to show.
+   */
+  async function mountWithState(over: Partial<ReturnType<typeof makeState>> = {}) {
+    tauri
+      .on("get_dsp_settings", { eq_bands: [], eq_enabled: true, loudness_enabled: false, loudness_target: -14, limiter_enabled: true })
+      .on("get_output_devices", devices)
+      .on("get_output_device", null)
+      .on("dop_status", DEFAULT_DOP);
+    const { wrapper } = mountApp(SettingsView, {}, {}, () => {
+      usePlayerStore().raw = makeState({ status: "playing", output_path: "pcm-shared", ...over });
+    });
+    await useDspStore().init();
+    await settle();
+    return wrapper;
+  }
+  const section = (w: Awaited<ReturnType<typeof mountSettings>>) =>
+    w.findAll("section").find((x) => x.find("h3").text() === "Limiter")!;
+
+  it("is off by default, like loudness normalization, and can be turned on through the core", async () => {
+    const w = await mountSettings();
+    const sw = section(w).get('[role="switch"]');
+    expect(sw.attributes("aria-checked")).toBe("false");
+    await sw.trigger("click");
+    await settle();
+    expect(tauri.callsTo("set_limiter_enabled")).toEqual([{ enabled: true }]);
+    expect(useDspStore().limiterEnabled).toBe(true);
+  });
+
+  it("shows no reading while off", async () => {
+    const w = await mountSettings();
+    expect(section(w).find('[data-testid="limiter-gr-idle"]').exists()).toBe(true);
+    expect(section(w).find('[data-testid="limiter-gr"]').exists()).toBe(false);
+  });
+
+  it("shows no reading when enabled but the engine reports none", async () => {
+    const w = await mountWithState({ limiter_gr_db: null });
+    expect(section(w).find('[data-testid="limiter-gr-idle"]').exists()).toBe(true);
+    expect(section(w).find('[data-testid="limiter-gr"]').exists()).toBe(false);
+  });
+
+  it("colours the bar green, yellow then red as the reduction deepens", async () => {
+    for (const [db, want] of [
+      [0.5, "ok"],
+      [4, "warn"],
+      [9, "bad"],
+    ] as const) {
+      const w = await mountWithState({ limiter_gr_db: db });
+      expect(section(w).get('[data-testid="limiter-gr"]').attributes("data-state")).toBe(want);
+    }
+  });
+
+  it("reads the depth out and fills the bar against a 12 dB scale", async () => {
+    const w = await mountWithState({ limiter_gr_db: 9 });
+    expect(section(w).get('[data-testid="limiter-gr"]').text()).toContain("−9.0 dB");
+    expect(section(w).get('[data-testid="limiter-bar"]').attributes("style")).toContain("75%");
+  });
+
+  it("says it is bypassed on an exclusive stream", async () => {
+    const w = await mountWithState({ output_path: "dop-exclusive", limiter_gr_db: null });
+    expect(section(w).get('[data-testid="limiter-note"]').text()).toContain("Bypassed");
+  });
+
+  it("says peaks are soft-clipped instead when it is off", async () => {
+    const w = await mountWithState({ limiter_gr_db: 0 });
+    await section(w).get('[role="switch"]').trigger("click");
+    await settle();
+    expect(section(w).get('[data-testid="limiter-note"]').text()).toContain("soft-clipped");
   });
 });
 

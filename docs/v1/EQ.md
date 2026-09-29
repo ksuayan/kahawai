@@ -36,7 +36,7 @@ flowchart LR
     hog --> dev
 ```
 
-The relevant code is `Player::pump_pcm` in [engine.rs](crates/kahawai-player-core/src/engine.rs): it decodes one chunk (4096 frames, about 93 ms at 44.1 kHz), optionally resamples, then runs `eq.process` → `analog.process` (optional, off by default) → `gain_ramp.apply` → volume → `sink.write`. The order is fixed. The DSP itself is in [dsp.rs](crates/kahawai-player-core/src/dsp.rs), which imports nothing platform-specific.
+The relevant code is `Player::pump_pcm` in [engine.rs](../../crates/kahawai-player-core/src/engine.rs): it decodes one chunk (4096 frames, about 93 ms at 44.1 kHz), optionally resamples, then runs `eq.process` → `analog.process` (optional, off by default) → `gain_ramp.apply` → volume → `sink.write`. The order is fixed. The DSP itself is in [dsp.rs](../../crates/kahawai-player-core/src/dsp.rs), which imports nothing platform-specific.
 
 Everything before the sink runs on the engine's dedicated playback thread. The audio device callback (cpal) only drains a lock-free ring buffer, so no DSP happens on the real-time audio thread.
 
@@ -59,7 +59,7 @@ Everything before the sink runs on the engine's dedicated playback thread. The a
 | Validation | `validate_bands` rejects out-of-range values; the Tauri command validates first so the UI gets an error before anything reaches the engine |
 | Rate | designed at the rate the sink receives (after any resampling) and redesigned when it changes (state is cleared) |
 
-The frequency-response graph in the UI ([eqResponse.ts](player/ui/src/eqResponse.ts)) re-implements the same coefficient formulas, including the frequency cap, and evaluates them at the rate the engine reports (`output_rate_hz` in the player state). With nothing playing it draws for 48 kHz and says so.
+The frequency-response graph in the UI ([eqResponse.ts](../../player/ui/src/eqResponse.ts)) re-implements the same coefficient formulas, including the frequency cap, and evaluates them at the rate the engine reports (`output_rate_hz` in the player state). With nothing playing it draws for 48 kHz and says so.
 
 ### Guardrails in the UI
 
@@ -114,11 +114,13 @@ These are properties of the current implementation, not bugs in the docs.
 
 | Piece | File | Role |
 |---|---|---|
-| EQ button | [EqControl.vue](player/ui/src/components/EqControl.vue) | next to Shuffle and Repeat; opens the dialog; dims when the stream is exclusive |
-| Editor | [EqDialog.vue](player/ui/src/components/EqDialog.vue) | response graph, draggable nodes, preset picker, Save as preset, OK / Cancel |
-| Presets | [eqPresets.ts](player/ui/src/eqPresets.ts) | Flat, Classical, Jazz, Rock, Pop, Talk Show (gentle, at most about ±4 dB) |
-| State | [stores/dsp.ts](player/ui/src/stores/dsp.ts) | rows, user presets, apply / snapshot / restore |
-| Maths | [eqResponse.ts](player/ui/src/eqResponse.ts) | biquad magnitude for the graph |
+| EQ button | [EqControl.vue](../../player/ui/src/components/EqControl.vue) | next to Shuffle and Repeat; opens the dialog; dims when the stream is exclusive |
+| Editor | [EqEditor.vue](../../player/ui/src/components/EqEditor.vue) | the one editor: response graph, draggable nodes, numeric fields for the selected band, preset picker, Save as preset |
+| Dialog | [EqDialog.vue](../../player/ui/src/components/EqDialog.vue) | the editor as a modal, plus this screen's commit rule: live edits, OK keeps, Cancel reverts |
+| In Settings | [SettingsView.vue](../../player/ui/src/components/SettingsView.vue) | the same editor under "Parametric EQ", saving as you go (no OK / Cancel) |
+| Presets | [eqPresets.ts](../../player/ui/src/eqPresets.ts) | Flat, Classical, Jazz, Rock, Pop, Talk Show (gentle, at most about ±4 dB) |
+| State | [stores/dsp.ts](../../player/ui/src/stores/dsp.ts) | rows, user presets, apply / snapshot / restore |
+| Maths | [eqResponse.ts](../../player/ui/src/eqResponse.ts) | biquad magnitude for the graph |
 
 Exclusive output paths dim the editor with "EQ is not supported for this stream type." The check is `player.isExclusive`.
 
@@ -148,7 +150,7 @@ flowchart LR
     vol --> sink["sink"]
 ```
 
-That trait now exists in [dsp.rs](crates/kahawai-player-core/src/dsp.rs) and is implemented by both the EQ and the analog stage (`AnalogStage`, [analog.rs](crates/kahawai-player-core/src/analog.rs)):
+That trait now exists in [dsp.rs](../../crates/kahawai-player-core/src/dsp.rs) and is implemented by both the EQ and the analog stage (`AnalogStage`, [analog.rs](../../crates/kahawai-player-core/src/analog.rs)):
 
 ```rust
 // kahawai-player-core: platform-free

@@ -91,7 +91,7 @@ Our sources are 44.1 to 192 kHz. Content at 96 kHz and above has a lot of headro
 
 ### 4.1 Where it lives
 
-- A new module `analog.rs` in [kahawai-player-core](crates/kahawai-player-core/src/) (pure Rust, no platform imports, like `dsp.rs`).
+- A new module `analog.rs` in [kahawai-player-core](../../crates/kahawai-player-core/src/) (pure Rust, no platform imports, like `dsp.rs`).
 - A small trait so stages compose (this is the `DspStage` idea from EQ.md):
 
 ```rust
@@ -103,7 +103,7 @@ pub trait DspStage: Send {
 }
 ```
 
-- Chain order in `pump_pcm` (see [engine.rs](crates/kahawai-player-core/src/engine.rs)): decode, resample, **EQ, analog stage**, loudness gain, volume, sink. The analog stage goes after the EQ so the user's EQ shapes what is driven, and before loudness and volume so drive is independent of listening level. (Open question Q3.)
+- Chain order in `pump_pcm` (see [engine.rs](../../crates/kahawai-player-core/src/engine.rs)): decode, resample, **EQ, analog stage**, loudness gain, volume, sink. The analog stage goes after the EQ so the user's EQ shapes what is driven, and before loudness and volume so drive is independent of listening level. (Open question Q3.)
 
 ```mermaid
 flowchart LR
@@ -254,7 +254,7 @@ Moved to **References** at the bottom of this document (section 19).
 
 ## 10. Phase 0 findings
 
-A throw-away prototype lives in [research/analog-spike/](research/analog-spike/) (a standalone Rust program, not part of the player; run it with `cargo run --release`, output saved in [RESULTS.txt](research/analog-spike/RESULTS.txt)). It is unoptimized research code, so treat the numbers as ballpark, measured on an Intel Core i9-9900K.
+A throw-away prototype lives in [research/analog-spike/](../../research/analog-spike/) (a standalone Rust program, not part of the player; run it with `cargo run --release`, output saved in [RESULTS.txt](../../research/analog-spike/RESULTS.txt)). It is unoptimized research code, so treat the numbers as ballpark, measured on an Intel Core i9-9900K.
 
 ### 10.1 What the prototype has
 
@@ -342,7 +342,7 @@ A correction to my own first run: an early version of this test reported about â
 
 ## 11. Phase 1 results
 
-Code: [analog.rs](crates/kahawai-player-core/src/analog.rs) (the stage), the `DspStage` trait in [dsp.rs](crates/kahawai-player-core/src/dsp.rs), and the wiring in [engine.rs](crates/kahawai-player-core/src/engine.rs). Tauri command: `set_analog`. (The Settings panel came later; see section 13.)
+Code: [analog.rs](../../crates/kahawai-player-core/src/analog.rs) (the stage), the `DspStage` trait in [dsp.rs](../../crates/kahawai-player-core/src/dsp.rs), and the wiring in [engine.rs](../../crates/kahawai-player-core/src/engine.rs). Tauri command: `set_analog`. (The Settings panel came later; see section 13.)
 
 ### 11.1 What exists
 
@@ -391,7 +391,7 @@ The stage's tests are in `analog.rs`, plus two engine tests:
 | 96 kHz (2x) | 0.4% | 3.8% | 3.8% |
 | 192 kHz (none) | 0.9% | 1.0% | 0.9% |
 
-Measured by [phase1_cost.rs](research/analog-spike/src/bin/phase1_cost.rs) (output in [PHASE1_COST.txt](research/analog-spike/PHASE1_COST.txt)). Plenty of room. The FIR is a straightforward implementation; there is obvious headroom for optimisation if it is ever needed.
+Measured by [phase1_cost.rs](../../research/analog-spike/src/bin/phase1_cost.rs) (output in [PHASE1_COST.txt](../../research/analog-spike/PHASE1_COST.txt)). Plenty of room. The FIR is a straightforward implementation; there is obvious headroom for optimisation if it is ever needed.
 
 ### 11.5 How to try it (the Settings panel in section 13 replaces this)
 
@@ -417,7 +417,7 @@ Start the app and play something on the normal (shared) output. Use `"solid_stat
 
 ## 12. Phase 2 results
 
-Code: the tube model, table and ADAA in [analog.rs](crates/kahawai-player-core/src/analog.rs). Measurements come from `cargo test --release -p kahawai-player-core --lib measure_anti_alias_plans -- --ignored --nocapture` (aliasing) and [phase1_cost.rs](research/analog-spike/src/bin/phase1_cost.rs) (CPU, output in [PHASE1_COST.txt](research/analog-spike/PHASE1_COST.txt)).
+Code: the tube model, table and ADAA in [analog.rs](../../crates/kahawai-player-core/src/analog.rs). Measurements come from `cargo test --release -p kahawai-player-core --lib measure_anti_alias_plans -- --ignored --nocapture` (aliasing) and [phase1_cost.rs](../../research/analog-spike/src/bin/phase1_cost.rs) (CPU, output in [PHASE1_COST.txt](../../research/analog-spike/PHASE1_COST.txt)).
 
 ### 12.1 The triode curve
 
@@ -479,7 +479,7 @@ CPU per second of stereo audio, one core (release build):
 
 ## 13. A/B test panel (Settings)
 
-Settings, section **Analog warmth (experimental)**, right after the Parametric EQ. Code: [AnalogSection.vue](player/ui/src/components/AnalogSection.vue), [stores/analog.ts](player/ui/src/stores/analog.ts).
+Settings, section **Analog warmth (experimental)**, right after the Parametric EQ. Code: [AnalogSection.vue](../../player/ui/src/components/AnalogSection.vue), [stores/analog.ts](../../player/ui/src/stores/analog.ts).
 
 ### 13.1 How it works
 
@@ -524,7 +524,7 @@ A small message ("Analog warmth: listening to B", with a one-line summary of the
 
 ### 13.7 Level meter and level matching
 
-A/B comparisons are only fair when both sides are equally loud, so the panel now measures it. Code: `LoudnessMeter` in [dsp.rs](crates/kahawai-player-core/src/dsp.rs), the wiring in [engine.rs](crates/kahawai-player-core/src/engine.rs), the panel in [AnalogSection.vue](player/ui/src/components/AnalogSection.vue) and the matching logic in [stores/analog.ts](player/ui/src/stores/analog.ts).
+A/B comparisons are only fair when both sides are equally loud, so the panel now measures it. Code: `LoudnessMeter` in [dsp.rs](../../crates/kahawai-player-core/src/dsp.rs), the wiring in [engine.rs](../../crates/kahawai-player-core/src/engine.rs), the panel in [AnalogSection.vue](../../player/ui/src/components/AnalogSection.vue) and the matching logic in [stores/analog.ts](../../player/ui/src/stores/analog.ts).
 
 **What it measures.** The engine measures the loudness of the signal going into the stage and coming out of it, and reports the difference: *what the stage adds to the level*. The measurement:
 
@@ -557,7 +557,7 @@ The numbers are **relative** (LUFS-like), good for comparing before and after, n
 
 ### 13.8 Blind test (ABX)
 
-Code: [stores/abx.ts](player/ui/src/stores/abx.ts) and the "Blind test" block in [AnalogSection.vue](player/ui/src/components/AnalogSection.vue). It needs no engine change: hearing X simply sends the hidden slot's settings, exactly as switching to that slot would.
+Code: [stores/abx.ts](../../player/ui/src/stores/abx.ts) and the "Blind test" block in [AnalogSection.vue](../../player/ui/src/components/AnalogSection.vue). It needs no engine change: hearing X simply sends the hidden slot's settings, exactly as switching to that slot would.
 
 **How it works**
 
@@ -585,7 +585,7 @@ Code: [stores/abx.ts](player/ui/src/stores/abx.ts) and the "Blind test" block in
 
 ## 14. Phase 3 results
 
-Code: the sag envelope, transformer stage and their settings in [analog.rs](crates/kahawai-player-core/src/analog.rs). Two new controls, **Sag** and **Transformer** (0 to 100%, default 30% each), in the engine settings, in `dsp.analog`, and in each A/B slot in Settings.
+Code: the sag envelope, transformer stage and their settings in [analog.rs](../../crates/kahawai-player-core/src/analog.rs). Two new controls, **Sag** and **Transformer** (0 to 100%, default 30% each), in the engine settings, in `dsp.analog`, and in each A/B slot in Settings.
 
 ### 14.1 Sag (3.1)
 
@@ -617,7 +617,7 @@ Release build, one second of stereo audio, one core, with sag and transformer ac
 | 96 kHz (2x + ADAA) | 0.4% | 4.3% | 4.8% |
 | 192 kHz (1x + ADAA) | 0.8% | 2.4% | 3.1% |
 
-Phase 2 was 3.4%, 4.0% and 1.0% for the triode. The 192 kHz figure rose most because the added per-sample work is a larger share when no oversampling filter dominates. Still small. (Note: the earlier Phase 2 cost tables in sections 11 and 12 are unchanged history; output for every plan is in [PHASE1_COST.txt](research/analog-spike/PHASE1_COST.txt). The cost tool now sets the anti-aliasing plan explicitly; after the A/B panel added the `antialias` setting, it briefly measured "auto" for every row.)
+Phase 2 was 3.4%, 4.0% and 1.0% for the triode. The 192 kHz figure rose most because the added per-sample work is a larger share when no oversampling filter dominates. Still small. (Note: the earlier Phase 2 cost tables in sections 11 and 12 are unchanged history; output for every plan is in [PHASE1_COST.txt](../../research/analog-spike/PHASE1_COST.txt). The cost tool now sets the anti-aliasing plan explicitly; after the A/B panel added the `antialias` setting, it briefly measured "auto" for every row.)
 
 ### 14.5 What to listen for
 
@@ -636,7 +636,7 @@ Phase 2 was 3.4%, 4.0% and 1.0% for the triode. The 192 kHz figure rose most bec
 
 ## 15. More flavours: tube variants, push-pull, hard transistor
 
-The Flavour menu now offers **ten** characters (Settings, Analog warmth, in each A/B slot). Choosing one also sets **Sag** and **Transformer** to typical values for that kind of stage (you can adjust them afterwards). Code: [analog.rs](crates/kahawai-player-core/src/analog.rs); labels and typical values in [types.ts](player/ui/src/types.ts) (`FLAVOUR_INFO`).
+The Flavour menu now offers **ten** characters (Settings, Analog warmth, in each A/B slot). Choosing one also sets **Sag** and **Transformer** to typical values for that kind of stage (you can adjust them afterwards). Code: [analog.rs](../../crates/kahawai-player-core/src/analog.rs); labels and typical values in [types.ts](../../player/ui/src/types.ts) (`FLAVOUR_INFO`).
 
 ### 15.1 The list
 
@@ -725,7 +725,7 @@ Harmonics relative to the tone, at an input level of 0.1 / 0.3 / 0.6:
 
 ## 16. Eleven more flavours (21 in total)
 
-Seven more tubes and pentode pairs, three solid-state characters, and one utility. Menu order: small-signal tubes, power triodes, the pentode, push-pull, solid state, then the utility. Code: [analog.rs](crates/kahawai-player-core/src/analog.rs); menu text and typical Sag/Transformer in [types.ts](player/ui/src/types.ts).
+Seven more tubes and pentode pairs, three solid-state characters, and one utility. Menu order: small-signal tubes, power triodes, the pentode, push-pull, solid state, then the utility. Code: [analog.rs](../../crates/kahawai-player-core/src/analog.rs); menu text and typical Sag/Transformer in [types.ts](../../player/ui/src/types.ts).
 
 ### 16.1 New tubes (Koren's library fits)
 
@@ -857,7 +857,7 @@ Notes:
 
 - Recipe 1 is the best first test. Recipe 10 is a good way to hear what the engineering in sections 12 to 14 does.
 - Sag and Transformer take each flavour's typical values (section 15); the recipes only override them in recipe 7.
-- The recipes and the button live in the app ([types.ts](player/ui/src/types.ts), `LISTENING_RECIPES`); a test checks that every recipe title appears in this section.
+- The recipes and the button live in the app ([types.ts](../../player/ui/src/types.ts), `LISTENING_RECIPES`); a test checks that every recipe title appears in this section.
 
 ---
 

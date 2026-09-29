@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { makeState } from "../test/fixtures";
 import { $$, mountApp, openSelect, options, pick, settle } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
@@ -234,23 +234,52 @@ describe("Analog warmth: level meter", () => {
     }
   });
 
-  it("warns when the peak is at full scale", async () => {
+  it("is dim when there is headroom and turns red when the peak is at full scale, without hiding either line (no layout jump)", async () => {
     const quiet = await heardB(makeState({ status: "playing", output_path: "pcm-shared", analog_level: lvl(0, -3) }));
-    expect(quiet.wrapper.find('[data-testid="meter-clip"]').exists()).toBe(false);
+    expect(quiet.wrapper.get('[data-testid="meter-clip-ok"]').classes()).toContain("opacity-100");
+    expect(quiet.wrapper.get('[data-testid="meter-clip-warn"]').classes()).toContain("opacity-0");
+    expect(quiet.wrapper.get('[data-testid="meter-clip-ok"]').text()).toContain("within headroom");
     quiet.wrapper.unmount();
     const hot = await heardB(makeState({ status: "playing", output_path: "pcm-shared", analog_level: lvl(0, 0.4) }));
-    expect(hot.wrapper.get('[data-testid="meter-clip"]').text()).toContain("may clip");
+    expect(hot.wrapper.get('[data-testid="meter-clip-warn"]').classes()).toContain("opacity-100");
+    expect(hot.wrapper.get('[data-testid="meter-clip-ok"]').classes()).toContain("opacity-0");
+    expect(hot.wrapper.get('[data-testid="meter-clip-warn"]').text()).toContain("may clip");
   });
 
-  it("says why there is no reading: dry slot, nothing playing, or still measuring", async () => {
-    const dry = await boot(makeState({ status: "playing", output_path: "pcm-shared" }));
-    expect(dry.wrapper.get('[data-testid="meter-idle"]').text()).toContain("dry signal");
-    dry.wrapper.unmount();
+  it("crossfades over 200ms instead of snapping, and holds the warning for a beat after the peak backs off", async () => {
+    vi.useFakeTimers();
+    try {
+      const state = makeState({ status: "playing", output_path: "pcm-shared", analog_level: lvl(0, 0.4) });
+      const { wrapper } = await heardB(state);
+      const warn = () => wrapper.get('[data-testid="meter-clip-warn"]');
+      const ok = () => wrapper.get('[data-testid="meter-clip-ok"]');
+      expect(warn().classes()).toContain("opacity-100");
+      expect(warn().classes()).toContain("duration-200");
+      tauri.emit("player-state", { ...state, analog_level: lvl(0, -3) });
+      await settle();
+      // Still red immediately after the peak backs off.
+      expect(warn().classes()).toContain("opacity-100");
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(warn().classes()).toContain("opacity-100");
+      await vi.advanceTimersByTimeAsync(2);
+      expect(warn().classes()).toContain("opacity-0");
+      expect(ok().classes()).toContain("opacity-100");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says why there is no reading: nothing playing, or still measuring — the dry slot reads too", async () => {
     const idle = await heardB(makeState({ status: "stopped", output_path: "pcm-shared" }));
     expect(idle.wrapper.get('[data-testid="meter-idle"]').text()).toContain("Play music");
     idle.wrapper.unmount();
     const measuring = await heardB(makeState({ status: "playing", output_path: "pcm-shared" }));
     expect(measuring.wrapper.get('[data-testid="meter-idle"]').text()).toContain("Measuring");
+    measuring.wrapper.unmount();
+    // The dry slot (A) is metered too: a reading shows, not the idle message.
+    const dry = await boot(makeState({ status: "playing", output_path: "pcm-shared", analog_level: lvl(0, -12) }));
+    expect(dry.wrapper.find('[data-testid="meter-idle"]').exists()).toBe(false);
+    expect(dry.wrapper.get('[data-testid="meter-delta"]').text()).toBe("0.0 dB");
   });
 
   it("match buttons need both slots measured, then trim the Output and explain what changed", async () => {

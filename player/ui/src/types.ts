@@ -97,6 +97,11 @@ export interface PlayerState {
   analog_plan?: string | null;
   /** How the analog stage changes the level; null when off or not yet measured. */
   analog_level?: AnalogLevel | null;
+  /**
+   * Look-ahead limiter gain reduction, dB (positive; 0 = not working). Null
+   * when the limiter is off, or the path bypasses it (DoP / bit-perfect).
+   */
+  limiter_gr_db?: number | null;
   format: string | null;
   chain: string | null;
   /** "pcm-shared" (DSP chain active) or "dop-exclusive" (bit-perfect). */
@@ -546,6 +551,8 @@ export interface DspSettings {
   loudness_target: number;
   /** Absent in settings files from before the analog stage. */
   analog?: AnalogSettings;
+  /** Absent in settings files from before the limiter; it defaults to off. */
+  limiter_enabled?: boolean;
 }
 
 export const DEFAULT_DSP_SETTINGS: DspSettings = {
@@ -554,6 +561,7 @@ export const DEFAULT_DSP_SETTINGS: DspSettings = {
   loudness_enabled: false,
   loudness_target: -14,
   analog: DEFAULT_ANALOG_SETTINGS,
+  limiter_enabled: false,
 };
 
 export const MAX_EQ_BANDS = 8;

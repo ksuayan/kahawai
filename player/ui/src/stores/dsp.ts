@@ -8,6 +8,7 @@ import {
   setOutputDevice,
   setEqBands,
   setEqEnabled,
+  setLimiterEnabled,
   setLoudnessEnabled,
   setLoudnessTarget,
 } from "../tauri";
@@ -55,6 +56,8 @@ export const useDspStore = defineStore("dsp", () => {
   const rows = ref<EqBandRow[]>([]);
   const eqEnabled = ref(true);
   const loudnessEnabled = ref(false);
+  /** Clip protection on the shared path; off by default, like loudness. */
+  const limiterEnabled = ref(false);
   const loudnessTarget = ref(-14);
   const devices = ref<OutputDevice[]>([]);
   /** Chosen output device (exact name); null = follow the system default. */
@@ -98,6 +101,7 @@ export const useDspStore = defineStore("dsp", () => {
     const dsp = s ?? DEFAULT_DSP_SETTINGS;
     eqEnabled.value = dsp.eq_enabled;
     loudnessEnabled.value = dsp.loudness_enabled;
+    limiterEnabled.value = dsp.limiter_enabled ?? false;
     loudnessTarget.value = dsp.loudness_target;
     devices.value = devs ?? [];
     dop.value = d ?? null;
@@ -241,6 +245,11 @@ export const useDspStore = defineStore("dsp", () => {
     await setLoudnessEnabled(v);
   }
 
+  async function saveLimiterEnabled(v: boolean): Promise<void> {
+    limiterEnabled.value = v;
+    await setLimiterEnabled(v);
+  }
+
   /** Returns false when the target is out of the −40…−1 LUFS range. */
   async function saveLoudnessTarget(v: number): Promise<boolean> {
     if (!isFinite(v) || v < -40 || v > -1) return false;
@@ -253,6 +262,7 @@ export const useDspStore = defineStore("dsp", () => {
     rows,
     eqEnabled,
     loudnessEnabled,
+    limiterEnabled,
     loudnessTarget,
     devices,
     outputDevice,
@@ -279,6 +289,7 @@ export const useDspStore = defineStore("dsp", () => {
     updateRow,
     saveEqEnabled,
     saveLoudnessEnabled,
+    saveLimiterEnabled,
     saveLoudnessTarget,
   };
 });
