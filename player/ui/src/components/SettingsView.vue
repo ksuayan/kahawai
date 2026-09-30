@@ -313,6 +313,13 @@ const dopRates = computed(() =>
         <UiButton variant="icon" title="Check connection" aria-label="Check connection" @click="probe"><RefreshCw /></UiButton>
         <span :title="connectionTitle" data-testid="connection-text">{{ connectionText }}</span>
       </p>
+      <p
+        v-if="check?.kind === 'kahawai' && check.identity.source_url"
+        class="m-0 mb-2 select-text text-xs text-faint"
+        data-testid="server-source"
+      >
+        Free software (GNU AGPL v3 or later). Source code: {{ check.identity.source_url }}
+      </p>
     </SettingsSection>
 
     <SettingsSection title="Audio output">

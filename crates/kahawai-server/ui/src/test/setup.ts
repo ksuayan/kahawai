@@ -10,6 +10,13 @@ vi.mock("@tauri-apps/api/core", async () => {
   };
 });
 
+vi.mock("@tauri-apps/api/event", async () => {
+  const { tauri } = await import("@pw/test/tauri-mock");
+  return {
+    listen: (event: string, cb: (e: { payload: unknown }) => void) => tauri.listen(event, cb),
+  };
+});
+
 vi.mock("@tauri-apps/plugin-dialog", async () => {
   const { dialog } = await import("./dialog-mock");
   return { open: () => dialog.open() };

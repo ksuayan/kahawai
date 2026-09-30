@@ -1,6 +1,54 @@
+![Kahawai Player: a desk with a music player on the screen, a headphone amplifier and headphones, looking out over a Hawaiian sunset](player/ui/public/splash.webp)
+
 # Kahawai Server and Player
 
-**Kahawai Server** + **Kahawai Player** — self-hosted music streaming (Rust). Serves your own library over the LAN with HTTP Range streaming, a SQLite catalog, on-the-fly transcoding, native DSD-over-PCM, queued playlists, and background jobs — no cloud, no accounts. The v1 macOS desktop client (Tauri 2 + Vue 3) lives in `player/`.
+Kahawai lets you listen to your own music collection, the files on your computer's drives
+or on a network drive, anywhere in your home, with the care of a good hi-fi system. There
+are no accounts, subscriptions or cloud services: it runs on your own computer and your
+own home network, and your music never leaves it. It comes in two parts: **Kahawai
+Server**, which looks after your library, and **Kahawai Player**, the app you listen with.
+
+## Kahawai Server
+
+Kahawai Server catalogs the music on your drives and network shares and serves it to the
+players in your home. It reads your files but never changes them, and once it's set up it
+runs quietly in the background.
+
+- **Guided setup:** pick your music folders and the server scans them; a status window
+  shows each scan as it runs, when it ran and how long it took.
+- **Big libraries, fast:** a first scan of a large network drive reads tags first and
+  fingerprints files afterwards in the background; rescans pick up only what changed.
+- **Almost any format:** FLAC, ALAC, AAC, MP3, Ogg Vorbis, Opus, WAV, AIFF, and DSD (DSF
+  and DFF). MQA files are detected.
+- **Streams what each player needs:** the original file, or converted on the fly; DSD as
+  DoP for DACs that take it; tracks back to back without gaps.
+- **Tidy genres:** messy genre tags are mapped to a clean set for browsing and search,
+  without touching your files.
+- **Album info, if you want it:** looks up missing years and covers at MusicBrainz and the
+  Cover Art Archive. Off until you turn it on.
+- **Playlists,** including importing M3U files.
+
+## Kahawai Player
+
+Kahawai Player is the Mac app you listen with: browse your library, build a queue, and
+play it with sound quality taken seriously.
+
+- **Browse your way:** albums, artists, genres and playlists as a grid or a list, sorted
+  by artist, title or year, with fast search.
+- **Opens instantly:** the player keeps a copy of your library, so only changes come over
+  the network, and you can still browse when the server is off. It reopens where you
+  left off.
+- **A queue that remembers:** gapless playback with shuffle and repeat, kept across
+  restarts along with the position you were at.
+- **Straight to your DAC:** bit-perfect output (macOS), and native DSD over DoP, so MQA and
+  DSD reach the DAC untouched.
+- **Sound shaping when you want it:** an 8-band parametric equalizer, loudness
+  normalization, headphone crossfeed, a limiter, and an optional analog warmth stage with
+  an A/B blind test.
+- **Right-click anything:** play a track or album, jump to its artist or album, add it to
+  the queue or a playlist without duplicates, or see its full details.
+
+## Important!
 
 > **⚠️ Trusted-LAN only.** This server has **no authentication, no TLS, and no rate limiting**. Bind it to a private LAN interface (`bind = "192.168.x.x:..."`) behind your router's firewall. **Never expose it to the internet.** Auth/TLS are v2 scope (`docs/Roadmap.md`).
 
@@ -23,6 +71,8 @@ That's it. Day to day:
 | `scripts/start-client.sh` | Opens the player once the server answers. `--url http://host:8080` points it at another server; `--dev` runs the development build instead. |
 | `scripts/build-server-universal.sh` | Universal (Intel + Apple Silicon) server binary → `dist/kahawai-server`. |
 | `scripts/build-client-universal.sh` | Universal player → `dist/Kahawai Player.app` and `.dmg`. |
+| `scripts/build-combined-dmg.sh` | Both Mac apps, universal, in one disk image → `dist/Kahawai.dmg` (Kahawai Player, Kahawai Server and an Applications shortcut), for running both on the same Mac. Also leaves each app's own `.app` and `.dmg` in `dist/`. Unsigned; see the script for signing. |
+| `scripts/start-dev-combined.sh` | Development: runs the Server app and the Player together in Tauri dev mode (both UIs hot-reload, debug Rust builds); the Player starts once the server answers. Ctrl+C stops both. macOS only. |
 
 A universal build is one command but two compiles (one per architecture, merged into a single binary); the frontend is built once.
 
@@ -73,7 +123,7 @@ New here? Read top to bottom. Already know the codebase? Jump to whichever group
 - `docs/Roadmap.md` — future enhancements: possibilities, not commitments, grouped by area.
 - `docs/Backlog.md` — deferred decisions and known rough edges, with enough context to pick them back up cold; includes the `docs/v2/` specs above.
 
-Outside `docs/`: `player/README.md` (the desktop client's own setup/build README), `LICENSE`, `CLAUDE.md` (orientation for AI coding agents working in this repo), and `player/ui/src/content/notices.md` (third-party dependency licenses).
+Outside `docs/`: `player/README.md` (the desktop client's own setup/build README), `LICENSE`, `DISCLAIMER.md` (the disclaimers, shown in both apps' About and in this README), `CLAUDE.md` (orientation for AI coding agents working in this repo), and `player/ui/src/content/notices.md` (third-party dependency licenses).
 
 ## Workspace
 
@@ -85,7 +135,7 @@ Outside `docs/`: `player/README.md` (the desktop client's own setup/build README
 | `crates/kahawai-player-api` | Async `reqwest` client covering every server endpoint; reuses `kahawai-core` API types. |
 | `crates/kahawai-player-audio` | Real OS audio sinks: `CpalSink` (shared-mode PCM, all OSes) and `CoreAudioDopSink` (macOS-only exclusive hog-mode DoP). |
 | `player/` | Tauri 2 desktop client: `src-tauri/` (thin shell, excluded from the Cargo workspace — see below) + `ui/` (Vue 3 + Vite + Pinia + strict TypeScript). |
-| `scripts/` | `setup.sh` · `start-server.sh` · `start-client.sh` · `build-server-universal.sh` · `build-client-universal.sh` |
+| `scripts/` | `setup.sh` · `start-server.sh` · `start-client.sh` · `start-dev-combined.sh` · `build-server-universal.sh` · `build-client-universal.sh` · `build-combined-dmg.sh` |
 
 `player/src-tauri` is deliberately **excluded** from the Cargo workspace: it needs system WebKit/GTK dev libraries absent from some build machines. It path-depends on the four workspace crates, so all logic stays shared — only the thin shell builds separately, on the Mac.
 
@@ -172,6 +222,36 @@ Gates for every phase: `cargo check` zero warnings, full suite green, `cargo cli
 - DoP gapless is best-effort (chained WAVs) by design; the DoP client sink is macOS-only and Mac-gated for first validation.
 - Loudness pre-scan doubles first-play LAN bandwidth (documented in `player/README.md`); gain cache is in-memory.
 
+## Disclaimers
+
+- **No warranty.** Kahawai is provided "as is", without warranty of any kind, express or
+  implied, including the implied warranties of merchantability and fitness for a
+  particular purpose. To the extent permitted by law, the authors are not liable for any
+  claim, damages or other liability arising from its use (see sections 15 and 16 of the
+  GNU Affero General Public License).
+- **Your hearing and your equipment.** Set the volume with care, especially with
+  headphones. Sound shaping (equalizer, loudness, analog warmth) can raise the level, and
+  sending DSD (DoP) or bit-perfect audio to a device that doesn't support it can produce
+  loud noise. Start low. The authors are not responsible for damage to hearing or
+  equipment.
+- **Your music.** Kahawai plays the files you give it. You are responsible for having the
+  right to the music in your library; Kahawai does not share or distribute it beyond your
+  own network.
+- **Security.** The server has no authentication and no encryption. It is meant for a
+  private home network you trust; do not expose it to the internet.
+- **Third-party services.** Album info lookup, off unless you turn it on, uses MusicBrainz
+  and the Cover Art Archive under their own terms. Their data and images belong to their
+  owners, and their availability and accuracy are not guaranteed.
+- **Trademarks.** Product and company names mentioned, among them MQA, MusicBrainz, Apple,
+  macOS and Core Audio, are trademarks of their respective owners. Kahawai is an
+  independent project and is not affiliated with or endorsed by them.
+
 ## License
 
-Kahawai is licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See `LICENSE` for the full text. Third-party dependency licenses are listed in `player/ui/src/content/notices.md`.
+Copyright (c) 2026 Kyo Suayan.
+
+Kahawai is free software, licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later): you can redistribute it and/or modify it under those terms. It comes with **no warranty**. See `LICENSE` for the full text.
+
+Because the server is used over a network, the AGPL gives everyone who uses a Kahawai server that way the right to its source code too: each server names where the source is (`source_url` in `GET /api/identity`), and both apps' About dialogs show the license and where to get the source.
+
+Third-party dependency licenses are listed in each app's open-source notices: `player/ui/src/content/notices.md` (Player) and `crates/kahawai-server/ui/src/content/notices.md` (Server), generated by `scripts/gen-notices.py`.

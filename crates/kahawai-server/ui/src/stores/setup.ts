@@ -30,6 +30,8 @@ export const useSetupStore = defineStore("setup", () => {
   /** "wizard" until a usable config exists, then the minimal status view. */
   const view = ref<"wizard" | "status">("wizard");
   const step = ref(0);
+  /** The About dialog (the app menu's About item, or the About button). */
+  const aboutOpen = ref(false);
   /** Which tab the status view shows. */
   const activeTab = ref<"status" | "settings">("status");
 
@@ -368,6 +370,7 @@ export const useSetupStore = defineStore("setup", () => {
     stopServer,
     restartServer,
     identity,
+    aboutOpen,
     stoppingOther,
     loadIdentity,
     stopOtherServer,

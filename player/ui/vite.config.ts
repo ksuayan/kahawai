@@ -16,6 +16,10 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // The repository, not just this UI: the About dialog's License tab
+    // imports the top-level LICENSE (and the server UI shares the player's
+    // styles). Files outside the repository stay off-limits.
+    fs: { allow: [fileURLToPath(new URL("../..", import.meta.url))] },
   },
   build: {
     target: "esnext",

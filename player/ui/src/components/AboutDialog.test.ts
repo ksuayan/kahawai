@@ -25,12 +25,51 @@ describe("AboutDialog", () => {
     expect(content().textContent).not.toContain("{{version}}");
   });
 
+  it("shows the splash artwork above the title on the About page, not on the notices", async () => {
+    const { overlays } = await boot();
+    overlays.openAbout();
+    await settle();
+    const img = document.body.querySelector('[data-testid="about-image"]') as HTMLImageElement;
+    expect(img.getAttribute("src")).toBe("/splash.webp");
+    // Before the content (and so its title) in the document.
+    expect(img.compareDocumentPosition(content()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    (document.body.querySelector('[data-testid="about-tab-notices"]') as HTMLElement).click();
+    await settle();
+    expect(document.body.querySelector('[data-testid="about-image"]')).toBeNull();
+  });
+
+  it("states the license (no warranty, where the source is) and shows its full text", async () => {
+    const { overlays } = await boot();
+    overlays.openAbout();
+    await settle();
+    const text = content().textContent!;
+    expect(text).toContain("GNU Affero General Public License");
+    expect(text).toContain("without any warranty");
+    expect(text).toContain("https://github.com/ksuayan/kahawai");
+    expect(text).not.toContain("All rights reserved");
+    (document.body.querySelector('[data-testid="about-tab-license"]') as HTMLElement).click();
+    await settle();
+    const license = document.body.querySelector('[data-testid="about-license"]')!.textContent!;
+    expect(license).toContain("GNU AFFERO GENERAL PUBLIC LICENSE");
+    expect(license).toContain("Version 3, 19 November 2007");
+  });
+
+  it("ends the About page with the disclaimers", async () => {
+    const { overlays } = await boot();
+    overlays.openAbout();
+    await settle();
+    const headings = [...content().querySelectorAll("h2")].map((h) => h.textContent);
+    expect(headings.at(-1)).toBe("Disclaimers");
+    expect(content().textContent).toContain("No warranty.");
+    expect(content().textContent).toContain("Your hearing and your equipment.");
+  });
+
   it("has accessible tabs, switches to the notices, and reopens on About", async () => {
     const { overlays } = await boot();
     overlays.openAbout();
     await settle();
     const tabs = $$('[role="tab"]');
-    expect(tabs.map((t) => t.textContent?.trim())).toEqual(["About", "Open-source notices"]);
+    expect(tabs.map((t) => t.textContent?.trim())).toEqual(["About", "Open-source notices", "License"]);
     expect(tabs[0].getAttribute("aria-selected")).toBe("true");
     (document.body.querySelector('[data-testid="about-tab-notices"]') as HTMLElement).click();
     await settle();

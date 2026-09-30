@@ -52,3 +52,13 @@ describe("About content", () => {
     expect(html).not.toContain("<b>");
   });
 });
+
+describe("disclaimers", () => {
+  it("the README carries DISCLAIMER.md word for word (the About pages render the file itself)", async () => {
+    const readme = (await import("../../../../README.md?raw")).default as string;
+    const disclaimer = (await import("../../../../DISCLAIMER.md?raw")).default as string;
+    expect(disclaimer).toContain("## Disclaimers");
+    expect(readme).toContain(disclaimer.trim());
+  });
+});
+
