@@ -30,7 +30,7 @@ import { useSettingsStore } from "./stores/settings";
 import { useServerHealthStore } from "./stores/serverHealth";
 import { handleShortcut } from "./shortcuts";
 import { onMenuAction } from "./tauri";
-import { onCatalogUpdated } from "./api";
+import { onCatalogUpdated, onServerConnected } from "./api";
 
 const nav = useNavStore();
 const settings = useSettingsStore();
@@ -54,11 +54,20 @@ let stopMenu: (() => void) | undefined;
 // stopMenu below: unsubscribing must be reachable from onUnmounted even
 // though the subscription itself is set up after an await.
 const stopCatalogEvents = onCatalogUpdated(() => void lib.loadAll());
+// The library and playlists load once at launch. If the server wasn't up yet
+// (it started after the player, or the NAS is still booting), retry them as
+// soon as the event stream connects. Only after a failed load: a healthy
+// reconnect doesn't refetch the whole catalog.
+const stopReloadOnConnect = onServerConnected(() => {
+  if (lib.error) void lib.loadAll();
+  if (playlists.error) void playlists.reload();
+});
 const stopServerHealth = serverHealth.init();
 onUnmounted(() => {
   stopWatch?.();
   stopMenu?.();
   stopCatalogEvents();
+  stopReloadOnConnect();
   stopServerHealth();
   player.dispose();
   window.removeEventListener("keydown", onKeydown);

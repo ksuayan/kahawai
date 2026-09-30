@@ -78,6 +78,32 @@ describe("App: boot", () => {
     expect(q.index).toBe(1);
   });
 
+  it("loads the library once the server comes up, when it started after the player", async () => {
+    tauriApp();
+    mockFetch({}); // no server yet
+    const w = await bootApp();
+    expect(w.get('[role="alert"]').text()).toContain("Server unreachable");
+
+    // The server finishes starting: the event stream (retrying every 3 s) connects.
+    const calls = online();
+    latestEventSource()!.emit("open");
+    await settle();
+    await settle();
+    expect(w.text()).toContain("Stranger in the Alps");
+    expect(w.find('[role="alert"]').exists()).toBe(false);
+    expect(calls.some((c) => c.url.endsWith("/api/playlists"))).toBe(true);
+  });
+
+  it("does not refetch the catalog on a reconnect when the last load worked", async () => {
+    tauriApp();
+    const calls = online();
+    await bootApp();
+    const before = calls.filter((c) => c.url.includes("/api/albums")).length;
+    latestEventSource()!.emit("open");
+    await settle();
+    expect(calls.filter((c) => c.url.includes("/api/albums")).length).toBe(before);
+  });
+
   it("restores the queue from the saved copy even when the server is down", async () => {
     const tracks = [makeTrack({ title: "One" }), makeTrack({ title: "Two" })];
     tauriApp(makeState({ status: "stopped", track: tracks[0], queue_ids: tracks.map((t) => t.id), queue_index: 0 }));

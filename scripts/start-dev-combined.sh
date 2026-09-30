@@ -10,9 +10,11 @@
 # wizard UI dev server on :1421) — not a separate headless binary — and it
 # autostarts the real axum backend in-process once a usable config exists.
 # The player is a second Tauri app (player/, UI dev server on :1420).
-# `cargo tauri dev` is run for each, in parallel, so both get Vite hot
-# reload for their UI and fast incremental (debug) Rust builds. Ctrl+C
-# stops both.
+# `cargo tauri dev` is run for each, so both get Vite hot reload for their UI
+# and fast incremental (debug) Rust builds. The player starts once the
+# server answers /api/health (KAHAWAI_SERVER_URL, default
+# http://127.0.0.1:8080; give up after KAHAWAI_SERVER_WAIT_SECS, default 180).
+# Ctrl+C stops both.
 #
 # macOS only: kahawai-server's Tauri shell (and this workflow) don't exist
 # on other platforms — see the cfg(target_os = "macos") split in
@@ -87,6 +89,27 @@ echo "==> starting Kahawai Server wizard app in dev mode (cargo tauri dev, :1421
 ) >>"$SERVER_LOG" 2>&1 &
 server_pgid=$!
 echo "(logging to $SERVER_LOG)"
+
+# Give the server a head start: the player loads the library at launch, so
+# it should find the backend already listening. Both builds share cargo's
+# lock anyway, so waiting costs little. Not fatal on timeout: the player
+# reloads the library as soon as the server's event stream connects.
+SERVER_URL="${KAHAWAI_SERVER_URL:-http://127.0.0.1:8080}"
+WAIT_SECS="${KAHAWAI_SERVER_WAIT_SECS:-180}"
+echo "==> waiting up to ${WAIT_SECS}s for the server at ${SERVER_URL}…"
+waited=0
+until curl -sf -o /dev/null --max-time 2 "$SERVER_URL/api/health"; do
+  if ! kill -0 -- "-$server_pgid" 2>/dev/null; then
+    echo "warning: the server dev process exited; see $SERVER_LOG" >&2
+    break
+  fi
+  if (( waited >= WAIT_SECS )); then
+    echo "note: no answer from $SERVER_URL after ${WAIT_SECS}s (still building, or waiting in its setup wizard); starting the player anyway." >&2
+    break
+  fi
+  sleep 2
+  waited=$((waited + 2))
+done
 
 echo "==> starting Kahawai Player in dev mode (cargo tauri dev, :1420)…"
 cd "$ROOT/player"
