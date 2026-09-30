@@ -91,6 +91,15 @@ describe("Sound quality", () => {
     expect(w.get('[data-testid="quality-status"]').text()).toContain("isn't an external DAC");
   });
 
+  it("lists crossfeed first, on while it holds Best quality back", async () => {
+    const w = await mountSection(k15, makeState({ exclusive_blockers: ["Crossfeed"] }));
+    const legend = w.get('[data-testid="processing-legend"]').text();
+    expect(legend.indexOf("Crossfeed")).toBeLessThan(legend.indexOf("EQ"));
+    expect(w.get('[data-testid="processing-crossfeed"]').attributes("data-state")).toBe("on");
+    expect(w.get('[data-testid="quality-status"]').text()).toContain("Paused: Crossfeed is on");
+    expect(w.get('[data-testid="processing-eq"]').attributes("data-state")).toBe("off");
+  });
+
   it("names the processing that is holding Best quality back", async () => {
     const w = await mountSection(k15, makeState({ exclusive_blockers: ["EQ", "Volume"] }));
     expect(w.get('[data-testid="quality-status"]').text()).toContain("Paused: EQ and Volume are on");
@@ -99,13 +108,13 @@ describe("Sound quality", () => {
     expect(w.get('[data-testid="processing-loudness"]').attributes("data-state")).toBe("off");
   });
 
-  it("shows EQ, loudness, analog and volume as bypassed while exclusive output plays", async () => {
+  it("shows crossfeed, EQ, loudness, analog and volume as bypassed while exclusive output plays", async () => {
     const w = await mountSection(
       k15,
       makeState({ status: "playing", output_path: "pcm-exclusive", output_rate_hz: 96000, exclusive_blockers: [] }),
     );
     expect(w.get('[data-testid="quality-status"]').text()).toContain("bit-perfect at 96 kHz");
-    for (const n of ["eq", "loudness", "analog", "volume"]) {
+    for (const n of ["crossfeed", "eq", "loudness", "analog", "volume"]) {
       expect(w.get(`[data-testid="processing-${n}"]`).attributes("data-state")).toBe("bypassed");
     }
   });

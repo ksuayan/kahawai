@@ -67,7 +67,9 @@ type State = "bypassed" | "on" | "off";
 const stateOf = (name: string): State =>
   player.isExclusive ? "bypassed" : blockers.value.includes(name) ? "on" : "off";
 
+// In chain order (crossfeed runs first). Names match the engine's blockers.
 const processing = computed(() => [
+  { name: "Crossfeed", state: stateOf("Crossfeed") },
   { name: "EQ", state: stateOf("EQ") },
   { name: "Loudness", state: stateOf("Loudness") },
   { name: "Analog", state: stateOf("Analog") },
