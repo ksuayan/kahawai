@@ -36,3 +36,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 cpal = "0.16"
 ringbuf = "0.4"
 coreaudio-sys = "0.2"
+
+# The audio DSP is CPU-bound: unoptimised it is ~10x slower (the analog tests took
+# ~25 s) and can underrun the output device in dev builds. Debug info and
+# overflow checks stay on.
+[profile.dev.package.kahawai-player-core]
+opt-level = 2

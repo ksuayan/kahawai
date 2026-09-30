@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useMainScrollMemory } from "../lib/mainScroll";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import StateMessage from "../ui/StateMessage.vue";
@@ -6,6 +7,8 @@ import ViewShell from "../ui/ViewShell.vue";
 
 const lib = useLibraryStore();
 const nav = useNavStore();
+
+useMainScrollMemory("artists", () => !lib.loading);
 </script>
 
 <template>

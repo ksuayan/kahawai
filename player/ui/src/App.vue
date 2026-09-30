@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue";
+import { onMounted, onUnmounted, provide, ref } from "vue";
 import AlbumsView from "./components/AlbumsView.vue";
 import AlbumDetail from "./components/AlbumDetail.vue";
 import ArtistsView from "./components/ArtistsView.vue";
@@ -22,6 +22,7 @@ import { useAnalogStore } from "./stores/analog";
 import { useOverlaysStore } from "./stores/overlays";
 import { useToastsStore } from "./stores/toasts";
 import { describeAnalog } from "./types";
+import { MAIN_SCROLL } from "./lib/mainScroll";
 import { useDspStore } from "./stores/dsp";
 import { usePlayerStore } from "./stores/player";
 import { usePlaylistsStore } from "./stores/playlists";
@@ -33,6 +34,10 @@ import { onMenuAction } from "./tauri";
 import { onCatalogUpdated, onServerConnected } from "./api";
 
 const nav = useNavStore();
+
+// The shared scroller most views live in; views remember their place in it.
+const mainEl = ref<HTMLElement | null>(null);
+provide(MAIN_SCROLL, mainEl);
 const settings = useSettingsStore();
 const lib = useLibraryStore();
 const player = usePlayerStore();
@@ -145,7 +150,16 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
       </div>
       <div class="flex min-h-0 flex-1">
         <Sidebar />
-        <main class="min-w-0 flex-1 overflow-y-auto">
+        <!--
+          Albums is a virtualized grid with its own scroller, so <main> must not scroll
+          for it: two nested scrollbars (and a scroll position split between them) is
+          what you get otherwise. There, <main> is a plain flex column the grid fills.
+        -->
+        <main
+          ref="mainEl"
+          class="min-w-0 flex-1"
+          :class="nav.view.name === 'albums' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'"
+        >
           <AlbumsView v-if="nav.view.name === 'albums'" />
           <AlbumDetail v-else-if="nav.view.name === 'album'" :id="nav.view.id ?? 0" />
           <ArtistsView v-else-if="nav.view.name === 'artists'" />

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onUnmounted, ref, watch } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
+import { useScrollMemoryStore } from "../stores/scrollMemory";
 import StateMessage from "../ui/StateMessage.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import AlbumCard from "./AlbumCard.vue";
@@ -10,6 +11,9 @@ import { computeGridLayout, rowItemIds } from "../lib/gridwindowing";
 
 const lib = useLibraryStore();
 const nav = useNavStore();
+const scrollMemory = useScrollMemoryStore();
+/** Where this view remembers its scroll offset (see scrollMemory.ts). */
+const SCROLL_KEY = "albums";
 
 const GAP = 16;
 const MIN_CELL_WIDTH = 160;
@@ -53,6 +57,9 @@ const virtualizer = useVirtualizer(
     lanes: 1,
     overscan: OVERSCAN_ROWS,
     getItemKey: (index: number) => index,
+    // Come back to where the user left off (the view unmounts on navigation),
+    // so the first render already realizes the right rows.
+    initialOffset: () => scrollMemory.get(SCROLL_KEY),
   })),
 );
 
@@ -96,10 +103,24 @@ watch(
   scrollEl,
   (el, prevEl) => {
     if (prevEl) resizeObs.unobserve(prevEl);
-    if (el) resizeObs.observe(el);
+    if (el) {
+      resizeObs.observe(el);
+      // Put the scrollbar back once the sized inner strip is in the DOM (the
+      // browser clamps scrollTop to the content height, so it must exist).
+      void nextTick(() => {
+        const saved = scrollMemory.get(SCROLL_KEY);
+        if (saved > 0 && scrollEl.value === el) el.scrollTop = saved;
+      });
+    }
   },
   { immediate: true },
 );
+
+// Remember where the grid was scrolled to. Not while the grid is absent
+// (still loading): that would overwrite the saved offset with nothing.
+onBeforeUnmount(() => {
+  if (scrollEl.value) scrollMemory.set(SCROLL_KEY, scrollEl.value.scrollTop);
+});
 </script>
 
 <template>

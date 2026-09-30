@@ -62,14 +62,14 @@ file by relative path: `player/ui/src/stores/analog.test.ts` reads
 cargo check --workspace                                  # fast validation, works on Linux too
 cargo test --workspace                                   # hermetic: temp dirs, temp SQLite, no network
 cargo clippy --workspace --all-targets -- -D warnings     # must be clean
-cargo fmt
+cargo fmt                                                # CI runs `cargo fmt --all --check`; the toolchain is pinned in rust-toolchain.toml
 
 cd player/ui && npm test                                  # Vitest + Vue Test Utils + happy-dom
 cd crates/kahawai-server/ui && npm test                    # server wizard UI tests
 ```
 
 Gate for every change: `cargo check` zero warnings, full suite green, clippy
-clean, `cargo fmt` applied. The player's Tauri shell (`player/src-tauri`) is
+clean, `cargo fmt` applied (run it before committing — CI rejects unformatted code). The player's Tauri shell (`player/src-tauri`) is
 excluded from the workspace and needs macOS (or GTK/WebKit dev libs) to link —
 `cargo check --workspace` staying green on Linux is intentional; don't add it
 back to the workspace.

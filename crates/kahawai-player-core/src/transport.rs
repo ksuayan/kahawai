@@ -297,7 +297,10 @@ mod tests {
         );
         let t = HttpTransport::new(format!("http://{}", stub.addr));
         let mut info = t.open_stream(1, &StreamOptions::default()).expect("open");
-        let p = info.progress.clone().expect("http transport reports progress");
+        let p = info
+            .progress
+            .clone()
+            .expect("http transport reports progress");
         assert_eq!(p.content_length, Some(10));
         assert_eq!(p.fraction(), Some(0.0));
         let mut buf = [0u8; 4];
@@ -316,7 +319,10 @@ mod tests {
             offset: 50,
         };
         assert_eq!(p.fraction(), Some(0.75)); // (50 + 25) / (50 + 50)
-        let unknown = StreamProgress { content_length: None, ..p };
+        let unknown = StreamProgress {
+            content_length: None,
+            ..p
+        };
         assert_eq!(unknown.fraction(), None);
     }
 

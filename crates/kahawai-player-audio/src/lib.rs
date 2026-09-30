@@ -20,7 +20,11 @@ pub use cpal_sink::{list_output_devices, CpalSink, DeviceInfo};
 pub use kahawai_player_core::{AudioSink, OutputPath, SinkRouter};
 
 #[cfg(target_os = "macos")]
-pub use coreaudio::{device_capabilities as coreaudio_device_capabilities, device_live_state as coreaudio_device_live_state, resolved_device_name, supported_dop_rates, CoreAudioDopSink};
+pub use coreaudio::{
+    device_capabilities as coreaudio_device_capabilities,
+    device_live_state as coreaudio_device_live_state, resolved_device_name, supported_dop_rates,
+    CoreAudioDopSink,
+};
 #[cfg(not(target_os = "macos"))]
 pub use stub_dop::StubDopSink;
 

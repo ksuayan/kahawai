@@ -277,7 +277,13 @@ impl Slot {
         Self {
             cur: c,
             target: c,
-            step: Biquad { b0: 0.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 },
+            step: Biquad {
+                b0: 0.0,
+                b1: 0.0,
+                b2: 0.0,
+                a1: 0.0,
+                a2: 0.0,
+            },
             remaining: 0,
             removing: false,
             states: Vec::new(),
@@ -353,7 +359,10 @@ impl ParametricEq {
     }
 
     fn design_all(&self, bands: &[EqBand]) -> Vec<Biquad> {
-        bands.iter().map(|b| design_band(b, self.sample_rate)).collect()
+        bands
+            .iter()
+            .map(|b| design_band(b, self.sample_rate))
+            .collect()
     }
 
     pub fn set_bands(&mut self, bands: Vec<EqBand>) -> Result<(), MusicError> {
@@ -442,7 +451,9 @@ impl ParametricEq {
         if self.mix == 0.0 {
             // Coming back from bypass: stale state would ring, start clean.
             for slot in &mut self.slots {
-                slot.states.iter_mut().for_each(|s| *s = BiquadState::default());
+                slot.states
+                    .iter_mut()
+                    .for_each(|s| *s = BiquadState::default());
             }
         }
         self.primed = true;
@@ -794,7 +805,15 @@ const METER_GATE_MS: f64 = 1.174e-7;
 impl LoudnessMeter {
     pub fn new(sample_rate: u32) -> Self {
         let (pre, rlb) = k_weighting(sample_rate.max(8000));
-        Self { sample_rate, pre, rlb, pre_state: Vec::new(), rlb_state: Vec::new(), ms: 0.0, seconds: 0.0 }
+        Self {
+            sample_rate,
+            pre,
+            rlb,
+            pre_state: Vec::new(),
+            rlb_state: Vec::new(),
+            ms: 0.0,
+            seconds: 0.0,
+        }
     }
 
     /// Re-tune for a new rate and forget everything.
@@ -1040,7 +1059,10 @@ impl LoudnessNorm {
                 }
                 Ok(None) => return 0.0, // silence: nothing to normalize
                 Err(e) => {
-                    tracing::warn!(track_id, "loudness pre-scan failed ({e}); playing unnormalized");
+                    tracing::warn!(
+                        track_id,
+                        "loudness pre-scan failed ({e}); playing unnormalized"
+                    );
                     return 0.0;
                 }
             },
@@ -1048,7 +1070,12 @@ impl LoudnessNorm {
         let wanted = (self.target_lufs - lufs).clamp(MIN_LOUDNESS_GAIN_DB, MAX_LOUDNESS_GAIN_DB);
         let planned = plan_gain_db(wanted, peak, eq_boost_db);
         if planned < wanted {
-            tracing::info!(track_id, wanted, planned, "loudness gain reduced to keep the peak below full scale");
+            tracing::info!(
+                track_id,
+                wanted,
+                planned,
+                "loudness gain reduced to keep the peak below full scale"
+            );
         }
         planned
     }
@@ -1291,7 +1318,10 @@ mod tests {
         let mut out = stereo(&sine(15.0, 192_000 * 4, 192_000, 0.1));
         eq.process(&mut out, 2);
         let ratio = rms_steady(&out, 192_000 * 2 * 2) / (0.1 * std::f32::consts::FRAC_1_SQRT_2);
-        assert!((ratio - 3.98).abs() < 0.12, "expected ~x3.98 at 15 Hz, got {ratio}");
+        assert!(
+            (ratio - 3.98).abs() < 0.12,
+            "expected ~x3.98 at 15 Hz, got {ratio}"
+        );
     }
 
     #[test]
@@ -1299,7 +1329,12 @@ mod tests {
         let rate = 44_100;
         let cap = usable_freq(24_000.0, rate);
         assert!(cap < 22_050.0 * 0.95, "capped below Nyquist, got {cap}");
-        let band = |f| EqBand { band_type: EqBandType::HighShelf, freq: f, gain_db: 6.0, q: 0.7 };
+        let band = |f| EqBand {
+            band_type: EqBandType::HighShelf,
+            freq: f,
+            gain_db: 6.0,
+            q: 0.7,
+        };
         let input = stereo(&sine(5000.0, 8192, rate, 0.5));
         let (mut a, mut b) = (input.clone(), input);
         let mut eq_hi = ParametricEq::new(rate);
@@ -1309,12 +1344,24 @@ mod tests {
         eq_cap.set_bands(vec![band(cap)]).unwrap();
         eq_cap.process(&mut b, 2);
         assert!(a.iter().all(|s| s.is_finite() && s.abs() < 4.0));
-        assert_eq!(a, b, "an out-of-range frequency behaves exactly like the cap");
-        assert_eq!(usable_freq(1000.0, rate), 1000.0, "in-range bands are untouched");
+        assert_eq!(
+            a, b,
+            "an out-of-range frequency behaves exactly like the cap"
+        );
+        assert_eq!(
+            usable_freq(1000.0, rate),
+            1000.0,
+            "in-range bands are untouched"
+        );
     }
 
     fn peak_band(gain_db: f32) -> EqBand {
-        EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db, q: 1.0 }
+        EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 1000.0,
+            gain_db,
+            q: 1.0,
+        }
     }
 
     /// Largest jump between neighbouring samples of a channel.
@@ -1334,7 +1381,12 @@ mod tests {
         // the coefficients here throws the waveform by a large fraction of
         // its amplitude, while the tone itself moves only ~0.01 per sample.
         let rate = 44100;
-        let shelf = |gain_db| EqBand { band_type: EqBandType::LowShelf, freq: 150.0, gain_db, q: 0.7 };
+        let shelf = |gain_db| EqBand {
+            band_type: EqBandType::LowShelf,
+            freq: 150.0,
+            gain_db,
+            q: 0.7,
+        };
         let mut eq = ParametricEq::new(rate);
         eq.set_bands(vec![shelf(2.0)]).unwrap();
         let tone = stereo(&sine(60.0, rate as usize * 2, rate, 0.3));
@@ -1348,7 +1400,10 @@ mod tests {
         // Measure across the seam, where the change happened.
         let all = [a.clone(), b.clone()].concat();
         let step = max_step(&all[2000..], 2);
-        assert!(step < 0.02, "no click while the band changes, biggest step {step}");
+        assert!(
+            step < 0.02,
+            "no click while the band changes, biggest step {step}"
+        );
         // ...and it lands where a filter that was +12 dB all along would.
         let mut reference = ParametricEq::new(rate);
         reference.set_bands(vec![shelf(12.0)]).unwrap();
@@ -1356,7 +1411,10 @@ mod tests {
         reference.process(&mut steady, 2);
         let tail = rms_steady(&b, b.len() - 4410 * 2);
         let want = rms_steady(&steady, steady.len() - 4410 * 2);
-        assert!((tail - want).abs() / want < 0.02, "settles at +12 dB: {tail} vs {want}");
+        assert!(
+            (tail - want).abs() / want < 0.02,
+            "settles at +12 dB: {tail} vs {want}"
+        );
     }
 
     #[test]
@@ -1370,15 +1428,28 @@ mod tests {
         eq.set_bands(vec![peak_band(6.0)]).unwrap(); // add
         let mut added = tone[chunk..chunk * 2].to_vec();
         eq.process(&mut added, 2);
-        assert!(max_step(&[out.clone(), added.clone()].concat(), 2) < 0.1, "adding a band is smooth");
-        assert!(rms_steady(&added, added.len() - 4410) > 0.3 * 1.8 * 0.70, "the added band is audible");
+        assert!(
+            max_step(&[out.clone(), added.clone()].concat(), 2) < 0.1,
+            "adding a band is smooth"
+        );
+        assert!(
+            rms_steady(&added, added.len() - 4410) > 0.3 * 1.8 * 0.70,
+            "the added band is audible"
+        );
         eq.set_bands(vec![]).unwrap(); // remove
         let mut removed = tone[chunk * 2..chunk * 3].to_vec();
         let src = removed.clone();
         eq.process(&mut removed, 2);
-        assert!(max_step(&[added.clone(), removed.clone()].concat(), 2) < 0.1, "removing a band is smooth");
+        assert!(
+            max_step(&[added.clone(), removed.clone()].concat(), 2) < 0.1,
+            "removing a band is smooth"
+        );
         let n = removed.len() - 4410;
-        let err = removed[n..].iter().zip(&src[n..]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        let err = removed[n..]
+            .iter()
+            .zip(&src[n..])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
         assert!(err < 1e-3, "back to the untouched signal, error {err}");
         let mut again = tone[chunk * 3..].to_vec();
         let src = again.clone();
@@ -1398,9 +1469,16 @@ mod tests {
         eq.set_enabled(false);
         let mut fade = tone[chunk..chunk * 2].to_vec();
         eq.process(&mut fade, 2);
-        assert!(max_step(&[warm.clone(), fade.clone()].concat(), 2) < 0.2, "switching off is smooth");
+        assert!(
+            max_step(&[warm.clone(), fade.clone()].concat(), 2) < 0.2,
+            "switching off is smooth"
+        );
         let n = fade.len() - 2000;
-        assert_eq!(&fade[n..], &tone[chunk..chunk * 2][n..], "faded all the way to the dry signal");
+        assert_eq!(
+            &fade[n..],
+            &tone[chunk..chunk * 2][n..],
+            "faded all the way to the dry signal"
+        );
         let mut off = tone[chunk * 2..chunk * 3].to_vec();
         let src = off.clone();
         eq.process(&mut off, 2);
@@ -1409,7 +1487,10 @@ mod tests {
         eq.set_enabled(true);
         let mut on = tone[chunk * 3..].to_vec();
         eq.process(&mut on, 2);
-        assert!(max_step(&[off.clone(), on.clone()].concat(), 2) < 0.2, "switching on is smooth");
+        assert!(
+            max_step(&[off.clone(), on.clone()].concat(), 2) < 0.2,
+            "switching on is smooth"
+        );
     }
 
     #[test]
@@ -1421,7 +1502,10 @@ mod tests {
         let input = stereo(&sine(1000.0, 2048, 44100, 0.3));
         let mut out = input.clone();
         eq.process(&mut out, 2);
-        assert_eq!(out, input, "disabled before the first sample: untouched from sample one");
+        assert_eq!(
+            out, input,
+            "disabled before the first sample: untouched from sample one"
+        );
     }
 
     #[test]
@@ -1439,8 +1523,16 @@ mod tests {
             m.lufs().unwrap()
         };
         let (a, b, c) = (read(0.05), read(0.1), read(0.4));
-        assert!(((b - a) - 6.02).abs() < 0.1, "double the amplitude is +6 dB: {}", b - a);
-        assert!(((c - b) - 12.04).abs() < 0.1, "four times is +12 dB: {}", c - b);
+        assert!(
+            ((b - a) - 6.02).abs() < 0.1,
+            "double the amplitude is +6 dB: {}",
+            b - a
+        );
+        assert!(
+            ((c - b) - 12.04).abs() < 0.1,
+            "four times is +12 dB: {}",
+            c - b
+        );
         assert!((-30.0..-10.0).contains(&b), "a plausible LUFS reading: {b}");
         // Silence is not integrated: the reading holds.
         let before = read(0.1);
@@ -1454,7 +1546,11 @@ mod tests {
             let ms = m2.measure(&silence, 2);
             m2.integrate(ms, 4096);
         }
-        assert!((m2.lufs().unwrap() - before).abs() < 0.3, "silence does not pull the reading down ({} vs {before})", m2.lufs().unwrap());
+        assert!(
+            (m2.lufs().unwrap() - before).abs() < 0.3,
+            "silence does not pull the reading down ({} vs {before})",
+            m2.lufs().unwrap()
+        );
         assert!(m2.seconds() > 1.5);
         // K-weighting: the same amplitude reads lower at 60 Hz than at 1 kHz (the high-pass), higher at 8 kHz (the shelf).
         let at = |hz: f32| {
@@ -1703,7 +1799,9 @@ mod tests {
 
     #[test]
     fn headroom_guard_leaves_normal_material_bit_exact() {
-        let mut v: Vec<f32> = (0..1000).map(|i| ((i as f32) * 0.37).sin() * GUARD_THRESHOLD).collect();
+        let mut v: Vec<f32> = (0..1000)
+            .map(|i| ((i as f32) * 0.37).sin() * GUARD_THRESHOLD)
+            .collect();
         let before = v.clone();
         headroom_guard(&mut v);
         assert_eq!(v, before, "nothing at or below the threshold changes");
@@ -1727,7 +1825,10 @@ mod tests {
     fn headroom_guard_is_continuous_at_the_threshold() {
         let mut a = [GUARD_THRESHOLD + 1e-4];
         headroom_guard(&mut a);
-        assert!((a[0] - (GUARD_THRESHOLD + 1e-4)).abs() < 2e-4, "no step where it engages");
+        assert!(
+            (a[0] - (GUARD_THRESHOLD + 1e-4)).abs() < 2e-4,
+            "no step where it engages"
+        );
     }
 
     #[test]
@@ -1756,7 +1857,10 @@ mod tests {
         let input = vec![0.5f32; 2000]; // mono, well under the ceiling
         let out = limiter_process_all(&mut lim, &input, 1);
         assert_eq!(out.len(), input.len(), "no frame invented or dropped");
-        assert!(out.iter().all(|&s| (s - 0.5).abs() < 1e-6), "unchanged, and not delayed in the output");
+        assert!(
+            out.iter().all(|&s| (s - 0.5).abs() < 1e-6),
+            "unchanged, and not delayed in the output"
+        );
     }
 
     #[test]
@@ -1768,7 +1872,11 @@ mod tests {
         let lat = lim.latency_frames() as usize;
         let mut chunk = vec![0.1f32; lat * 3];
         lim.process(&mut chunk, 1);
-        assert_eq!(chunk.len(), lat * 2, "exactly `lookahead_frames` short on the first block");
+        assert_eq!(
+            chunk.len(),
+            lat * 2,
+            "exactly `lookahead_frames` short on the first block"
+        );
     }
 
     #[test]
@@ -1779,7 +1887,10 @@ mod tests {
         input[2000] = 3.0; // a hard, single-sample spike well past the ceiling
         let out = limiter_process_all(&mut lim, &input, 1);
         let peak = out.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-        assert!(peak <= LIMITER_CEILING + 1e-4, "peak {peak} exceeded the ceiling");
+        assert!(
+            peak <= LIMITER_CEILING + 1e-4,
+            "peak {peak} exceeded the ceiling"
+        );
     }
 
     #[test]
@@ -1804,7 +1915,12 @@ mod tests {
         let input = sine(1000.0, 4000, 44100, 0.3);
         let out = limiter_process_all(&mut lim, &input, 1);
         for i in 0..input.len() {
-            assert!((out[i] - input[i]).abs() < 1e-5, "sample {i} changed: {} vs {}", out[i], input[i]);
+            assert!(
+                (out[i] - input[i]).abs() < 1e-5,
+                "sample {i} changed: {} vs {}",
+                out[i],
+                input[i]
+            );
         }
     }
 
@@ -1821,7 +1937,10 @@ mod tests {
             let (l, r) = (out[f * 2], out[f * 2 + 1]);
             // Equal input magnitude in but for the spike itself -> equal gain -> equal output, except at the spike frame.
             if f != 2000 {
-                assert!((l - r).abs() < 1e-6, "channels diverged at frame {f}: {l} vs {r}");
+                assert!(
+                    (l - r).abs() < 1e-6,
+                    "channels diverged at frame {f}: {l} vs {r}"
+                );
             }
         }
     }
@@ -1840,9 +1959,18 @@ mod tests {
         let just_after = out[spike_at + 5].abs();
         let mid = out[spike_at + 3_000].abs();
         let much_later = out[spike_at + 90_000].abs();
-        assert!(just_after < 0.05, "should still be near fully ducked right after: {just_after}");
-        assert!(mid > just_after && mid < 0.099, "should be partway recovered, not instant: {mid}");
-        assert!((much_later - 0.1).abs() < 1e-3, "close to fully recovered after ~20 release time constants: {much_later}");
+        assert!(
+            just_after < 0.05,
+            "should still be near fully ducked right after: {just_after}"
+        );
+        assert!(
+            mid > just_after && mid < 0.099,
+            "should be partway recovered, not instant: {mid}"
+        );
+        assert!(
+            (much_later - 0.1).abs() < 1e-3,
+            "close to fully recovered after ~20 release time constants: {much_later}"
+        );
     }
 
     #[test]
@@ -1851,7 +1979,10 @@ mod tests {
         // Quiet material only: nothing to reduce.
         let mut quiet = vec![0.1f32; 4000];
         lim.process(&mut quiet, 1);
-        assert!(lim.take_reduction_db() < 1e-6, "no reduction on quiet material");
+        assert!(
+            lim.take_reduction_db() < 1e-6,
+            "no reduction on quiet material"
+        );
 
         // A spike 6 dB over the ceiling should report about 6 dB of reduction,
         // even though it only lasts one frame out of thousands — that is the
@@ -1861,7 +1992,10 @@ mod tests {
         loud[2000] = over;
         lim.process(&mut loud, 1);
         let gr = lim.take_reduction_db();
-        assert!((gr - 6.02).abs() < 0.1, "expected about 6 dB of reduction, got {gr}");
+        assert!(
+            (gr - 6.02).abs() < 0.1,
+            "expected about 6 dB of reduction, got {gr}"
+        );
     }
 
     #[test]
@@ -1871,8 +2005,15 @@ mod tests {
         let mut chunk = vec![0.2f32; lat * 3];
         lim.process(&mut chunk, 1);
         let tail = lim.flush();
-        assert_eq!(tail.len(), lat, "flush drains exactly the buffered look-ahead window");
-        assert!(tail.iter().all(|&s| (s - 0.2).abs() < 1e-6), "flushed samples are the real trailing audio");
+        assert_eq!(
+            tail.len(),
+            lat,
+            "flush drains exactly the buffered look-ahead window"
+        );
+        assert!(
+            tail.iter().all(|&s| (s - 0.2).abs() < 1e-6),
+            "flushed samples are the real trailing audio"
+        );
         // After flush, state is fresh: the next block is short by one full look-ahead window
         // again, same as a brand-new limiter.
         let mut next = vec![0.5f32; lat * 2];
@@ -1883,28 +2024,68 @@ mod tests {
     #[test]
     fn max_boost_of_no_bands_or_cuts_is_zero() {
         assert_eq!(max_boost_db(&[], 44_100), 0.0);
-        let cut = EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db: -6.0, q: 1.0 };
-        assert_eq!(max_boost_db(&[cut], 44_100), 0.0, "a cut never raises the peak");
+        let cut = EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 1000.0,
+            gain_db: -6.0,
+            q: 1.0,
+        };
+        assert_eq!(
+            max_boost_db(&[cut], 44_100),
+            0.0,
+            "a cut never raises the peak"
+        );
     }
 
     #[test]
     fn max_boost_finds_the_peak_of_a_band() {
-        let b = EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db: 6.0, q: 1.0 };
+        let b = EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 1000.0,
+            gain_db: 6.0,
+            q: 1.0,
+        };
         let m = max_boost_db(&[b], 44_100);
-        assert!((m - 6.0).abs() < 0.2, "a +6 dB peaking band boosts about 6 dB, got {m}");
+        assert!(
+            (m - 6.0).abs() < 0.2,
+            "a +6 dB peaking band boosts about 6 dB, got {m}"
+        );
     }
 
     #[test]
     fn max_boost_of_several_bands_is_the_true_worst_case_not_their_sum() {
         // The reported EQ: low shelf +2.5, peaks +1.5 and +1.5, high shelf +2.
         let bands = [
-            EqBand { band_type: EqBandType::LowShelf, freq: 100.0, gain_db: 2.5, q: 0.7 },
-            EqBand { band_type: EqBandType::Peaking, freq: 250.0, gain_db: 1.5, q: 1.0 },
-            EqBand { band_type: EqBandType::Peaking, freq: 3000.0, gain_db: 1.5, q: 1.0 },
-            EqBand { band_type: EqBandType::HighShelf, freq: 10_000.0, gain_db: 2.0, q: 0.7 },
+            EqBand {
+                band_type: EqBandType::LowShelf,
+                freq: 100.0,
+                gain_db: 2.5,
+                q: 0.7,
+            },
+            EqBand {
+                band_type: EqBandType::Peaking,
+                freq: 250.0,
+                gain_db: 1.5,
+                q: 1.0,
+            },
+            EqBand {
+                band_type: EqBandType::Peaking,
+                freq: 3000.0,
+                gain_db: 1.5,
+                q: 1.0,
+            },
+            EqBand {
+                band_type: EqBandType::HighShelf,
+                freq: 10_000.0,
+                gain_db: 2.0,
+                q: 0.7,
+            },
         ];
         let m = max_boost_db(&bands, 44_100);
-        assert!(m > 2.0 && m < 4.0, "somewhere near the strongest band, well under the sum of all four: {m}");
+        assert!(
+            m > 2.0 && m < 4.0,
+            "somewhere near the strongest band, well under the sum of all four: {m}"
+        );
     }
 
     #[test]
@@ -1912,13 +2093,20 @@ mod tests {
         // Wants +5.3 dB, but the track peaks at 0.70 FS (-3.1 dB) and the EQ adds 3.4 dB.
         let g = plan_gain_db(5.3, 0.70, 3.4);
         let out_peak = 0.70 * 10f32.powf((g + 3.4) / 20.0);
-        assert!(out_peak <= 10f32.powf(-HEADROOM_MARGIN_DB / 20.0) + 1e-4, "{out_peak}");
+        assert!(
+            out_peak <= 10f32.powf(-HEADROOM_MARGIN_DB / 20.0) + 1e-4,
+            "{out_peak}"
+        );
         assert!(g < 5.3, "reduced from what the target asked for");
     }
 
     #[test]
     fn planned_gain_is_untouched_when_there_is_room() {
         assert_eq!(plan_gain_db(2.0, 0.3, 0.0), 2.0);
-        assert_eq!(plan_gain_db(-4.0, 0.9, 3.0), -4.0, "attenuation is never held back");
+        assert_eq!(
+            plan_gain_db(-4.0, 0.9, 3.0),
+            -4.0,
+            "attenuation is never held back"
+        );
     }
 }

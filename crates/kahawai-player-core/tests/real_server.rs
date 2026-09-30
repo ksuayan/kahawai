@@ -11,27 +11,53 @@ use std::sync::{Arc, Mutex};
 
 use kahawai_core::{MusicError, Track};
 use kahawai_player_core::{
-    integrated_lufs, MAX_LOUDNESS_GAIN_DB, MIN_LOUDNESS_GAIN_DB,
-    AudioSink, BitPerfect, HttpTransport, OutputPath, PcmChunk, Player, PlayerStatus, SinkState, VecSink,
+    integrated_lufs, AudioSink, BitPerfect, HttpTransport, OutputPath, PcmChunk, Player,
+    PlayerStatus, SinkState, VecSink, MAX_LOUDNESS_GAIN_DB, MIN_LOUDNESS_GAIN_DB,
 };
 
 #[derive(Clone)]
 struct Shared(Arc<Mutex<VecSink>>);
 
 impl AudioSink for Shared {
-    fn open(&mut self, t: &Track) -> Result<(), MusicError> { self.0.lock().unwrap().open(t) }
-    fn write(&mut self, c: PcmChunk) -> Result<(), MusicError> { self.0.lock().unwrap().write(c) }
-    fn play(&mut self) -> Result<(), MusicError> { self.0.lock().unwrap().play() }
-    fn pause(&mut self) -> Result<(), MusicError> { self.0.lock().unwrap().pause() }
-    fn stop(&mut self) -> Result<(), MusicError> { self.0.lock().unwrap().stop() }
-    fn state(&self) -> SinkState { self.0.lock().unwrap().state() }
-    fn buffered_frames(&self) -> u64 { self.0.lock().unwrap().buffered_frames() }
-    fn drain(&mut self) { self.0.lock().unwrap().drain() }
-    fn exclusive_pcm_rate(&self, r: u32) -> Option<u32> { self.0.lock().unwrap().exclusive_pcm_rate(r) }
-    fn open_exclusive_pcm(&mut self, r: u32, c: u16) -> Result<(), MusicError> { self.0.lock().unwrap().open_exclusive_pcm(r, c) }
-    fn write_dop(&mut self, b: &[u8]) -> Result<(), MusicError> { self.0.lock().unwrap().write_dop(b) }
-    fn select_output_path(&mut self, p: OutputPath) { self.0.lock().unwrap().select_output_path(p) }
-    fn output_is_external_dac(&self) -> bool { true }
+    fn open(&mut self, t: &Track) -> Result<(), MusicError> {
+        self.0.lock().unwrap().open(t)
+    }
+    fn write(&mut self, c: PcmChunk) -> Result<(), MusicError> {
+        self.0.lock().unwrap().write(c)
+    }
+    fn play(&mut self) -> Result<(), MusicError> {
+        self.0.lock().unwrap().play()
+    }
+    fn pause(&mut self) -> Result<(), MusicError> {
+        self.0.lock().unwrap().pause()
+    }
+    fn stop(&mut self) -> Result<(), MusicError> {
+        self.0.lock().unwrap().stop()
+    }
+    fn state(&self) -> SinkState {
+        self.0.lock().unwrap().state()
+    }
+    fn buffered_frames(&self) -> u64 {
+        self.0.lock().unwrap().buffered_frames()
+    }
+    fn drain(&mut self) {
+        self.0.lock().unwrap().drain()
+    }
+    fn exclusive_pcm_rate(&self, r: u32) -> Option<u32> {
+        self.0.lock().unwrap().exclusive_pcm_rate(r)
+    }
+    fn open_exclusive_pcm(&mut self, r: u32, c: u16) -> Result<(), MusicError> {
+        self.0.lock().unwrap().open_exclusive_pcm(r, c)
+    }
+    fn write_dop(&mut self, b: &[u8]) -> Result<(), MusicError> {
+        self.0.lock().unwrap().write_dop(b)
+    }
+    fn select_output_path(&mut self, p: OutputPath) {
+        self.0.lock().unwrap().select_output_path(p)
+    }
+    fn output_is_external_dac(&self) -> bool {
+        true
+    }
 }
 
 struct Stats {
@@ -60,10 +86,22 @@ fn stats(bytes: &[u8]) -> Stats {
     let mean_abs = |v: &[f64]| v.iter().map(|x| x.abs()).sum::<f64>() / v.len().max(1) as f64;
     let rms = (l.iter().map(|x| x * x).sum::<f64>() / n.max(1) as f64).sqrt();
     let peak = l.iter().chain(r.iter()).fold(0.0f64, |a, x| a.max(x.abs()));
-    let full = l.iter().chain(r.iter()).filter(|x| x.abs() > 0.99).count() as f64 / (2 * n).max(1) as f64;
-    let hf = l.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>() / (n.max(2) - 1) as f64 / mean_abs(&l).max(1e-12);
-    let (sl, sr, slr) = l.iter().zip(&r).fold((0.0, 0.0, 0.0), |a, (x, y)| (a.0 + x * x, a.1 + y * y, a.2 + x * y));
-    Stats { frames: n, rms_db: 20.0 * rms.max(1e-12).log10(), peak, full_scale_frac: full, hf_ratio: hf, lr_corr: slr / (sl * sr).sqrt().max(1e-12) }
+    let full =
+        l.iter().chain(r.iter()).filter(|x| x.abs() > 0.99).count() as f64 / (2 * n).max(1) as f64;
+    let hf = l.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>()
+        / (n.max(2) - 1) as f64
+        / mean_abs(&l).max(1e-12);
+    let (sl, sr, slr) = l.iter().zip(&r).fold((0.0, 0.0, 0.0), |a, (x, y)| {
+        (a.0 + x * x, a.1 + y * y, a.2 + x * y)
+    });
+    Stats {
+        frames: n,
+        rms_db: 20.0 * rms.max(1e-12).log10(),
+        peak,
+        full_scale_frac: full,
+        hf_ratio: hf,
+        lr_corr: slr / (sl * sr).sqrt().max(1e-12),
+    }
 }
 
 #[test]
@@ -91,7 +129,13 @@ fn consecutive_tracks_from_a_real_server_have_the_same_character() {
     }
     let all = sink.0.lock().unwrap().exclusive_bytes.clone();
     let snap = p.snapshot();
-    println!("final status {:?} error {:?} notice {:?} path {:?}", p.status(), snap.error, snap.notice, snap.output_path);
+    println!(
+        "final status {:?} error {:?} notice {:?} path {:?}",
+        p.status(),
+        snap.error,
+        snap.notice,
+        snap.output_path
+    );
     let cut = boundary.expect("reached track 2") / 6 * 6;
     let (t1, t2) = all.split_at(cut);
     let (a, b) = (stats(t1), stats(t2));
@@ -101,12 +145,16 @@ fn consecutive_tracks_from_a_real_server_have_the_same_character() {
         let mut inter = Vec::with_capacity(n * 2);
         for f in 0..n * 2 {
             let o = f * 3;
-            inter.push((i32::from_le_bytes([0, bytes[o], bytes[o + 1], bytes[o + 2]]) >> 8) as f32 / 8_388_608.0);
+            inter.push(
+                (i32::from_le_bytes([0, bytes[o], bytes[o + 1], bytes[o + 2]]) >> 8) as f32
+                    / 8_388_608.0,
+            );
         }
         if let Some(lufs) = integrated_lufs(&inter, 2, 44_100) {
             let gain_db = (-14.0 - lufs).clamp(MIN_LOUDNESS_GAIN_DB, MAX_LOUDNESS_GAIN_DB);
             let g = 10f32.powf(gain_db / 20.0);
-            let over = inter.iter().filter(|x| (x.abs() * g) > 1.0).count() as f64 / inter.len() as f64;
+            let over =
+                inter.iter().filter(|x| (x.abs() * g) > 1.0).count() as f64 / inter.len() as f64;
             let peak = inter.iter().fold(0.0f32, |a, x| a.max(x.abs())) * g;
             println!("{name}: {lufs:.1} LUFS -> gain {gain_db:+.1} dB -> peak {peak:.2} FS, {:.3}% of samples clipped without a limiter", over * 100.0);
         }
@@ -132,7 +180,12 @@ fn shared_path_with_the_users_eq_and_loudness_clips_track_two() {
     let sink = Shared(Arc::new(Mutex::new(VecSink::new())));
     let mut p = Player::new(Box::new(sink.clone()), Box::new(HttpTransport::new(url)));
     p.set_bit_perfect(BitPerfect::Off);
-    let b = |t, f, g, q| EqBand { band_type: t, freq: f, gain_db: g, q };
+    let b = |t, f, g, q| EqBand {
+        band_type: t,
+        freq: f,
+        gain_db: g,
+        q,
+    };
     p.set_eq_bands(vec![
         b(EqBandType::LowShelf, 100.0, 2.5, 0.7),
         b(EqBandType::Peaking, 250.0, 1.5, 1.0),

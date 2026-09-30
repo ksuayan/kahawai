@@ -9,8 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use kahawai_core::{api::StreamFormat, format::AudioFormat, MusicError, Track};
 use kahawai_player_core::{
-    AnalogFlavour, AnalogSettings, AntiAliasChoice, CrossfeedPreset, CrossfeedSettings, resolve_format, valid_formats, AudioSink, BitPerfect, EngineController, EqBand, EqBandType,
-    OutputPath, PcmChunk, Player, PlayerStatus, StreamInfo, StreamOptions, Transport, VecSink, LIMITER_CEILING,
+    resolve_format, valid_formats, AnalogFlavour, AnalogSettings, AntiAliasChoice, AudioSink,
+    BitPerfect, CrossfeedPreset, CrossfeedSettings, EngineController, EqBand, EqBandType,
+    OutputPath, PcmChunk, Player, PlayerStatus, StreamInfo, StreamOptions, Transport, VecSink,
+    LIMITER_CEILING,
 };
 
 // ---------------------------------------------------------------------------
@@ -599,7 +601,12 @@ fn resolve_format_dsd_story_matrix() {
     // Under Native, DSD tracks ignore a *global* format — a stray
     // "Passthrough" must not silently defeat the DSD setting...
     assert_eq!(
-        resolve_format(&dsf, Some(StreamFormat::Passthrough), None, DsdStory::Native),
+        resolve_format(
+            &dsf,
+            Some(StreamFormat::Passthrough),
+            None,
+            DsdStory::Native
+        ),
         StreamFormat::Dop,
         "global format does not apply to DSD under Native"
     );
@@ -661,18 +668,31 @@ fn auto_goes_native_on_a_known_dsd_dac_and_converts_elsewhere() {
     known.sink.0.lock().unwrap().device = Some("FIIO K15 ".into());
     known.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
     let snap = known.player.snapshot();
-    assert_eq!(snap.format, Some(StreamFormat::Dop), "known DAC: native DoP");
+    assert_eq!(
+        snap.format,
+        Some(StreamFormat::Dop),
+        "known DAC: native DoP"
+    );
     assert_eq!(snap.output_path, OutputPath::Dop);
 
     let mut unknown = DopHarness::new(Some(DOP_RATE));
     unknown.sink.0.lock().unwrap().device = Some("MacBook Pro Speakers".into());
-    unknown.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    unknown
+        .player
+        .play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
     assert_eq!(unknown.player.snapshot().format, Some(StreamFormat::Flac));
-    assert!(unknown.player.snapshot().notice.is_none(), "a choice, not a failure");
+    assert!(
+        unknown.player.snapshot().notice.is_none(),
+        "a choice, not a failure"
+    );
 
     let mut none = DopHarness::new(Some(DOP_RATE));
     none.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
-    assert_eq!(none.player.snapshot().format, Some(StreamFormat::Flac), "unknown device is safe");
+    assert_eq!(
+        none.player.snapshot().format,
+        Some(StreamFormat::Flac),
+        "unknown device is safe"
+    );
 }
 
 #[test]
@@ -687,7 +707,8 @@ fn auto_honors_a_device_the_user_confirmed() {
 #[test]
 fn a_stray_global_format_does_not_defeat_native_dsd() {
     let mut h = DopHarness::new(Some(DOP_RATE));
-    h.player.set_dsd_story(kahawai_player_core::DsdStory::Native);
+    h.player
+        .set_dsd_story(kahawai_player_core::DsdStory::Native);
     h.player.set_global_format(Some(StreamFormat::Passthrough));
     h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
     assert_eq!(h.player.snapshot().format, Some(StreamFormat::Dop));
@@ -723,7 +744,10 @@ fn dop_open_failure_falls_back_to_flac_and_releases_the_sink() {
     assert_eq!(snap.format, Some(StreamFormat::Flac));
     assert!(snap.error.is_none());
     assert!(
-        snap.notice.as_deref().unwrap_or("").contains("couldn't be set up for native DSD"),
+        snap.notice
+            .as_deref()
+            .unwrap_or("")
+            .contains("couldn't be set up for native DSD"),
         "notice says why in plain words: {:?}",
         snap.notice
     );
@@ -1215,7 +1239,15 @@ fn dop_bypasses_dsp_entirely() {
         }])
         .expect("valid band");
     h.player.set_eq_enabled(true);
-    h.player.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 1.0, mix: 1.0, output_db: 6.0, auto_gain: false, ..Default::default() });
+    h.player.set_analog(AnalogSettings {
+        enabled: true,
+        flavour: AnalogFlavour::WarmTriode,
+        drive: 1.0,
+        mix: 1.0,
+        output_db: 6.0,
+        auto_gain: false,
+        ..Default::default()
+    });
     h.player.set_loudness_enabled(true);
     h.player.set_volume(0.0);
     h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
@@ -1263,14 +1295,22 @@ fn eq_is_tuned_to_the_device_rate_when_the_stream_is_resampled() {
                 }])
                 .expect("valid band");
         }
-        h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+        h.player
+            .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
         h.pump_until_done(100);
-        assert_eq!(h.sink.0.lock().unwrap().sample_rate, Some(48_000), "resampled to the device rate");
+        assert_eq!(
+            h.sink.0.lock().unwrap().sample_rate,
+            Some(48_000),
+            "resampled to the device rate"
+        );
         let s = h.samples();
         rms(&s[s.len() / 2..]) // steady state, after the filter settles
     };
     let ratio = run(true) / run(false);
-    assert!((ratio - 4.0).abs() < 0.6, "expected ~x4 at the tone, got {ratio}");
+    assert!(
+        (ratio - 4.0).abs() < 0.6,
+        "expected ~x4 at the tone, got {ratio}"
+    );
 }
 
 #[test]
@@ -1281,28 +1321,60 @@ fn analog_stage_colours_the_pcm_path_and_is_off_by_default() {
         if let Some(a) = analog {
             h.player.set_analog(a);
         }
-        h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+        h.player
+            .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
         h.pump_until_done(100);
         h.samples()
     };
     let dry = run(None);
-    let warm = run(Some(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 0.8, mix: 1.0, output_db: 0.0, auto_gain: false, ..Default::default() }));
-    assert_eq!(run(Some(AnalogSettings::default())), dry, "default settings leave the audio untouched");
+    let warm = run(Some(AnalogSettings {
+        enabled: true,
+        flavour: AnalogFlavour::WarmTriode,
+        drive: 0.8,
+        mix: 1.0,
+        output_db: 0.0,
+        auto_gain: false,
+        ..Default::default()
+    }));
+    assert_eq!(
+        run(Some(AnalogSettings::default())),
+        dry,
+        "default settings leave the audio untouched"
+    );
     assert_eq!(warm.len(), dry.len(), "the stage adds no samples");
-    let diff = warm.iter().zip(&dry).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
-    assert!(diff > 0.01, "enabled: the audio is coloured (max difference {diff})");
+    let diff = warm
+        .iter()
+        .zip(&dry)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f32::max);
+    assert!(
+        diff > 0.01,
+        "enabled: the audio is coloured (max difference {diff})"
+    );
 }
 
 #[test]
 fn snapshot_reports_the_analog_plan_only_while_it_is_on_and_playing() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100 * 5)]);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 5000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 5000)], 0);
     h.player.pump();
-    assert_eq!(h.player.snapshot().analog_plan, None, "off: nothing to report");
-    h.player.set_analog(AnalogSettings { enabled: true, antialias: AntiAliasChoice::X2Adaa, ..AnalogSettings::default() });
+    assert_eq!(
+        h.player.snapshot().analog_plan,
+        None,
+        "off: nothing to report"
+    );
+    h.player.set_analog(AnalogSettings {
+        enabled: true,
+        antialias: AntiAliasChoice::X2Adaa,
+        ..AnalogSettings::default()
+    });
     h.player.pump();
-    assert_eq!(h.player.snapshot().analog_plan.as_deref(), Some("2x oversampling + ADAA, 0.7 ms latency"));
+    assert_eq!(
+        h.player.snapshot().analog_plan.as_deref(),
+        Some("2x oversampling + ADAA, 0.7 ms latency")
+    );
     h.player.stop();
     assert_eq!(h.player.snapshot().analog_plan, None, "nothing playing");
 }
@@ -1313,34 +1385,74 @@ fn the_level_meter_reports_what_the_analog_stage_does_to_the_loudness() {
         let mut h = Harness::new(None);
         h.stub.add(1, &[(300.0, 44100 * 4)]);
         h.player.set_analog(a);
-        h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+        h.player
+            .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
         // Pump most of the way (not to the end, so the snapshot still has a stream).
         for _ in 0..40 {
             h.player.pump();
         }
         (h.player.snapshot(), h.samples())
     };
-    let loud = AnalogSettings { enabled: true, flavour: AnalogFlavour::Tube2a3, drive: 1.0, mix: 1.0, output_db: 0.0, auto_gain: false, sag: 0.0, transformer: 0.0, ..Default::default() };
+    let loud = AnalogSettings {
+        enabled: true,
+        flavour: AnalogFlavour::Tube2a3,
+        drive: 1.0,
+        mix: 1.0,
+        output_db: 0.0,
+        auto_gain: false,
+        sag: 0.0,
+        transformer: 0.0,
+        ..Default::default()
+    };
     let (snap, out) = run(loud);
-    let lvl = snap.analog_level.expect("measured after a couple of seconds");
-    assert!(lvl.seconds > 1.0, "seconds behind the reading: {}", lvl.seconds);
+    let lvl = snap
+        .analog_level
+        .expect("measured after a couple of seconds");
+    assert!(
+        lvl.seconds > 1.0,
+        "seconds behind the reading: {}",
+        lvl.seconds
+    );
     assert!((lvl.output_lufs - lvl.input_lufs - lvl.delta_db).abs() < 1e-3);
     // The reading agrees with an independent measurement of what reached the sink.
-    let want = kahawai_player_core::integrated_lufs(&out[out.len() / 4 * 2..], 2, 44_100).expect("audio");
-    assert!((lvl.output_lufs - want).abs() < 1.5, "output {:.1} LUFS vs offline {:.1}", lvl.output_lufs, want);
-    assert!(lvl.peak_dbfs < 3.0 && lvl.peak_dbfs > -30.0, "a sensible peak: {}", lvl.peak_dbfs);
+    let want =
+        kahawai_player_core::integrated_lufs(&out[out.len() / 4 * 2..], 2, 44_100).expect("audio");
+    assert!(
+        (lvl.output_lufs - want).abs() < 1.5,
+        "output {:.1} LUFS vs offline {:.1}",
+        lvl.output_lufs,
+        want
+    );
+    assert!(
+        lvl.peak_dbfs < 3.0 && lvl.peak_dbfs > -30.0,
+        "a sensible peak: {}",
+        lvl.peak_dbfs
+    );
     // Trim the output and the delta follows one for one.
-    let (snap2, _) = run(AnalogSettings { output_db: -6.0, ..loud });
+    let (snap2, _) = run(AnalogSettings {
+        output_db: -6.0,
+        ..loud
+    });
     let d = snap2.analog_level.unwrap().delta_db - lvl.delta_db;
-    assert!((d + 6.0).abs() < 0.15, "-6 dB of output trim moves the level by {d:.2} dB");
+    assert!(
+        (d + 6.0).abs() < 0.15,
+        "-6 dB of output trim moves the level by {d:.2} dB"
+    );
     // With the mix at zero the stage passes the dry signal: no change.
     let (snap3, _) = run(AnalogSettings { mix: 0.0, ..loud });
-    assert!(snap3.analog_level.unwrap().delta_db.abs() < 0.3, "mix 0 changes nothing");
+    assert!(
+        snap3.analog_level.unwrap().delta_db.abs() < 0.3,
+        "mix 0 changes nothing"
+    );
     // Off (dry), the meter still reads — A/B level-matching needs a peak and
     // loudness reading on the dry slot too — but the delta is ~0 by construction.
     let (off, _) = run(AnalogSettings::default());
     let off_lvl = off.analog_level.expect("dry slot is still metered");
-    assert!(off_lvl.delta_db.abs() < 0.05, "dry: input and output loudness match ({})", off_lvl.delta_db);
+    assert!(
+        off_lvl.delta_db.abs() < 0.05,
+        "dry: input and output loudness match ({})",
+        off_lvl.delta_db
+    );
 }
 
 #[test]
@@ -1351,15 +1463,28 @@ fn crossfeed_is_off_by_default_and_changes_the_pcm_path_when_on() {
         if let Some(c) = crossfeed {
             h.player.set_crossfeed(c);
         }
-        h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+        h.player
+            .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
         h.pump_until_done(100);
         h.samples()
     };
     let dry = run(None);
-    assert_eq!(run(Some(CrossfeedSettings::default())), dry, "off: the audio is untouched");
-    let wet = run(Some(CrossfeedSettings { enabled: true, preset: CrossfeedPreset::Meier, ..Default::default() }));
+    assert_eq!(
+        run(Some(CrossfeedSettings::default())),
+        dry,
+        "off: the audio is untouched"
+    );
+    let wet = run(Some(CrossfeedSettings {
+        enabled: true,
+        preset: CrossfeedPreset::Meier,
+        ..Default::default()
+    }));
     assert_eq!(wet.len(), dry.len(), "the stage adds no samples");
-    let diff = wet.iter().zip(&dry).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+    let diff = wet
+        .iter()
+        .zip(&dry)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f32::max);
     assert!(diff > 1e-3, "on: the audio changes (max difference {diff})");
 }
 
@@ -1369,20 +1494,41 @@ fn crossfeed_settings_are_saved_clamped_and_old_files_default_to_off() {
     let _ = std::fs::remove_dir_all(&dir);
     let settings_path = dir.join("settings.json");
     let url_lock = Arc::new(std::sync::RwLock::new("http://stub".to_string()));
-    let ctl = EngineController::with_transport(Box::new(VecSink::new()), Box::new(StubTransport::new(None)), url_lock, settings_path.clone());
-    ctl.set_crossfeed(CrossfeedSettings { enabled: true, preset: CrossfeedPreset::Custom, cutoff_hz: 900.0, feed_db: 99.0 });
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("saved")).expect("json");
+    let ctl = EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(StubTransport::new(None)),
+        url_lock,
+        settings_path.clone(),
+    );
+    ctl.set_crossfeed(CrossfeedSettings {
+        enabled: true,
+        preset: CrossfeedPreset::Custom,
+        cutoff_hz: 900.0,
+        feed_db: 99.0,
+    });
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("saved"))
+            .expect("json");
     assert_eq!(v["dsp"]["crossfeed"]["enabled"], true);
     assert_eq!(v["dsp"]["crossfeed"]["preset"], "custom");
     assert_eq!(v["dsp"]["crossfeed"]["cutoff_hz"], 900.0);
-    assert_eq!(v["dsp"]["crossfeed"]["feed_db"], 15.0, "clamped before saving");
+    assert_eq!(
+        v["dsp"]["crossfeed"]["feed_db"], 15.0,
+        "clamped before saving"
+    );
     // Not finite: ignored, the saved value stays.
-    ctl.set_crossfeed(CrossfeedSettings { feed_db: f32::NAN, ..Default::default() });
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    ctl.set_crossfeed(CrossfeedSettings {
+        feed_db: f32::NAN,
+        ..Default::default()
+    });
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     assert_eq!(v["dsp"]["crossfeed"]["enabled"], true);
 
-    let old = r#"{"eq_bands":[],"eq_enabled":true,"loudness_enabled":false,"loudness_target":-14.0}"#;
-    let dsp: kahawai_player_core::DspSettings = serde_json::from_str(old).expect("old dsp block parses");
+    let old =
+        r#"{"eq_bands":[],"eq_enabled":true,"loudness_enabled":false,"loudness_target":-14.0}"#;
+    let dsp: kahawai_player_core::DspSettings =
+        serde_json::from_str(old).expect("old dsp block parses");
     assert_eq!(dsp.crossfeed, CrossfeedSettings::default());
     assert!(!dsp.crossfeed.enabled);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1394,9 +1540,24 @@ fn analog_settings_persist_and_old_files_default_to_off() {
     let _ = std::fs::remove_dir_all(&dir);
     let settings_path = dir.join("settings.json");
     let url_lock = Arc::new(std::sync::RwLock::new("http://stub".to_string()));
-    let ctl = EngineController::with_transport(Box::new(VecSink::new()), Box::new(StubTransport::new(None)), url_lock, settings_path.clone());
-    ctl.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::SolidState, drive: 9.0, mix: 0.25, output_db: -2.0, auto_gain: true, ..Default::default() });
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("saved")).expect("json");
+    let ctl = EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(StubTransport::new(None)),
+        url_lock,
+        settings_path.clone(),
+    );
+    ctl.set_analog(AnalogSettings {
+        enabled: true,
+        flavour: AnalogFlavour::SolidState,
+        drive: 9.0,
+        mix: 0.25,
+        output_db: -2.0,
+        auto_gain: true,
+        ..Default::default()
+    });
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("saved"))
+            .expect("json");
     assert_eq!(v["dsp"]["analog"]["enabled"], true);
     assert_eq!(v["dsp"]["analog"]["flavour"], "solid_state");
     assert_eq!(v["dsp"]["analog"]["drive"], 1.0, "clamped before saving");
@@ -1405,7 +1566,8 @@ fn analog_settings_persist_and_old_files_default_to_off() {
     // A settings file from before this stage existed still loads, with the stage off.
     let old = r#"{"server_url":"http://x","dsp":{"eq_bands":[],"eq_enabled":true,"loudness_enabled":false,"loudness_target":-14.0}}"#;
     let parsed: serde_json::Value = serde_json::from_str(old).unwrap();
-    let dsp: kahawai_player_core::DspSettings = serde_json::from_value(parsed["dsp"].clone()).expect("old dsp block parses");
+    let dsp: kahawai_player_core::DspSettings =
+        serde_json::from_value(parsed["dsp"].clone()).expect("old dsp block parses");
     assert!(!dsp.analog.enabled);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1697,22 +1859,116 @@ fn pausing_saves_the_playhead_in_queue_json() {
     let mut h = Harness::new(None);
     h.player.set_queue_path(Some(qp.clone()));
     h.stub.add(1, &[(440.0, 44100 * 10)]);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
     while h.player.snapshot().position_ms < 500 {
         h.player.pump();
     }
     let saved = || {
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&qp).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&qp).unwrap()).unwrap();
         v["position_ms"].as_u64().unwrap()
     };
     h.player.pause();
-    assert!(saved() >= 500, "pause saves how far into the track playback was");
+    assert!(
+        saved() >= 500,
+        "pause saves how far into the track playback was"
+    );
     h.player.resume();
     h.player.pump();
     h.player.persist_position();
-    assert!(saved() >= 500, "the periodic save keeps it current while playing");
+    assert!(
+        saved() >= 500,
+        "the periodic save keeps it current while playing"
+    );
     h.player.stop();
     assert_eq!(saved(), 0, "an explicit stop forgets the position");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Playhead saved in `queue.json`, in ms.
+fn saved_position_ms(dir: &std::path::Path) -> u64 {
+    let raw = std::fs::read_to_string(dir.join("queue.json")).expect("queue.json readable");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+    v["position_ms"].as_u64().expect("position_ms")
+}
+
+/// A reader that hands out its bytes slowly, so a stub track keeps playing
+/// for a couple of seconds instead of decoding into the [`VecSink`] at once.
+struct Throttled(Box<dyn std::io::Read + Send>);
+
+impl std::io::Read for Throttled {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(Duration::from_millis(5));
+        let n = buf.len().min(4096);
+        self.0.read(&mut buf[..n])
+    }
+}
+
+/// [`StubTransport`] with paced streams.
+struct SlowTransport(StubTransport);
+
+impl Transport for SlowTransport {
+    fn open_stream(&self, track_id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+        let mut info = self.0.open_stream(track_id, opts)?;
+        info.reader = Box::new(Throttled(info.reader));
+        Ok(info)
+    }
+}
+
+/// A controller that is still playing track 1 well after it starts (about
+/// 30 s of audio, delivered at several times real time), with the queue file
+/// in the returned temp dir.
+fn playing_controller(dir_suffix: &str) -> (EngineController, std::path::PathBuf) {
+    let stub = StubTransport::new(None);
+    stub.add(1, &[(440.0, (RATE as usize) * 30)]);
+    let dir = std::env::temp_dir().join(format!("kahawai-player-core-{dir_suffix}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ctl = EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(SlowTransport(stub)),
+        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
+        dir.join("settings.json"),
+    );
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| {
+        ctl.snapshot().status == PlayerStatus::Playing && ctl.snapshot().position_ms >= 200
+    });
+    (ctl, dir)
+}
+
+#[test]
+fn shutting_down_while_playing_saves_the_playhead() {
+    // The periodic save runs every 5 s, so a quit in between used to lose up
+    // to that much position. `shutdown` must write the live playhead first.
+    let (ctl, dir) = playing_controller("shutdown-saves");
+    assert_eq!(
+        saved_position_ms(&dir),
+        0,
+        "no periodic save has happened yet"
+    );
+    ctl.shutdown();
+    let saved = saved_position_ms(&dir);
+    assert!(
+        saved >= 200,
+        "shutdown saved the live playhead, got {saved} ms"
+    );
+    ctl.shutdown(); // a second call is harmless
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dropping_the_controller_while_playing_saves_the_playhead() {
+    // Same guarantee when the controller is simply dropped (no explicit call).
+    let (ctl, dir) = playing_controller("drop-saves");
+    assert_eq!(
+        saved_position_ms(&dir),
+        0,
+        "no periodic save has happened yet"
+    );
+    drop(ctl);
+    let saved = saved_position_ms(&dir);
+    assert!(saved >= 200, "drop saved the live playhead, got {saved} ms");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1721,25 +1977,42 @@ fn restored_queue_resumes_from_its_saved_position_once() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100 * 40)]);
     h.stub.add(2, &[(440.0, 44100 * 40)]);
-    let tracks = vec![track(1, AudioFormat::Wav, 40_000), track(2, AudioFormat::Wav, 40_000)];
+    let tracks = vec![
+        track(1, AudioFormat::Wav, 40_000),
+        track(2, AudioFormat::Wav, 40_000),
+    ];
 
-    h.player.restore_queue(tracks.clone(), 1, RepeatMode::All, true, 30_000);
+    h.player
+        .restore_queue(tracks.clone(), 1, RepeatMode::All, true, 30_000);
     let snap = h.player.snapshot();
-    assert_eq!(snap.status, PlayerStatus::Stopped, "restore never starts playback");
+    assert_eq!(
+        snap.status,
+        PlayerStatus::Stopped,
+        "restore never starts playback"
+    );
     assert_eq!(snap.repeat, RepeatMode::All);
     assert!(snap.shuffle);
-    assert_eq!(snap.position_ms, 30_000, "the idle snapshot shows where it will resume");
+    assert_eq!(
+        snap.position_ms, 30_000,
+        "the idle snapshot shows where it will resume"
+    );
     assert_eq!(snap.duration_ms, Some(40_000));
 
     h.player.resume();
     assert_eq!(h.player.status(), PlayerStatus::Playing);
-    assert!(h.player.snapshot().position_ms >= 30_000, "resumed at the saved playhead");
+    assert!(
+        h.player.snapshot().position_ms >= 30_000,
+        "resumed at the saved playhead"
+    );
 
     // Only the first resume uses it: stop, then play again from the top.
     h.player.stop();
     assert_eq!(h.player.snapshot().position_ms, 0);
     h.player.resume();
-    assert!(h.player.snapshot().position_ms < 5_000, "a later resume starts the track over");
+    assert!(
+        h.player.snapshot().position_ms < 5_000,
+        "a later resume starts the track over"
+    );
 }
 
 #[test]
@@ -1747,13 +2020,20 @@ fn opening_another_track_discards_the_restored_position() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100 * 40)]);
     h.stub.add(2, &[(440.0, 44100 * 40)]);
-    let tracks = vec![track(1, AudioFormat::Wav, 40_000), track(2, AudioFormat::Wav, 40_000)];
-    h.player.restore_queue(tracks.clone(), 0, RepeatMode::Off, false, 30_000);
+    let tracks = vec![
+        track(1, AudioFormat::Wav, 40_000),
+        track(2, AudioFormat::Wav, 40_000),
+    ];
+    h.player
+        .restore_queue(tracks.clone(), 0, RepeatMode::Off, false, 30_000);
     h.player.play_queue(tracks, 1); // the user picked something else
     assert!(h.player.snapshot().position_ms < 5_000);
     h.player.stop();
     h.player.resume();
-    assert!(h.player.snapshot().position_ms < 5_000, "the old position must not come back");
+    assert!(
+        h.player.snapshot().position_ms < 5_000,
+        "the old position must not come back"
+    );
 }
 
 #[test]
@@ -1800,7 +2080,11 @@ fn append_and_insert_next_do_not_disturb_playback() {
 fn dsd_story_pref_round_trips_through_settings_file() {
     let (ctl, dir) = stub_controller("dsd", vec![]);
     let (story, fmt) = ctl.playback_prefs();
-    assert_eq!(story, DsdStory::Auto, "default: native on known DACs, convert elsewhere");
+    assert_eq!(
+        story,
+        DsdStory::Auto,
+        "default: native on known DACs, convert elsewhere"
+    );
     assert_eq!(fmt, None);
     ctl.set_dsd_story(DsdStory::Native);
     std::thread::sleep(Duration::from_millis(100));
@@ -1952,7 +2236,15 @@ fn bit_perfect_ignores_volume_eq_and_loudness() {
         }])
         .expect("valid band");
     h.player.set_eq_enabled(true);
-    h.player.set_analog(AnalogSettings { enabled: true, flavour: AnalogFlavour::WarmTriode, drive: 1.0, mix: 1.0, output_db: 6.0, auto_gain: false, ..Default::default() });
+    h.player.set_analog(AnalogSettings {
+        enabled: true,
+        flavour: AnalogFlavour::WarmTriode,
+        drive: 1.0,
+        mix: 1.0,
+        output_db: 6.0,
+        auto_gain: false,
+        ..Default::default()
+    });
     h.player.set_loudness_enabled(true);
     h.stub.add(1, &[(440.0, 8820)]);
     h.player
@@ -2145,12 +2437,19 @@ fn a_write_failure_on_the_exclusive_device_continues_on_shared_output_with_a_not
         .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
     h.sink.0.lock().unwrap().exclusive_open = None; // device vanished
     h.player.pump();
-    assert_eq!(h.player.status(), PlayerStatus::Playing, "carries on rather than stopping");
+    assert_eq!(
+        h.player.status(),
+        PlayerStatus::Playing,
+        "carries on rather than stopping"
+    );
     let snap = h.player.snapshot();
     assert!(snap.error.is_none());
     assert_eq!(snap.output_path, OutputPath::Pcm, "on shared output now");
     assert!(
-        snap.notice.as_deref().unwrap_or("").contains("exclusive output stopped"),
+        snap.notice
+            .as_deref()
+            .unwrap_or("")
+            .contains("exclusive output stopped"),
         "{:?}",
         snap.notice
     );
@@ -2166,7 +2465,11 @@ fn the_preference_persists_across_controllers() {
     let path = dir.join("engine-settings.json");
     {
         let c = EngineController::new(Box::new(VecSink::new()), path.clone());
-        assert_eq!(c.bit_perfect(), BitPerfect::Auto, "follows the quality mode by default");
+        assert_eq!(
+            c.bit_perfect(),
+            BitPerfect::Auto,
+            "follows the quality mode by default"
+        );
         c.set_bit_perfect(BitPerfect::Mqa);
         assert_eq!(c.bit_perfect(), BitPerfect::Mqa);
     }
@@ -2202,7 +2505,10 @@ fn play_one(h: &mut Harness) {
 fn best_quality_goes_exclusive_on_an_external_dac() {
     let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
     play_one(&mut h);
-    assert!(h.sink.0.lock().unwrap().exclusive_open.is_some(), "rate-matched exclusive output");
+    assert!(
+        h.sink.0.lock().unwrap().exclusive_open.is_some(),
+        "rate-matched exclusive output"
+    );
     assert!(h.player.snapshot().notice.is_none());
 }
 
@@ -2217,7 +2523,10 @@ fn an_exclusive_device_that_will_not_start_falls_back_to_shared_output() {
     let s = h.player.snapshot();
     assert!(s.error.is_none(), "no error: {:?}", s.error);
     assert_eq!(s.output_path, OutputPath::Pcm);
-    assert!(s.notice.unwrap_or_default().contains("couldn't be started for exclusive use"));
+    assert!(s
+        .notice
+        .unwrap_or_default()
+        .contains("couldn't be started for exclusive use"));
     assert!(!h.samples().is_empty(), "the track played on shared output");
 }
 
@@ -2225,8 +2534,15 @@ fn an_exclusive_device_that_will_not_start_falls_back_to_shared_output() {
 fn best_quality_stays_shared_on_built_in_output() {
     let mut h = best_harness(kahawai_player_core::QualityMode::Best, false);
     play_one(&mut h);
-    assert_eq!(h.sink.0.lock().unwrap().exclusive_open, None, "never hog the built-in output");
-    assert!(h.player.snapshot().notice.is_none(), "a choice, not something to explain");
+    assert_eq!(
+        h.sink.0.lock().unwrap().exclusive_open,
+        None,
+        "never hog the built-in output"
+    );
+    assert!(
+        h.player.snapshot().notice.is_none(),
+        "a choice, not something to explain"
+    );
 }
 
 #[test]
@@ -2240,25 +2556,55 @@ fn compatible_mode_never_goes_exclusive() {
 #[test]
 fn best_quality_yields_to_the_users_own_processing_and_says_so() {
     for (name, setup) in [
-        ("EQ", Box::new(|h: &mut Harness| {
-            h.player.set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db: 3.0, q: 1.0 }]).unwrap();
-            h.player.set_eq_enabled(true);
-        }) as Box<dyn Fn(&mut Harness)>),
-        ("Loudness", Box::new(|h: &mut Harness| h.player.set_loudness_enabled(true))),
-        ("Analog", Box::new(|h: &mut Harness| {
-            h.player.set_analog(AnalogSettings { enabled: true, ..Default::default() });
-        })),
-        ("Volume", Box::new(|h: &mut Harness| h.player.set_volume(0.5))),
+        (
+            "EQ",
+            Box::new(|h: &mut Harness| {
+                h.player
+                    .set_eq_bands(vec![EqBand {
+                        band_type: EqBandType::Peaking,
+                        freq: 1000.0,
+                        gain_db: 3.0,
+                        q: 1.0,
+                    }])
+                    .unwrap();
+                h.player.set_eq_enabled(true);
+            }) as Box<dyn Fn(&mut Harness)>,
+        ),
+        (
+            "Loudness",
+            Box::new(|h: &mut Harness| h.player.set_loudness_enabled(true)),
+        ),
+        (
+            "Analog",
+            Box::new(|h: &mut Harness| {
+                h.player.set_analog(AnalogSettings {
+                    enabled: true,
+                    ..Default::default()
+                });
+            }),
+        ),
+        (
+            "Volume",
+            Box::new(|h: &mut Harness| h.player.set_volume(0.5)),
+        ),
     ] {
         let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
         setup(&mut h);
         h.stub.add(1, &[(440.0, 4410)]);
-        h.player.play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+        h.player
+            .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
         let snap = h.player.snapshot();
         assert_eq!(snap.output_path, OutputPath::Pcm, "{name}: shared output");
-        assert!(snap.exclusive_blockers.iter().any(|b| b == name), "{name}: {:?}", snap.exclusive_blockers);
+        assert!(
+            snap.exclusive_blockers.iter().any(|b| b == name),
+            "{name}: {:?}",
+            snap.exclusive_blockers
+        );
         let notice = snap.notice.unwrap_or_default();
-        assert!(notice.contains(name) && notice.contains("Best quality is paused"), "{name}: {notice}");
+        assert!(
+            notice.contains(name) && notice.contains("Best quality is paused"),
+            "{name}: {notice}"
+        );
     }
 }
 
@@ -2279,7 +2625,10 @@ fn an_explicit_bit_perfect_choice_overrides_the_quality_mode() {
     let mut h = best_harness(kahawai_player_core::QualityMode::Compatible, true);
     h.player.set_bit_perfect(BitPerfect::All);
     play_one(&mut h);
-    assert!(h.sink.0.lock().unwrap().exclusive_open.is_some(), "Advanced override wins");
+    assert!(
+        h.sink.0.lock().unwrap().exclusive_open.is_some(),
+        "Advanced override wins"
+    );
 }
 
 #[test]
@@ -2292,7 +2641,14 @@ fn best_quality_plays_dsd_natively_only_on_a_known_dac_without_processing() {
     // The user's EQ is on: convert to PCM so it can apply, and say why.
     let mut eq = DopHarness::new(Some(DOP_RATE));
     eq.sink.0.lock().unwrap().device = Some("FIIO K15 ".into());
-    eq.player.set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 1000.0, gain_db: 3.0, q: 1.0 }]).unwrap();
+    eq.player
+        .set_eq_bands(vec![EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 1000.0,
+            gain_db: 3.0,
+            q: 1.0,
+        }])
+        .unwrap();
     eq.player.set_eq_enabled(true);
     eq.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
     let snap = eq.player.snapshot();
@@ -2302,7 +2658,8 @@ fn best_quality_plays_dsd_natively_only_on_a_known_dac_without_processing() {
     // Compatible: always converted.
     let mut c = DopHarness::new(Some(DOP_RATE));
     c.sink.0.lock().unwrap().device = Some("FIIO K15 ".into());
-    c.player.set_quality_mode(kahawai_player_core::QualityMode::Compatible);
+    c.player
+        .set_quality_mode(kahawai_player_core::QualityMode::Compatible);
     c.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
     assert_eq!(c.player.snapshot().format, Some(StreamFormat::Flac));
 }
@@ -2324,7 +2681,11 @@ fn settings_from_before_the_quality_mode_are_reset_to_auto_once() {
     let (story, fmt) = c.playback_prefs();
     assert_eq!(story, DsdStory::Auto);
     assert_eq!(fmt, None);
-    assert_eq!(c.output_device().as_deref(), Some("FIIO K15 "), "the device choice is kept");
+    assert_eq!(
+        c.output_device().as_deref(),
+        Some("FIIO K15 "),
+        "the device choice is kept"
+    );
     // Once migrated, explicit choices stick.
     c.set_bit_perfect(BitPerfect::All);
     let c2 = EngineController::new(Box::new(VecSink::new()), path);
@@ -2338,11 +2699,15 @@ fn best_quality_says_why_a_track_fell_back_to_shared_output() {
     let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
     h.sink.0.lock().unwrap().exclusive_rates = vec![48000];
     h.stub.add(1, &[(440.0, 4410)]);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
     let snap = h.player.snapshot();
     assert_eq!(snap.output_path, OutputPath::Pcm);
     let notice = snap.notice.unwrap_or_default();
-    assert!(notice.contains("44.1 kHz") && notice.contains("shared output"), "{notice}");
+    assert!(
+        notice.contains("44.1 kHz") && notice.contains("shared output"),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -2353,7 +2718,9 @@ fn a_missing_chosen_device_is_named_in_a_notice() {
     h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
     let notice = h.player.snapshot().notice.unwrap_or_default();
     assert!(
-        notice.contains("FIIO K15") && notice.contains("isn't connected") && notice.contains("MacBook Pro Speakers"),
+        notice.contains("FIIO K15")
+            && notice.contains("isn't connected")
+            && notice.contains("MacBook Pro Speakers"),
         "{notice}"
     );
 }
@@ -2381,11 +2748,16 @@ fn losing_the_dac_during_native_dsd_continues_on_shared_output() {
     assert_eq!(snap.format, Some(StreamFormat::Flac));
     assert!(snap.error.is_none());
     assert!(
-        snap.notice.unwrap_or_default().contains("exclusive output stopped"),
+        snap.notice
+            .unwrap_or_default()
+            .contains("exclusive output stopped"),
         "says what happened"
     );
     h.pump_until_done(100);
-    assert!(h.pcm_writes() > 0, "audio continues through the shared path");
+    assert!(
+        h.pcm_writes() > 0,
+        "audio continues through the shared path"
+    );
 }
 
 #[test]
@@ -2398,9 +2770,15 @@ fn nothing_the_shared_path_emits_exceeds_full_scale() {
     h.stub.add(1, &[(440.0, 44100)]);
     h.player.set_limiter_enabled(true);
     h.player
-        .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 12.0, q: 1.0 }])
+        .set_eq_bands(vec![EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 440.0,
+            gain_db: 12.0,
+            q: 1.0,
+        }])
         .unwrap();
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
     h.pump_until_done(100);
     let peak = h.samples().iter().fold(0.0f32, |a, x| a.max(x.abs()));
     assert!(peak <= 1.0, "peak {peak}");
@@ -2419,10 +2797,16 @@ fn turning_the_limiter_off_falls_back_to_the_guard_and_keeps_every_frame() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100)]);
     h.player
-        .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 12.0, q: 1.0 }])
+        .set_eq_bands(vec![EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 440.0,
+            gain_db: 12.0,
+            q: 1.0,
+        }])
         .unwrap();
     h.player.set_limiter_enabled(false);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
     h.pump_until_done(100);
 
     let s = h.samples();
@@ -2433,7 +2817,11 @@ fn turning_the_limiter_off_falls_back_to_the_guard_and_keeps_every_frame() {
         peak > LIMITER_CEILING + 1e-3,
         "without the limiter the guard's soft knee goes above the ceiling: {peak}"
     );
-    assert_eq!(h.player.snapshot().limiter_gr_db, None, "no reading while off");
+    assert_eq!(
+        h.player.snapshot().limiter_gr_db,
+        None,
+        "no reading while off"
+    );
 }
 
 #[test]
@@ -2441,20 +2829,37 @@ fn the_limiter_reports_gain_reduction_only_while_it_is_working() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100)]);
     h.player.set_limiter_enabled(true);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
     h.player.pump();
     // A 0.7 FS tone with no boost stays under the ceiling: nothing to do.
-    assert_eq!(h.player.snapshot().limiter_gr_db, Some(0.0), "on, but not working");
+    assert_eq!(
+        h.player.snapshot().limiter_gr_db,
+        Some(0.0),
+        "on, but not working"
+    );
 
     // A large boost drives it well past the ceiling.
     h.player
-        .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 12.0, q: 1.0 }])
+        .set_eq_bands(vec![EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 440.0,
+            gain_db: 12.0,
+            q: 1.0,
+        }])
         .unwrap();
     for _ in 0..5 {
         h.player.pump();
     }
-    let gr = h.player.snapshot().limiter_gr_db.expect("a reading on the shared path");
-    assert!(gr > 3.0, "a +12 dB boost on a 0.7 FS tone needs real reduction, got {gr}");
+    let gr = h
+        .player
+        .snapshot()
+        .limiter_gr_db
+        .expect("a reading on the shared path");
+    assert!(
+        gr > 3.0,
+        "a +12 dB boost on a 0.7 FS tone needs real reduction, got {gr}"
+    );
 }
 
 #[test]
@@ -2465,16 +2870,25 @@ fn loudness_gain_is_reduced_so_the_eq_boosted_peak_cannot_clip() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100 * 3)]);
     h.player
-        .set_eq_bands(vec![EqBand { band_type: EqBandType::Peaking, freq: 440.0, gain_db: 6.0, q: 1.0 }])
+        .set_eq_bands(vec![EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 440.0,
+            gain_db: 6.0,
+            q: 1.0,
+        }])
         .unwrap();
     h.player.set_loudness_target(-6.0); // asks for a big lift
     h.player.set_loudness_enabled(true);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 3000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 3000)], 0);
     h.pump_until_done(300);
     let s = h.samples();
     let steady = &s[s.len() / 2..];
     let peak = steady.iter().fold(0.0f32, |a, x| a.max(x.abs()));
-    assert!(peak < 0.95, "planned to stay under full scale before any guard: {peak}");
+    assert!(
+        peak < 0.95,
+        "planned to stay under full scale before any guard: {peak}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2485,7 +2899,13 @@ fn playing_mid_track() -> Harness {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100 * 4)]);
     h.stub.add(2, &[(440.0, 44100 * 4)]);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000), track(2, AudioFormat::Wav, 4000)], 0);
+    h.player.play_queue(
+        vec![
+            track(1, AudioFormat::Wav, 4000),
+            track(2, AudioFormat::Wav, 4000),
+        ],
+        0,
+    );
     for _ in 0..12 {
         h.player.pump();
     }
@@ -2497,13 +2917,26 @@ fn a_track_format_override_re_opens_the_playing_track_at_the_same_position() {
     let mut h = playing_mid_track();
     let before = h.player.snapshot();
     assert_eq!(before.format, Some(StreamFormat::Passthrough));
-    assert!(before.position_ms > 100, "mid-track: {}", before.position_ms);
+    assert!(
+        before.position_ms > 100,
+        "mid-track: {}",
+        before.position_ms
+    );
 
     h.player.set_track_format(1, Some(StreamFormat::Flac));
     let after = h.player.snapshot();
-    assert_eq!(after.format, Some(StreamFormat::Flac), "applied now, not at the next open");
+    assert_eq!(
+        after.format,
+        Some(StreamFormat::Flac),
+        "applied now, not at the next open"
+    );
     assert_eq!(h.player.status(), PlayerStatus::Playing);
-    assert!(after.position_ms + 250 >= before.position_ms, "resumes near where it was: {} vs {}", after.position_ms, before.position_ms);
+    assert!(
+        after.position_ms + 250 >= before.position_ms,
+        "resumes near where it was: {} vs {}",
+        after.position_ms,
+        before.position_ms
+    );
 
     // Clearing it (Auto) goes back, again immediately.
     h.player.set_track_format(1, None);
@@ -2515,11 +2948,19 @@ fn an_override_for_another_track_or_an_unchanged_one_does_not_disturb_playback()
     let mut h = playing_mid_track();
     let opens = h.stub.opened.lock().unwrap().len();
     h.player.set_track_format(2, Some(StreamFormat::Flac)); // not the loaded track
-    assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "no re-open for a different track");
+    assert_eq!(
+        h.stub.opened.lock().unwrap().len(),
+        opens,
+        "no re-open for a different track"
+    );
     h.player.set_track_format(1, Some(StreamFormat::Flac));
     let opens = h.stub.opened.lock().unwrap().len();
     h.player.set_track_format(1, Some(StreamFormat::Flac)); // same value again
-    assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "no re-open when nothing changed");
+    assert_eq!(
+        h.stub.opened.lock().unwrap().len(),
+        opens,
+        "no re-open when nothing changed"
+    );
     // But it is remembered for when track 2 comes up.
     h.player.next();
     assert_eq!(h.player.snapshot().format, Some(StreamFormat::Flac));
@@ -2552,7 +2993,12 @@ fn three_track_queue(chain_mode: Option<&str>) -> Harness {
     for id in 1..=3 {
         h.stub.add(id, &[(440.0 + id as f32 * 110.0, 44100 * 4)]);
     }
-    h.player.play_queue((1..=3).map(|id| track(id, AudioFormat::Wav, 4000)).collect(), 0);
+    h.player.play_queue(
+        (1..=3)
+            .map(|id| track(id, AudioFormat::Wav, 4000))
+            .collect(),
+        0,
+    );
     for _ in 0..12 {
         h.player.pump();
     }
@@ -2568,9 +3014,16 @@ fn moving_a_queue_entry_does_not_touch_the_playing_stream() {
     let after = h.player.snapshot();
     assert_eq!(after.queue_ids, vec![1, 3, 2]);
     assert_eq!(after.current_id, Some(1), "still on the same track");
-    assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "no stream was re-opened");
+    assert_eq!(
+        h.stub.opened.lock().unwrap().len(),
+        opens,
+        "no stream was re-opened"
+    );
     assert_eq!(h.player.status(), PlayerStatus::Playing);
-    assert!(after.position_ms >= before.position_ms, "the playhead did not restart");
+    assert!(
+        after.position_ms >= before.position_ms,
+        "the playhead did not restart"
+    );
 }
 
 #[test]
@@ -2611,7 +3064,8 @@ fn removing_the_playing_track_moves_on_to_the_next() {
 fn removing_the_last_remaining_track_stops_playback() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100 * 4)]);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
     h.player.pump();
     h.player.remove_queue_item(0);
     assert_eq!(h.player.status(), PlayerStatus::Stopped);
@@ -2635,8 +3089,67 @@ fn reordering_the_next_track_refreshes_a_stale_gapless_chain() {
     let mut h = three_track_queue(Some("chained"));
     let opens = h.stub.opened.lock().unwrap().len();
     h.player.move_queue_item(2, 1); // [1,3,2]: what follows track 1 changed
-    assert!(h.stub.opened.lock().unwrap().len() > opens, "re-opened to chain the right track");
+    assert!(
+        h.stub.opened.lock().unwrap().len() > opens,
+        "re-opened to chain the right track"
+    );
     assert_eq!(h.player.snapshot().current_id, Some(1));
+}
+
+/// A track whose file rate / channel count differ from the fixture default.
+fn track_with(id: i64, rate: u32, channels: u8) -> Track {
+    Track {
+        sample_rate: Some(rate),
+        channels: Some(channels),
+        ..track(id, AudioFormat::Wav, 4000)
+    }
+}
+
+fn requested_next(h: &Harness, id: i64) -> Option<i64> {
+    h.stub
+        .opened
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(t, _)| *t == id)
+        .and_then(|(_, o)| o.next)
+}
+
+#[test]
+fn a_rate_change_between_tracks_is_never_chained_into_one_response() {
+    // The stream is opened at the first track's rate and the EQ, meters and
+    // sink are configured for it, so a chained second track at another rate
+    // would play at the wrong speed. The next track must open as its own stream.
+    let mut h = Harness::new(Some("chained"));
+    h.stub.add(1, &[(440.0, 44100 * 2)]);
+    h.stub.add(2, &[(440.0, 44100 * 2)]);
+    h.player
+        .play_queue(vec![track_with(1, 44_100, 2), track_with(2, 96_000, 2)], 0);
+    assert_eq!(
+        requested_next(&h, 1),
+        None,
+        "44.1 kHz -> 96 kHz must not chain"
+    );
+}
+
+#[test]
+fn a_channel_change_between_tracks_is_never_chained() {
+    let mut h = Harness::new(Some("chained"));
+    h.stub.add(1, &[(440.0, 44100 * 2)]);
+    h.stub.add(2, &[(440.0, 44100 * 2)]);
+    h.player
+        .play_queue(vec![track_with(1, 44_100, 2), track_with(2, 44_100, 1)], 0);
+    assert_eq!(requested_next(&h, 1), None, "stereo -> mono must not chain");
+}
+
+#[test]
+fn matching_rates_still_chain() {
+    let mut h = Harness::new(Some("chained"));
+    h.stub.add(1, &[(440.0, 44100 * 2)]);
+    h.stub.add(2, &[(440.0, 44100 * 2)]);
+    h.player
+        .play_queue(vec![track_with(1, 96_000, 2), track_with(2, 96_000, 2)], 0);
+    assert_eq!(requested_next(&h, 1), Some(2));
 }
 
 // ---------------------------------------------------------------------------
@@ -2644,14 +3157,18 @@ fn reordering_the_next_track_refreshes_a_stale_gapless_chain() {
 // ---------------------------------------------------------------------------
 
 fn analog_on() -> AnalogSettings {
-    AnalogSettings { enabled: true, ..Default::default() }
+    AnalogSettings {
+        enabled: true,
+        ..Default::default()
+    }
 }
 
 fn best_playing_with_analog() -> Harness {
     let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
     h.stub.add(1, &[(440.0, 44100 * 4)]);
     h.player.set_analog(analog_on());
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
     for _ in 0..10 {
         h.player.pump();
     }
@@ -2662,25 +3179,41 @@ fn best_playing_with_analog() -> Harness {
 fn turning_off_analog_warmth_engages_bit_perfect_on_the_playing_track() {
     let mut h = best_playing_with_analog();
     let s = h.player.snapshot();
-    assert_eq!(s.output_path, OutputPath::Pcm, "analog is on: shared output");
+    assert_eq!(
+        s.output_path,
+        OutputPath::Pcm,
+        "analog is on: shared output"
+    );
     assert_eq!(s.exclusive_blockers, vec!["Analog".to_string()]);
     assert!(s.notice.unwrap_or_default().contains("Analog"));
     let before = h.player.snapshot().position_ms;
 
-    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    h.player.set_analog(AnalogSettings {
+        enabled: false,
+        ..analog_on()
+    });
     let s = h.player.snapshot();
-    assert_eq!(s.output_path, OutputPath::PcmExclusive, "the last blocker is gone: bit-perfect now");
+    assert_eq!(
+        s.output_path,
+        OutputPath::PcmExclusive,
+        "the last blocker is gone: bit-perfect now"
+    );
     assert!(s.exclusive_blockers.is_empty());
     assert!(s.notice.is_none(), "the 'paused' notice is gone");
     assert_eq!(h.player.status(), PlayerStatus::Playing);
-    assert!(s.position_ms + 250 >= before, "carries on from where it was: {} vs {before}", s.position_ms);
+    assert!(
+        s.position_ms + 250 >= before,
+        "carries on from where it was: {} vs {before}",
+        s.position_ms
+    );
 }
 
 #[test]
 fn turning_analog_warmth_back_on_steps_bit_perfect_aside_with_a_reason() {
     let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
     h.stub.add(1, &[(440.0, 44100 * 4)]);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
     for _ in 0..10 {
         h.player.pump();
     }
@@ -2688,16 +3221,30 @@ fn turning_analog_warmth_back_on_steps_bit_perfect_aside_with_a_reason() {
     h.player.set_analog(analog_on());
     let s = h.player.snapshot();
     assert_eq!(s.output_path, OutputPath::Pcm);
-    assert!(s.notice.unwrap_or_default().contains("Best quality is paused"));
+    assert!(s
+        .notice
+        .unwrap_or_default()
+        .contains("Best quality is paused"));
 }
 
 #[test]
 fn tweaking_a_slider_that_does_not_flip_the_answer_leaves_playback_alone() {
     let mut h = best_playing_with_analog();
     let opens = h.stub.opened.lock().unwrap().len();
-    h.player.set_analog(AnalogSettings { drive: 0.9, ..analog_on() });
-    h.player.set_analog(AnalogSettings { drive: 0.3, mix: 0.5, ..analog_on() });
-    assert_eq!(h.stub.opened.lock().unwrap().len(), opens, "still on: nothing re-opens");
+    h.player.set_analog(AnalogSettings {
+        drive: 0.9,
+        ..analog_on()
+    });
+    h.player.set_analog(AnalogSettings {
+        drive: 0.3,
+        mix: 0.5,
+        ..analog_on()
+    });
+    assert_eq!(
+        h.stub.opened.lock().unwrap().len(),
+        opens,
+        "still on: nothing re-opens"
+    );
 }
 
 /// Crossfeed is DSP like the others: while it is on, Auto stays on the
@@ -2706,17 +3253,24 @@ fn tweaking_a_slider_that_does_not_flip_the_answer_leaves_playback_alone() {
 fn crossfeed_holds_bit_perfect_back_like_the_other_stages() {
     let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
     h.stub.add(1, &[(440.0, 44100 * 4)]);
-    h.player.play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 4000)], 0);
     for _ in 0..10 {
         h.player.pump();
     }
     assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
-    let on = CrossfeedSettings { enabled: true, ..Default::default() };
+    let on = CrossfeedSettings {
+        enabled: true,
+        ..Default::default()
+    };
     h.player.set_crossfeed(on);
     let s = h.player.snapshot();
     assert_eq!(s.output_path, OutputPath::Pcm);
     assert_eq!(s.exclusive_blockers, vec!["Crossfeed".to_string()]);
-    h.player.set_crossfeed(CrossfeedSettings { enabled: false, ..on });
+    h.player.set_crossfeed(CrossfeedSettings {
+        enabled: false,
+        ..on
+    });
     assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
 }
 
@@ -2724,19 +3278,29 @@ fn crossfeed_holds_bit_perfect_back_like_the_other_stages() {
 fn another_blocker_keeps_bit_perfect_off_when_analog_goes_away() {
     let mut h = best_playing_with_analog();
     h.player.set_loudness_enabled(true); // a second thing holding it back
-    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    h.player.set_analog(AnalogSettings {
+        enabled: false,
+        ..analog_on()
+    });
     let s = h.player.snapshot();
     assert_eq!(s.output_path, OutputPath::Pcm);
     assert_eq!(s.exclusive_blockers, vec!["Loudness".to_string()]);
     h.player.set_loudness_enabled(false);
-    assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive, "now nothing holds it back");
+    assert_eq!(
+        h.player.snapshot().output_path,
+        OutputPath::PcmExclusive,
+        "now nothing holds it back"
+    );
 }
 
 #[test]
 fn a_paused_track_stays_paused_when_bit_perfect_engages() {
     let mut h = best_playing_with_analog();
     h.player.pause();
-    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    h.player.set_analog(AnalogSettings {
+        enabled: false,
+        ..analog_on()
+    });
     assert_eq!(h.player.status(), PlayerStatus::Paused);
     assert_eq!(h.player.snapshot().output_path, OutputPath::PcmExclusive);
 }
@@ -2747,7 +3311,10 @@ fn an_explicit_override_does_not_follow_the_processing() {
     let mut h = best_playing_with_analog();
     h.player.set_bit_perfect(BitPerfect::Off);
     let opens = h.stub.opened.lock().unwrap().len();
-    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    h.player.set_analog(AnalogSettings {
+        enabled: false,
+        ..analog_on()
+    });
     assert_eq!(h.stub.opened.lock().unwrap().len(), opens);
     assert_eq!(h.player.snapshot().output_path, OutputPath::Pcm);
 }
@@ -2759,7 +3326,10 @@ fn the_ui_is_told_when_only_the_blockers_change() {
     let mut h = best_playing_with_analog();
     h.player.pause();
     let with = h.player.snapshot();
-    h.player.set_analog(AnalogSettings { enabled: false, ..analog_on() });
+    h.player.set_analog(AnalogSettings {
+        enabled: false,
+        ..analog_on()
+    });
     let without = h.player.snapshot();
     assert_ne!(with.exclusive_blockers, without.exclusive_blockers);
     assert!(kahawai_player_core::snapshot_key_differs(&with, &without));

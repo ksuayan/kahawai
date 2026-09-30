@@ -74,7 +74,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     }
     let pending: Vec<&(i64, &str)> = MIGRATIONS
         .iter()
-        .filter(|(v, _)| !applied.contains(v) && !(*v == 1 && has_tracks))
+        .filter(|(v, _)| !(applied.contains(v) || (*v == 1 && has_tracks)))
         .collect();
     if pending.is_empty() {
         return Ok(());

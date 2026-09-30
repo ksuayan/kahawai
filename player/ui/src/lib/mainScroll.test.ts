@@ -1,0 +1,117 @@
+/** Artists and Playlists scroll in App's shared <main>; they must come back where they were. */
+import { describe, expect, it } from "vitest";
+import { mount } from "@vue/test-utils";
+import { ref } from "vue";
+import { MAIN_SCROLL } from "./mainScroll";
+import { useLibraryStore } from "../stores/library";
+import { usePlaylistsStore } from "../stores/playlists";
+import { useScrollMemoryStore } from "../stores/scrollMemory";
+import ArtistsView from "../components/ArtistsView.vue";
+import PlaylistsView from "../components/PlaylistsView.vue";
+import { makeAlbum } from "../test/fixtures";
+import { mountApp, settle } from "../test/helpers";
+import type { Component } from "vue";
+import type { Pinia } from "pinia";
+
+/** A stand-in for App's <main>: one element that outlives each view. */
+function makeMain() {
+  const el = document.createElement("main");
+  document.body.appendChild(el);
+  return { el, provide: { [MAIN_SCROLL as symbol]: ref(el) } };
+}
+
+function mountIn(component: Component, pinia: Pinia, main: ReturnType<typeof makeMain>) {
+  return mount(component, { attachTo: document.body, global: { plugins: [pinia], provide: main.provide } });
+}
+
+function seedLibrary() {
+  const lib = useLibraryStore();
+  lib.artists = Array.from({ length: 60 }, (_, i) => ({ id: i, name: `Artist ${i}`, album_count: 1, track_count: 1 })) as never;
+  lib.albums = [makeAlbum()];
+}
+
+describe("ArtistsView scroll position", () => {
+  it("comes back to where it was left", async () => {
+    const main = makeMain();
+    const { pinia } = mountApp(ArtistsView, {}, {}, seedLibrary);
+    await settle();
+    const first = mountIn(ArtistsView, pinia, main);
+    await settle();
+    main.el.scrollTop = 1800;
+    first.unmount();
+
+    const again = mountIn(ArtistsView, pinia, main);
+    main.el.scrollTop = 0; // <main> was reused by another view meanwhile
+    await settle();
+    expect(main.el.scrollTop).toBe(1800);
+    again.unmount();
+  });
+
+  it("starts at the top when never scrolled, dropping an offset left by another view", async () => {
+    const main = makeMain();
+    const { pinia } = mountApp(ArtistsView, {}, {}, seedLibrary);
+    main.el.scrollTop = 777; // stale, from whatever view was showing
+    const v = mountIn(ArtistsView, pinia, main);
+    await settle();
+    expect(main.el.scrollTop).toBe(0);
+    v.unmount();
+  });
+
+  it("waits for the artists to load before restoring, and keeps the offset if left while loading", async () => {
+    const main = makeMain();
+    const { pinia } = mountApp(ArtistsView, {}, {}, () => {
+      seedLibrary();
+      useScrollMemoryStore().set("artists", 1200);
+      useLibraryStore().loading = true;
+    });
+    const v = mountIn(ArtistsView, pinia, main);
+    await settle();
+    main.el.scrollTop = 5; // pretend something else scrolled it
+    v.unmount(); // left before the list ever appeared
+    expect(useScrollMemoryStore(pinia).get("artists")).toBe(1200);
+
+    const w = mountIn(ArtistsView, pinia, main);
+    await settle();
+    expect(main.el.scrollTop).toBe(5); // not restored yet: still loading
+    useLibraryStore(pinia).loading = false;
+    await settle();
+    expect(main.el.scrollTop).toBe(1200);
+    w.unmount();
+  });
+});
+
+describe("PlaylistsView scroll position", () => {
+  const ready = () => {
+    const p = usePlaylistsStore();
+    p.loaded = true;
+    p.items = Array.from({ length: 40 }, (_, i) => ({ id: i, name: `List ${i}`, track_ids: [1, 2, 3] })) as never;
+  };
+
+  it("comes back to where it was left", async () => {
+    const main = makeMain();
+    const { pinia } = mountApp(PlaylistsView, {}, {}, ready);
+    await settle();
+    const first = mountIn(PlaylistsView, pinia, main);
+    await settle();
+    main.el.scrollTop = 900;
+    first.unmount();
+
+    const again = mountIn(PlaylistsView, pinia, main);
+    main.el.scrollTop = 0;
+    await settle();
+    expect(main.el.scrollTop).toBe(900);
+    again.unmount();
+  });
+
+  it("restores once the playlists have loaded when it was opened before they were", async () => {
+    const main = makeMain();
+    const { pinia } = mountApp(PlaylistsView, {}, {}, () => {
+      useScrollMemoryStore().set("playlists", 640);
+    });
+    const v = mountIn(PlaylistsView, pinia, main); // not loaded yet: the view starts the load itself
+    await settle();
+    expect(usePlaylistsStore(pinia).loaded).toBe(true);
+    expect(main.el.scrollTop).toBe(640);
+    v.unmount();
+  });
+});

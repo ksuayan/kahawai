@@ -28,17 +28,18 @@ use kahawai_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::analog::{AnalogSettings, AnalogStage};
 use crate::bitperfect::{f32_to_i24_le, BitPerfect};
 use crate::crossfeed::{CrossfeedSettings, CrossfeedStage};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
+use crate::dsp::{
+    headroom_guard, scan_track_levels, DspStage, EqBand, GainRamp, LookaheadLimiter, LoudnessMeter,
+    LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
+};
 use crate::quality::{
     QualityMode, BLOCKER_ANALOG, BLOCKER_CROSSFEED, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS,
     BLOCKER_VOLUME,
-};
-use crate::analog::{AnalogSettings, AnalogStage};
-use crate::dsp::{headroom_guard, DspStage, LoudnessMeter, LookaheadLimiter,
-    scan_track_levels, EqBand, GainRamp, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
 };
 use crate::queue::{Queue, RepeatMode};
 use crate::resample::CubicResampler;
@@ -1102,7 +1103,8 @@ impl Player {
             Some(AudioFormat::Dsf | AudioFormat::Dff)
         );
         // Only a setting that follows the mode, and applies to this track, cares.
-        let follows_mode = self.bit_perfect == BitPerfect::Auto || (is_dsd && self.dsd_story == DsdStory::Auto);
+        let follows_mode =
+            self.bit_perfect == BitPerfect::Auto || (is_dsd && self.dsd_story == DsdStory::Auto);
         if follows_mode && self.auto_wants_exclusive() != self.exclusive_decision {
             self.reopen_live();
         }
@@ -1315,7 +1317,9 @@ impl Player {
     fn open_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
         let dop_rate = match self.dop_capable_rate(track) {
             Some(r) => r,
-            None => return Err("your DAC doesn't accept the sample rate this DSD file needs".into()),
+            None => {
+                return Err("your DAC doesn't accept the sample rate this DSD file needs".into())
+            }
         };
         let next_id = self.queue.peek_next().map(|t| t.id);
         let opts = StreamOptions {
@@ -1361,7 +1365,9 @@ impl Player {
 
         if let Err(e) = self.sink.open(track) {
             tracing::warn!(error = %e, "DoP sink open failed");
-            return Err("your DAC couldn't be set up for native DSD (another app may be using it)".into());
+            return Err(
+                "your DAC couldn't be set up for native DSD (another app may be using it)".into(),
+            );
         }
         if let Err(e) = self.sink.play() {
             tracing::warn!(error = %e, "DoP sink start failed");
@@ -1391,10 +1397,15 @@ impl Player {
         // Bit-perfect plays one track per stream: the exclusive device is
         // opened at each file's own rate, so the server must not chain the
         // next track (whose rate may differ) into this response.
+        // The same goes for any next track whose output rate or channel count
+        // differs: the sink, resampler, EQ and meters are set up once per stream.
         let next_id = if want_bp {
             None
         } else {
-            self.queue.peek_next().map(|t| t.id)
+            self.queue
+                .peek_next()
+                .filter(|next| can_chain(track, next, fmt))
+                .map(|t| t.id)
         };
 
         // Loudness pre-scan (v1): one extra deterministic stream per
@@ -1407,8 +1418,9 @@ impl Player {
             // Plan the gain against the track's peak and the EQ's worst-case
             // boost, so the result cannot clip at the output.
             let eq_boost = self.eq.max_boost_db();
-            self.loudness
-                .gain_for_levels(track_id, fmt, eq_boost, || scan_track_levels(transport, track_id, fmt))
+            self.loudness.gain_for_levels(track_id, fmt, eq_boost, || {
+                scan_track_levels(transport, track_id, fmt)
+            })
         } else {
             0.0
         };
@@ -1643,7 +1655,7 @@ impl Player {
                 Ok(n) => n,
                 Err(e) => {
                     tracing::warn!(error = %e, "decode failed");
-                self.fail("Couldn't decode this file.");
+                    self.fail("Couldn't decode this file.");
                     return;
                 }
             }
@@ -1756,7 +1768,9 @@ impl Player {
             // 5 ms duck is still on screen at the next snapshot.
             let dt = (chunk.len() / channels.max(1)) as f32 / active.sink_rate.max(1) as f32;
             let gr = self.limiter.take_reduction_db();
-            self.limiter_gr_db = gr.max(self.limiter_gr_db - GR_DECAY_DB_PER_SEC * dt).max(0.0);
+            self.limiter_gr_db = gr
+                .max(self.limiter_gr_db - GR_DECAY_DB_PER_SEC * dt)
+                .max(0.0);
         } else {
             self.limiter_gr_db = 0.0;
             // Off: drain anything it was still holding in front of this chunk,
@@ -1772,14 +1786,15 @@ impl Player {
 
         let sink_rate = active.sink_rate;
         let ch = active.spec.channels;
-        if !chunk.is_empty() && self
-            .sink
-            .write(PcmChunk {
-                frames: chunk,
-                sample_rate: sink_rate,
-                channels: ch as u8,
-            })
-            .is_err()
+        if !chunk.is_empty()
+            && self
+                .sink
+                .write(PcmChunk {
+                    frames: chunk,
+                    sample_rate: sink_rate,
+                    channels: ch as u8,
+                })
+                .is_err()
         {
             self.fail("The audio output stopped responding.");
             return;
@@ -1918,28 +1933,29 @@ impl Player {
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
-        let (track, position_ms, duration_ms, buffered_ms, output_rate_hz, format, chain) = match &self.active {
-            Some(a) => {
-                let t = a.display_track().clone();
-                let pos = self.position_ms();
-                (
-                    Some(t.clone()),
-                    pos,
-                    t.duration_ms,
-                    a.buffered_ms(pos),
-                    Some(a.output_rate_hz()),
-                    Some(a.format_used()),
-                    a.chain().clone(),
-                )
-            }
-            None => {
-                // Idle. A restored queue shows where it will resume.
-                let t = self.queue.current().cloned();
-                let at = self.resume_at_ms.unwrap_or(0);
-                let dur = t.as_ref().and_then(|t| t.duration_ms).filter(|_| at > 0);
-                (t, at, dur, None, None, None, None)
-            }
-        };
+        let (track, position_ms, duration_ms, buffered_ms, output_rate_hz, format, chain) =
+            match &self.active {
+                Some(a) => {
+                    let t = a.display_track().clone();
+                    let pos = self.position_ms();
+                    (
+                        Some(t.clone()),
+                        pos,
+                        t.duration_ms,
+                        a.buffered_ms(pos),
+                        Some(a.output_rate_hz()),
+                        Some(a.format_used()),
+                        a.chain().clone(),
+                    )
+                }
+                None => {
+                    // Idle. A restored queue shows where it will resume.
+                    let t = self.queue.current().cloned();
+                    let at = self.resume_at_ms.unwrap_or(0);
+                    let dur = t.as_ref().and_then(|t| t.duration_ms).filter(|_| at > 0);
+                    (t, at, dur, None, None, None, None)
+                }
+            };
         PlayerSnapshot {
             status: self.status,
             track,
@@ -1967,7 +1983,11 @@ impl Player {
             volume: self.volume,
             error: self.error.clone(),
             notice: self.notice.clone(),
-            exclusive_blockers: self.exclusive_blockers().into_iter().map(String::from).collect(),
+            exclusive_blockers: self
+                .exclusive_blockers()
+                .into_iter()
+                .map(String::from)
+                .collect(),
             repeat: self.queue.repeat,
             shuffle: self.queue.shuffle,
         }
@@ -1990,6 +2010,34 @@ fn chain_segment(chain: &str, idx: usize) -> &str {
         return chain;
     }
     chain.split(" + ").nth(idx).map(str::trim).unwrap_or(chain)
+}
+
+/// The rate a track comes out at once the server has shaped it for `fmt`
+/// (mirrors the server's `describe_target`): Opus is always 48 kHz, MP3 tops
+/// out at 48 kHz, everything else keeps the file's rate. `None` = unknown.
+fn output_rate(track: &Track, fmt: StreamFormat) -> Option<u32> {
+    match fmt {
+        StreamFormat::Opus => Some(48_000),
+        StreamFormat::Mp3 => track.sample_rate.map(|r| r.min(48_000)),
+        _ => track.sample_rate,
+    }
+}
+
+/// Whether `next` may be chained into the response for `current`. A chained
+/// response is decoded, resampled and metered against the *first* track's
+/// spec, so a rate or channel change mid-response would play the second track
+/// at the wrong speed or with scrambled channels. Unknown metadata is given
+/// the benefit of the doubt (the previous behaviour).
+fn can_chain(current: &Track, next: &Track, fmt: StreamFormat) -> bool {
+    let same_rate = match (output_rate(current, fmt), output_rate(next, fmt)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    let same_channels = match (current.channels, next.channels) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    same_rate && same_channels
 }
 
 /// Expected frames of a track at `rate`, from catalog metadata. Only used
@@ -2190,6 +2238,9 @@ pub struct EngineController {
     bit_perfect: Arc<RwLock<BitPerfect>>,
     global_format: Arc<RwLock<Option<StreamFormat>>>,
     settings_path: PathBuf,
+    /// Signalled by the playback thread once it has saved and is about to
+    /// exit; taken by the first [`shutdown`](Self::shutdown).
+    stopped: Mutex<Option<mpsc::Receiver<()>>>,
     _thread: JoinHandle<()>,
 }
 
@@ -2272,9 +2323,13 @@ impl EngineController {
 
         let snap2 = snapshot.clone();
         let ev2 = events.clone();
+        let (stopped_tx, stopped_rx) = mpsc::channel::<()>();
         let thread = std::thread::Builder::new()
             .name("player-playback".into())
-            .spawn(move || playback_loop(rx, player, snap2, ev2))
+            .spawn(move || {
+                playback_loop(rx, player, snap2, ev2);
+                let _ = stopped_tx.send(());
+            })
             .expect("spawn playback thread");
 
         Self {
@@ -2289,6 +2344,7 @@ impl EngineController {
             bit_perfect: Arc::new(RwLock::new(BitPerfect::default())),
             global_format: Arc::new(RwLock::new(None)),
             settings_path,
+            stopped: Mutex::new(Some(stopped_rx)),
             _thread: thread,
         }
     }
@@ -2529,9 +2585,27 @@ impl EngineController {
     }
 }
 
+impl EngineController {
+    /// Stop the playback thread and wait (up to [`SHUTDOWN_WAIT`]) for it to
+    /// save the queue and live playhead. Call this when the app is quitting:
+    /// the periodic save only runs every 5 s, so without it a quit loses up
+    /// to that much position. Safe to call more than once.
+    pub fn shutdown(&self) {
+        let _ = self.tx.send(EngineCommand::Shutdown);
+        let rx = self.stopped.lock().expect("stopped lock").take();
+        if let Some(rx) = rx {
+            let _ = rx.recv_timeout(SHUTDOWN_WAIT);
+        }
+    }
+}
+
+/// How long [`EngineController::shutdown`] waits for the final save. The
+/// thread only has to write one small JSON file; this bounds a wedged sink.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
 impl Drop for EngineController {
     fn drop(&mut self) {
-        let _ = self.tx.send(EngineCommand::Shutdown);
+        self.shutdown();
     }
 }
 
@@ -2580,7 +2654,9 @@ fn playback_loop(
         let snap = player.snapshot();
         let key = snapshot_key(&snap);
         let changed = key != last_key;
-        if player.status() == PlayerStatus::Playing && last_saved.elapsed() >= Duration::from_secs(5) {
+        if player.status() == PlayerStatus::Playing
+            && last_saved.elapsed() >= Duration::from_secs(5)
+        {
             last_saved = Instant::now();
             player.persist_position();
         }
@@ -2594,6 +2670,10 @@ fn playback_loop(
                 .push(PlayerEvent::State(snap));
         }
     }
+    // Shutting down (quit, or the controller was dropped): save the live
+    // playhead now rather than leaving up to 5 s of it to the periodic save.
+    // A stopped player has no position, so this is harmless when idle.
+    player.persist_position();
 }
 
 /// Would the playback thread publish `b` after `a`? (The UI-visible identity
@@ -2602,10 +2682,8 @@ pub fn snapshot_key_differs(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
     snapshot_key(a) != snapshot_key(b)
 }
 
-/// UI-visible snapshot identity minus the ever-moving playhead.
-fn snapshot_key(
-    s: &PlayerSnapshot,
-) -> (
+/// Identity of the UI-visible parts of a [`PlayerSnapshot`]; see [`snapshot_key`].
+type SnapshotKey = (
     PlayerStatus,
     Option<i64>,
     Vec<i64>,
@@ -2616,7 +2694,10 @@ fn snapshot_key(
     OutputPath,
     Vec<String>,
     Option<String>,
-) {
+);
+
+/// UI-visible snapshot identity minus the ever-moving playhead.
+fn snapshot_key(s: &PlayerSnapshot) -> SnapshotKey {
     // Volume changes must reach the UI even while paused/stopped, and a
     // seek while paused moves the (otherwise static) playhead. While
     // playing the position rides the 4 Hz throttle instead.
@@ -2792,5 +2873,82 @@ mod chain_tests {
         let both = "dsf64->flac 24/88.2 + dsf64->flac 24/88.2";
         assert_eq!(chain_segment(both, 0), "dsf64->flac 24/88.2");
         assert!(!chain_segment(both, 0).contains('+'));
+    }
+}
+
+#[cfg(test)]
+mod can_chain_tests {
+    use super::*;
+    use kahawai_core::format::AudioFormat;
+
+    fn t(rate: Option<u32>, channels: Option<u8>) -> Track {
+        Track {
+            id: 1,
+            path: "/m/1.flac".into(),
+            hash: Some("h".into()),
+            format: AudioFormat::Flac,
+            sample_rate: rate,
+            bit_depth: Some(16),
+            channels,
+            duration_ms: Some(1000),
+            bitrate: None,
+            title: None,
+            album: None,
+            artist: None,
+            album_id: None,
+            track_no: None,
+            disc_no: None,
+            genre: None,
+            year: None,
+            missing: false,
+            decodable: true,
+            mqa: false,
+            original_sample_rate: None,
+        }
+    }
+
+    #[test]
+    fn lossless_chains_only_at_the_same_rate() {
+        let a = t(Some(44_100), Some(2));
+        assert!(can_chain(&a, &t(Some(44_100), Some(2)), StreamFormat::Flac));
+        assert!(!can_chain(
+            &a,
+            &t(Some(96_000), Some(2)),
+            StreamFormat::Flac
+        ));
+        assert!(!can_chain(
+            &a,
+            &t(Some(96_000), Some(2)),
+            StreamFormat::Passthrough
+        ));
+    }
+
+    #[test]
+    fn opus_and_mp3_output_rates_are_capped_so_mixed_sources_still_chain() {
+        let a = t(Some(44_100), Some(2));
+        let hi = t(Some(96_000), Some(2));
+        assert!(
+            can_chain(&a, &hi, StreamFormat::Opus),
+            "Opus is always 48 kHz"
+        );
+        assert!(
+            can_chain(&t(Some(48_000), Some(2)), &hi, StreamFormat::Mp3),
+            "MP3 caps at 48 kHz"
+        );
+        assert!(
+            !can_chain(&a, &hi, StreamFormat::Mp3),
+            "44.1 vs 48 kHz differ"
+        );
+    }
+
+    #[test]
+    fn a_channel_change_never_chains_and_unknowns_are_allowed() {
+        let a = t(Some(44_100), Some(2));
+        assert!(!can_chain(
+            &a,
+            &t(Some(44_100), Some(1)),
+            StreamFormat::Opus
+        ));
+        assert!(can_chain(&a, &t(None, None), StreamFormat::Flac));
     }
 }

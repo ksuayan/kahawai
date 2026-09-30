@@ -19,8 +19,7 @@ pub fn is_known_dsd_device(device: &str, user_confirmed: &[String]) -> bool {
     if d.is_empty() {
         return false;
     }
-    BUILT_IN.iter().any(|k| d.contains(&norm(k)))
-        || user_confirmed.iter().any(|u| norm(u) == d)
+    BUILT_IN.iter().any(|k| d.contains(&norm(k))) || user_confirmed.iter().any(|u| norm(u) == d)
 }
 
 #[cfg(test)]
@@ -29,7 +28,10 @@ mod tests {
 
     #[test]
     fn matches_built_ins_loosely() {
-        assert!(is_known_dsd_device("FIIO K15 ", &[]), "CoreAudio's trailing space");
+        assert!(
+            is_known_dsd_device("FIIO K15 ", &[]),
+            "CoreAudio's trailing space"
+        );
         assert!(is_known_dsd_device("fiio k15", &[]));
         assert!(!is_known_dsd_device("MacBook Pro Speakers", &[]));
         assert!(!is_known_dsd_device("", &[]));
