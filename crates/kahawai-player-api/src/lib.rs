@@ -10,8 +10,8 @@
 
 use kahawai_core::{
     api::{
-        Album, Artist, Genre, Job, NewPlaylist, Page, Playlist, SetPlaylistTracks, StreamFormat,
-        Track,
+        Album, Artist, CatalogDelta, CatalogSnapshot, Genre, Job, NewPlaylist, Page, Playlist,
+        SetPlaylistTracks, StreamFormat, Track,
     },
     MusicError,
 };
@@ -97,6 +97,32 @@ impl Client {
             .http
             .get(self.url("/api/search"))
             .query(&[("q", q)])
+            .send()
+            .await
+            .map_err(reqwest_err)?;
+        json_or_error(resp).await
+    }
+
+    // -- catalog cache -------------------------------------------------------
+
+    /// The whole catalog with its revision (`GET /api/catalog`).
+    pub async fn catalog(&self) -> Result<CatalogSnapshot, MusicError> {
+        self.get("/api/catalog").await
+    }
+
+    /// What changed after revision `since` of database `catalog_id`.
+    pub async fn catalog_delta(
+        &self,
+        since: i64,
+        catalog_id: &str,
+    ) -> Result<CatalogDelta, MusicError> {
+        let resp = self
+            .http
+            .get(self.url("/api/catalog/delta"))
+            .query(&[
+                ("since", since.to_string()),
+                ("catalog_id", catalog_id.to_string()),
+            ])
             .send()
             .await
             .map_err(reqwest_err)?;

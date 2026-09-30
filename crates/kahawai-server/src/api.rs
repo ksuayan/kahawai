@@ -132,7 +132,7 @@ fn default_per_page() -> u64 {
     100
 }
 
-fn album_from_row(r: &sqlx::sqlite::SqliteRow, track_count: u64) -> Album {
+pub(crate) fn album_from_row(r: &sqlx::sqlite::SqliteRow, track_count: u64) -> Album {
     Album {
         id: r.get("id"),
         title: r.get("title"),
@@ -150,7 +150,11 @@ fn album_from_row(r: &sqlx::sqlite::SqliteRow, track_count: u64) -> Album {
     }
 }
 
-const ALBUM_COLS: &str =
+/// Present-track count of the album row `albums` / `a`, as `track_count`.
+const TRACK_COUNT: &str =
+    "(SELECT COUNT(*) FROM tracks t WHERE t.album_id = albums.id AND t.missing = 0) AS track_count";
+
+pub(crate) const ALBUM_COLS: &str =
     "id, title, artist, year, artwork_hash, sort_title, sort_artist, mbid, artwork_source";
 
 pub async fn list_albums(
@@ -164,8 +168,10 @@ pub async fn list_albums(
         .await
         .map_err(db::cvt)?
         .get(0);
+    // Track counts in the same query (one index lookup per album), not one
+    // query per album.
     let rows = sqlx::query(&format!(
-        "SELECT {ALBUM_COLS} FROM albums
+        "SELECT {ALBUM_COLS}, {TRACK_COUNT} FROM albums
          ORDER BY COALESCE(sort_title, title) LIMIT ? OFFSET ?"
     ))
     .bind(per_page as i64)
@@ -173,11 +179,10 @@ pub async fn list_albums(
     .fetch_all(&s.pool)
     .await
     .map_err(db::cvt)?;
-    let mut items = Vec::with_capacity(rows.len());
-    for r in &rows {
-        let id: i64 = r.get("id");
-        items.push(album_from_row(r, db::album_track_count(&s.pool, id).await?));
-    }
+    let items = rows
+        .iter()
+        .map(|r| album_from_row(r, r.get::<i64, _>("track_count").max(0) as u64))
+        .collect();
     Ok(Json(Page {
         items,
         page,
@@ -286,7 +291,8 @@ pub async fn get_artist(
     };
     let album_rows = sqlx::query(
         "SELECT a.id, a.title, a.artist, a.year, a.artwork_hash, a.sort_title, a.sort_artist,
-           a.mbid, a.artwork_source
+           a.mbid, a.artwork_source,
+           (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.missing = 0) AS track_count
          FROM albums a JOIN album_artists aa ON aa.album_id = a.id
          WHERE aa.artist_id = ? ORDER BY COALESCE(a.sort_title, a.title)",
     )
@@ -294,14 +300,10 @@ pub async fn get_artist(
     .fetch_all(&s.pool)
     .await
     .map_err(db::cvt)?;
-    let mut albums = Vec::with_capacity(album_rows.len());
-    for ar in &album_rows {
-        let aid: i64 = ar.get("id");
-        albums.push(album_from_row(
-            ar,
-            db::album_track_count(&s.pool, aid).await?,
-        ));
-    }
+    let albums = album_rows
+        .iter()
+        .map(|r| album_from_row(r, r.get::<i64, _>("track_count").max(0) as u64))
+        .collect();
     Ok(Json(ArtistDetail { artist, albums }))
 }
 
@@ -351,33 +353,55 @@ pub async fn search(
 
 /// Canonical genres with their present-track counts, most tracks first.
 pub async fn list_genres(State(s): State<AppState>) -> Result<Json<Vec<Genre>>, ApiError> {
+    Ok(Json(genres(&s.pool).await?))
+}
+
+pub(crate) async fn genres(pool: &SqlitePool) -> Result<Vec<Genre>, MusicError> {
+    // track_genres holds present tracks only (see genre::refresh_genres), so
+    // this is a count over its genre index, no join.
     let rows = sqlx::query(
-        "SELECT g.genre, COUNT(*) AS n FROM track_genres g JOIN tracks t ON t.id = g.track_id
-         WHERE t.missing = 0 GROUP BY g.genre ORDER BY n DESC, g.genre",
+        "SELECT genre, COUNT(*) AS n FROM track_genres GROUP BY genre ORDER BY n DESC, genre",
     )
-    .fetch_all(&s.pool)
+    .fetch_all(pool)
     .await
     .map_err(db::cvt)?;
-    Ok(Json(
-        rows.iter()
-            .map(|r| Genre {
-                name: r.get(0),
-                track_count: r.get::<i64, _>(1).max(0) as u64,
-            })
-            .collect(),
-    ))
+    Ok(rows
+        .iter()
+        .map(|r| Genre {
+            name: r.get(0),
+            track_count: r.get::<i64, _>(1).max(0) as u64,
+        })
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GenreTracksQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_per_page")]
+    pub per_page: u64,
+    /// `artist` (default), `title` (album title) or `year`.
+    #[serde(default)]
+    pub sort: db::GenreSortField,
+    /// `asc` (default) or `desc`.
+    #[serde(default)]
+    pub order: Option<String>,
 }
 
 /// One page of a genre's tracks. 404 for a genre no present track has.
 pub async fn genre_tracks(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Query(p): Query<PageQuery>,
+    Query(p): Query<GenreTracksQuery>,
 ) -> Result<Json<Page<Track>>, ApiError> {
     let page = p.page.max(1);
     let per_page = p.per_page.clamp(1, 500);
+    let order = db::GenreTrackOrder {
+        field: p.sort,
+        descending: p.order.as_deref() == Some("desc"),
+    };
     let (items, total) =
-        db::tracks_for_genre(&s.pool, &name, per_page, (page - 1) * per_page).await?;
+        db::tracks_for_genre(&s.pool, &name, order, per_page, (page - 1) * per_page).await?;
     if total == 0 {
         return Err(MusicError::NotFound(format!("genre {name}")).into());
     }

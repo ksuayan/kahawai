@@ -102,6 +102,60 @@ pub struct Genre {
     pub track_count: u64,
 }
 
+/// Everything a player caches (`GET /api/catalog`): present tracks, every
+/// album and artist, and the genre list. `rev` is the catalog revision it
+/// reflects, `catalog_id` names the server database it came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogSnapshot {
+    pub catalog_id: String,
+    pub rev: i64,
+    pub tracks: Vec<Track>,
+    pub albums: Vec<Album>,
+    pub artists: Vec<Artist>,
+    #[serde(default)]
+    pub genres: Vec<Genre>,
+}
+
+/// What changed since a revision (`GET /api/catalog/delta?since=`).
+/// Changed rows come whole; a track that went missing comes with
+/// `missing: true`. `full_resync` means the delta can't be applied (another
+/// database, a revision from the future, or too much changed): pull
+/// [`CatalogSnapshot`] instead. `genres` is always the full, current list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CatalogDelta {
+    pub catalog_id: String,
+    pub rev: i64,
+    #[serde(default)]
+    pub full_resync: bool,
+    #[serde(default)]
+    pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub albums: Vec<Album>,
+    #[serde(default)]
+    pub artists: Vec<Artist>,
+    #[serde(default)]
+    pub removed_tracks: Vec<i64>,
+    #[serde(default)]
+    pub removed_albums: Vec<i64>,
+    #[serde(default)]
+    pub removed_artists: Vec<i64>,
+    #[serde(default)]
+    pub genres: Vec<Genre>,
+}
+
+impl CatalogDelta {
+    /// Nothing changed (the genre list aside, which always comes whole).
+    pub fn is_empty(&self) -> bool {
+        !self.full_resync
+            && self.tracks.is_empty()
+            && self.albums.is_empty()
+            && self.artists.is_empty()
+            && self.removed_tracks.is_empty()
+            && self.removed_albums.is_empty()
+            && self.removed_artists.is_empty()
+    }
+}
+
 /// Ordered playlist. Positions are 0-based and dense. (Spec §3.2,
 /// §3.8.)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

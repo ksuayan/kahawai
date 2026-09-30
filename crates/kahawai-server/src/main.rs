@@ -2,6 +2,7 @@
 //! (Spec: kahawai-spec.md)
 
 mod api;
+mod catalog;
 mod db;
 #[cfg(target_os = "macos")]
 mod desktop;
@@ -99,6 +100,8 @@ pub fn app(state: AppState) -> Router {
         .route("/api/artists/{id}", get(api::get_artist))
         .route("/api/tracks/{id}", get(api::get_track))
         .route("/api/search", get(api::search))
+        .route("/api/catalog", get(catalog::get_catalog))
+        .route("/api/catalog/delta", get(catalog::get_catalog_delta))
         .route("/api/genres", get(api::list_genres))
         .route("/api/genres/report", get(api::genre_report))
         .route("/api/genres/{name}/tracks", get(api::genre_tracks))
@@ -1203,6 +1206,241 @@ mod integration_tests {
         assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 
+    /// Timings on a copy of a real library, run by hand:
+    /// `KAHAWAI_DB_COPY=/path/copy.db cargo test -p kahawai-server
+    /// real_db_timings -- --ignored --nocapture`. Opens it the way the server
+    /// does (pending migrations, statistics), then times what the player asks for.
+    #[tokio::test]
+    #[ignore = "needs a copy of a real library database; run by hand"]
+    async fn real_db_timings() {
+        use std::time::Instant;
+        let path = std::env::var("KAHAWAI_DB_COPY").expect("KAHAWAI_DB_COPY");
+        let t = Instant::now();
+        let pool = db::open(std::path::Path::new(&path)).await.unwrap();
+        println!("open (migrations + statistics): {:.2?}", t.elapsed());
+        let state = AppState {
+            pool: pool.clone(),
+            jobs: jobs::JobStore::new(),
+            config: Arc::new(std::sync::RwLock::new(ServerConfig::default())),
+            scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
+            catalog_events: tokio::sync::broadcast::channel(16).0,
+        };
+        let app = app(state);
+
+        let t = Instant::now();
+        let mut page = 1;
+        let mut albums = 0;
+        loop {
+            let (status, v) =
+                get_json(&app, &format!("/api/albums?page={page}&per_page=500")).await;
+            assert_eq!(status, StatusCode::OK);
+            let n = v["items"].as_array().unwrap().len();
+            albums += n;
+            if n < 500 {
+                break;
+            }
+            page += 1;
+        }
+        println!(
+            "album list, all {page} pages ({albums} albums): {:.2?}",
+            t.elapsed()
+        );
+
+        let ids: Vec<i64> = sqlx::query("SELECT id FROM albums ORDER BY RANDOM() LIMIT 100")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let t = Instant::now();
+        for id in &ids {
+            let (status, _) = get_json(&app, &format!("/api/albums/{id}")).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        println!(
+            "100 album pages: {:.2?} ({:.1?} each)",
+            t.elapsed(),
+            t.elapsed() / 100
+        );
+
+        let artist: i64 = sqlx::query(
+            "SELECT artist_id FROM album_artists GROUP BY artist_id ORDER BY COUNT(*) DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get(0);
+        let t = Instant::now();
+        let (_, v) = get_json(&app, &format!("/api/artists/{artist}")).await;
+        println!(
+            "busiest artist page ({} albums): {:.2?}",
+            v["albums"].as_array().map_or(0, |a| a.len()),
+            t.elapsed()
+        );
+
+        let t = Instant::now();
+        let (_, g) = get_json(&app, "/api/genres").await;
+        println!("genre list: {:.2?}", t.elapsed());
+        if let Some(name) = g[0]["name"].as_str() {
+            let t = Instant::now();
+            let (_, v) = get_json(
+                &app,
+                &format!("/api/genres/{name}/tracks?per_page=200&sort=year&order=desc"),
+            )
+            .await;
+            println!(
+                "first 200 of {name} ({} tracks), by year: {:.2?}",
+                v["total"],
+                t.elapsed()
+            );
+        }
+
+        let t = Instant::now();
+        let snap = catalog::snapshot(&pool).await.unwrap();
+        let bytes = serde_json::to_vec(&snap).unwrap().len();
+        println!(
+            "catalog snapshot: {} tracks, {} albums, {} artists, {:.1} MB JSON: {:.2?}",
+            snap.tracks.len(),
+            snap.albums.len(),
+            snap.artists.len(),
+            bytes as f64 / 1e6,
+            t.elapsed()
+        );
+        let t = Instant::now();
+        let d = catalog::delta(&pool, Some(&snap.catalog_id), snap.rev)
+            .await
+            .unwrap();
+        println!(
+            "empty delta (nothing changed): {:.2?}, empty = {}",
+            t.elapsed(),
+            d.is_empty()
+        );
+    }
+
+    /// The player's catalog: a snapshot with its revision, then deltas that
+    /// carry only what changed. A rescan of unchanged files, and fields a
+    /// player doesn't show, cost nothing; a delta from another database, a
+    /// revision from the future, or a large change asks for a full pull.
+    #[tokio::test]
+    async fn catalog_snapshot_and_deltas() {
+        let (app, state, dir) = scanned_app().await;
+        let (status, snap) = get_json(&app, "/api/catalog").await;
+        assert_eq!(status, StatusCode::OK);
+        let id = snap["catalog_id"].as_str().unwrap().to_string();
+        let rev = snap["rev"].as_i64().unwrap();
+        assert_eq!(id.len(), 32);
+        assert_eq!(snap["tracks"].as_array().unwrap().len(), 8);
+        assert_eq!(snap["albums"].as_array().unwrap().len(), 3);
+        assert!(!snap["artists"].as_array().unwrap().is_empty());
+        assert_eq!(snap["genres"][0]["name"], "Jazz");
+
+        let delta = |since: i64, id: &str| {
+            let (app, uri) = (
+                app.clone(),
+                format!("/api/catalog/delta?since={since}&catalog_id={id}"),
+            );
+            async move {
+                let (status, v) = get_json(&app, &uri).await;
+                assert_eq!(status, StatusCode::OK);
+                serde_json::from_value::<kahawai_core::CatalogDelta>(v).unwrap()
+            }
+        };
+        let d = delta(rev, &id).await;
+        assert!(d.is_empty() && d.rev == rev, "{d:?}");
+        assert_eq!(d.genres.len(), 1, "the genre list always comes whole");
+
+        // Rescanning unchanged files changes nothing a player shows.
+        let lib = dir.path().join("lib");
+        crate::scanner::run_scan_with_progress(&state.pool, &[lib], |_, _| {})
+            .await
+            .unwrap();
+        assert!(delta(rev, &id).await.is_empty(), "a no-op rescan is free");
+
+        // A content hash isn't shown; a title and a missing flag are.
+        let ids: Vec<i64> = sqlx::query("SELECT id FROM tracks ORDER BY id")
+            .fetch_all(&state.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        for sql in [
+            "UPDATE tracks SET hash = 'feed' WHERE id = ?",
+            "UPDATE tracks SET title = 'Renamed' WHERE id = ?",
+        ] {
+            sqlx::query(sql)
+                .bind(ids[0])
+                .execute(&state.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE tracks SET missing = 1 WHERE id = ?")
+            .bind(ids[1])
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let d = delta(rev, &id).await;
+        assert!(d.rev > rev, "revisions only go up");
+        let changed: Vec<(i64, Option<String>, bool)> = d
+            .tracks
+            .iter()
+            .map(|t| (t.id, t.title.clone(), t.missing))
+            .collect();
+        assert_eq!(changed.len(), 2);
+        assert_eq!(changed[0].1.as_deref(), Some("Renamed"));
+        assert_eq!((changed[1].0, changed[1].2), (ids[1], true), "went missing");
+        assert!(d.albums.is_empty() && d.artists.is_empty());
+
+        // From here on, only what came after.
+        let rev2 = d.rev;
+        let album: i64 = sqlx::query("SELECT id FROM albums ORDER BY id LIMIT 1")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap()
+            .get(0);
+        sqlx::query("UPDATE albums SET year = 1961 WHERE id = ?")
+            .bind(album)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let d = delta(rev2, &id).await;
+        assert!(d.tracks.is_empty());
+        assert_eq!(d.albums.len(), 1);
+        assert_eq!(d.albums[0].year, Some(1961));
+
+        // A deleted album (duplicates merged) leaves a tombstone.
+        let rev3 = d.rev;
+        sqlx::query("UPDATE tracks SET album_id = NULL WHERE album_id = ?")
+            .bind(album)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM album_artists WHERE album_id = ?")
+            .bind(album)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM albums WHERE id = ?")
+            .bind(album)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let d = delta(rev3, &id).await;
+        assert_eq!(d.removed_albums, vec![album]);
+
+        // Can't patch: another database, a future revision, too much changed.
+        assert!(delta(rev, "someotherdatabase").await.full_resync);
+        assert!(delta(d.rev + 100, &id).await.full_resync);
+        sqlx::query("UPDATE tracks SET title = title || '!'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert!(delta(d.rev, &id).await.full_resync, "8 of ~14 rows changed");
+    }
+
     /// A scan maps raw genre tags to canonical genres; the genre endpoints
     /// count present tracks only, page them, and report what the alias table
     /// didn't cover; text search matches the genre tag.
@@ -1264,6 +1502,40 @@ mod integration_tests {
         assert_eq!(v["items"].as_array().unwrap().len(), 1);
         let (status, _) = get_json(&app, "/api/genres/Polka/tracks").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Sorted on the server, so pages stay in order.
+        let albums = |v: &serde_json::Value| -> Vec<String> {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["album"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        let (_, asc) = get_json(&app, "/api/genres/Jazz/tracks?sort=title").await;
+        let (_, desc) = get_json(&app, "/api/genres/Jazz/tracks?sort=title&order=desc").await;
+        let (a, d) = (albums(&asc), albums(&desc));
+        assert!(
+            a.windows(2)
+                .all(|w| w[0].to_lowercase() <= w[1].to_lowercase()),
+            "{a:?}"
+        );
+        assert!(
+            d.windows(2)
+                .all(|w| w[0].to_lowercase() >= w[1].to_lowercase()),
+            "{d:?}"
+        );
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/genres/Jazz/tracks?sort=bogus")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
         let (_, r) = get_json(&app, "/api/genres/report").await;
         assert_eq!(r["distinct_raw"], 4);

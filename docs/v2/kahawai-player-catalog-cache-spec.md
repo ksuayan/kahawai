@@ -1,5 +1,22 @@
 # Spec: player catalog cache (no full re-pull on restart)
 
+## Status
+
+**Implemented** on the `catalog-cache` branch: migration `010_catalog_rev.sql` and `catalog.rs` (server), `CatalogSnapshot` / `CatalogDelta` (`kahawai-core`), `catalog()` / `catalog_delta()` (`kahawai-player-api`), `catalog.rs` (`kahawai-player-core`, the cache and sync), the `catalog_*` commands in the player shell, and a cache-first `library.ts`.
+
+Where it differs from the text below:
+
+- **Revisions come from SQLite triggers,** not from the scan writer. Every change to a shown track, album or artist field takes the next `meta.catalog_rev`, whoever writes it (scan, tag backfill, album merges, key refreshes, online lookups). An update that doesn't change a shown value (a rescan rewriting identical tags, a content hash) doesn't count, so a no-op rescan costs nothing. Deleted rows (albums, when duplicates merge) leave a tombstone.
+- **Albums and artists are tracked too,** not just tracks: covers, years and sort keys change through enrichment and key refreshes. The delta carries changed tracks, albums and artists whole, plus `removed_tracks` / `removed_albums` / `removed_artists`. A track that went missing comes back with `missing: true`, which the player treats like a removal, so there's no separate `missing_ids`.
+- **`catalog_id`** (random per server database) travels with every snapshot and delta. A cache from another database (a new install, another server URL) gets `full_resync`, as does a revision from the future or a delta touching more than 20% of the catalog.
+- **Start-up check is the delta call, not an ETag.** With a cache, the player asks `GET /api/catalog/delta?since=<rev>&catalog_id=<id>`: when nothing changed, that one small request is all the catalog traffic. `GET /api/catalog` (the full snapshot, about 45 MB of JSON for the real library's 81k tracks) runs only on the first start, and on `full_resync`.
+- **Genres** come whole with every snapshot and delta (they're a short list), and are cached. A genre's track list still needs the server.
+- **Player cache:** `kahawai-player-core::catalog` (rusqlite 0.32, which shares `libsqlite3-sys` with the server's sqlx), stored at `<app data dir>/catalog.db`. Rows are kept as the server's JSON keyed by id (tracks also by album id), and album track counts are counted from the cached tracks. It lives in player-core rather than the Tauri shell so it's tested with the workspace. The shell exposes `catalog_cached`, `catalog_sync`, `catalog_album_tracks` and `catalog_tracks`.
+- **Offline:** the library, album detail and artist detail (albums matched by artist name) come from the cache, under a banner saying so. Search, genre track lists, playlists not yet cached, and playback need the server.
+- **Older server** (no `/api/catalog`, a 404): the player reads the lists directly, as before.
+- **Measured on the real library** (81,316 tracks): the start-up check with nothing changed takes 11 ms on the server; the full snapshot is 48.7 MB of JSON, built in about 5 s.
+- **Artwork disk cache** was already built (the content-addressed, LRU-capped cache with the Settings size choice).
+
 ## Goal
 
 A player restart never re-pulls the full catalog. The library renders instantly

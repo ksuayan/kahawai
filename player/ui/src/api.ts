@@ -12,6 +12,7 @@ import type {
   Playlist,
   Track,
 } from "./types";
+import { parseSort, type SortKey } from "./lib/sorting";
 import { cachedArtworkUrl, inTauri } from "./tauri";
 
 let baseUrl = "http://localhost:8080";
@@ -326,9 +327,11 @@ export async function fetchGenreTracks(
   name: string,
   page = 1,
   perPage = 200,
+  sort: SortKey = "artist-asc",
 ): Promise<Page<Track>> {
+  const { field, dir } = parseSort(sort);
   return get<Page<Track>>(
-    `/api/genres/${encodeURIComponent(name)}/tracks?page=${page}&per_page=${perPage}`,
+    `/api/genres/${encodeURIComponent(name)}/tracks?page=${page}&per_page=${perPage}&sort=${field}&order=${dir}`,
   );
 }
 

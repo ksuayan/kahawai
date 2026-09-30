@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setBaseUrl } from "../api";
 import { makeAlbum, makeTrack, mockFetch } from "../test/fixtures";
+import { tauri } from "../test/tauri-mock";
 import { useLibraryStore } from "./library";
 
 beforeEach(() => {
@@ -177,5 +178,78 @@ describe("search", () => {
     release();
     await flushPromises();
     expect(lib.searchResults).toEqual([]);
+  });
+});
+
+describe("loadAll with the catalog cache (in the app)", () => {
+  const inApp = () => ((window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {});
+  const cachedAlbum = makeAlbum({ id: 7, title: "Blue Train", artist: "John Coltrane" });
+  const cached = { rev: 5, albums: [cachedAlbum], artists: [{ id: 1, name: "John Coltrane" }], genres: [{ name: "Jazz", track_count: 7 }] };
+
+  it("renders from the cache and, when nothing changed, fetches no lists", async () => {
+    inApp();
+    tauri.on("catalog_cached", cached).on("catalog_sync", { status: "unchanged", changed: 0 });
+    const calls = mockFetch({});
+    const lib = useLibraryStore();
+    await lib.loadAll();
+    expect(lib.albums.map((a) => a.title)).toEqual(["Blue Train"]);
+    expect(lib.genres[0].name).toBe("Jazz");
+    expect(lib.serverOnline).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(tauri.callsTo("catalog_cached")).toHaveLength(1);
+  });
+
+  it("re-reads the cache after a sync brought changes", async () => {
+    inApp();
+    let n = 0;
+    tauri
+      .on("catalog_cached", () => (n++ === 0 ? cached : { ...cached, rev: 9, albums: [cachedAlbum, makeAlbum({ id: 8, title: "Giant Steps" })] }))
+      .on("catalog_sync", { status: "updated", changed: 2 });
+    const lib = useLibraryStore();
+    await lib.loadAll();
+    expect(lib.albums).toHaveLength(2);
+  });
+
+  it("offline: keeps the cached library browsable and says so", async () => {
+    inApp();
+    const t = makeTrack({ album_id: 7, title: "Moment's Notice" });
+    tauri
+      .on("catalog_cached", cached)
+      .on("catalog_sync", { status: "offline", changed: 0, message: "connection refused" })
+      .on("catalog_album_tracks", [t]);
+    mockFetch({ "/api/albums/7": () => { throw new TypeError("Failed to fetch"); } });
+    const lib = useLibraryStore();
+    await lib.loadAll();
+    expect(lib.serverOnline).toBe(false);
+    expect(lib.showingCached).toBe(true);
+    expect(lib.error).toBeNull();
+    expect(lib.albums).toHaveLength(1);
+    const detail = await lib.getAlbumDetail(7);
+    expect(detail.album.title).toBe("Blue Train");
+    expect(detail.tracks.map((x) => x.title)).toEqual(["Moment's Notice"]);
+    expect(tauri.callsTo("catalog_album_tracks")).toEqual([{ albumId: 7 }]);
+  });
+
+  it("offline with nothing cached is an error", async () => {
+    inApp();
+    tauri.on("catalog_cached", { rev: null, albums: [], artists: [], genres: [] }).on("catalog_sync", { status: "offline", changed: 0 });
+    const lib = useLibraryStore();
+    await lib.loadAll();
+    expect(lib.error).toBe("Server not reachable");
+    expect(lib.showingCached).toBe(false);
+  });
+
+  it("an older server without the catalog endpoint is read directly, as before", async () => {
+    inApp();
+    tauri.on("catalog_cached", { rev: null, albums: [], artists: [], genres: [] }).on("catalog_sync", { status: "unsupported", changed: 0 });
+    mockFetch({
+      "/api/health": { status: "ok" },
+      "/api/albums": { items: [makeAlbum({ title: "A" })], page: 1, per_page: 500, total: 1 },
+      "/api/artists": [],
+    });
+    const lib = useLibraryStore();
+    await lib.loadAll();
+    expect(lib.albums).toHaveLength(1);
+    expect(lib.serverOnline).toBe(true);
   });
 });
