@@ -774,3 +774,14 @@ describe("Settings: shortcuts reference", () => {
     expect(w.text()).toContain("Available everywhere except while typing");
   });
 });
+
+describe("Settings: logs", () => {
+  it("reveals the log folder in Finder", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}; // the section is app-only
+    const w = await mountSettings();
+    await w.get('[data-testid="reveal-logs"]').trigger("click");
+    await settle();
+    expect(tauri.callsTo("reveal_logs")).toHaveLength(1);
+  });
+});
+

@@ -5,6 +5,7 @@ import UiHint from "../ui/UiHint.vue";
 import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import { computed, onMounted } from "vue";
 import { useEnrichmentStore } from "../stores/enrichment";
+import { setupRevealLogs } from "../tauri";
 import { useSetupStore } from "../stores/setup";
 import { CONFIDENCE_LEVELS, dirChipClass, dirChipText } from "../types";
 
@@ -190,6 +191,7 @@ const jobLine = computed(() => {
     <div class="mt-2 flex flex-wrap gap-2">
       <UiButton @click="setup.editConfiguration()">Change bind/database (restart required)</UiButton>
       <UiButton @click="setup.revealConfig()">Reveal Config in Finder</UiButton>
+      <UiButton data-testid="reveal-logs" @click="setupRevealLogs()">Reveal Logs in Finder</UiButton>
     </div>
   </div>
 </template>

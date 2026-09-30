@@ -25,3 +25,9 @@ kahawai-player-core = { path = "../../crates/kahawai-player-core" }
 kahawai-player-api = { path = "../../crates/kahawai-player-api" }
 kahawai-player-audio = { path = "../../crates/kahawai-player-audio" }
 fs4 = "1.1.0"
+# Logging: the engine (kahawai-player-core) logs through `tracing`; the
+# subscriber writes it out, and logfile.rs points output at a log file when
+# the app is opened from Finder (dup2).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
