@@ -3,7 +3,15 @@
   "app": {
     "security": { "csp": null },
     "windows": [
-      { "title": "Kahawai Server", "width": 720, "height": 560, "minWidth": 720, "minHeight": 560 }
+      {
+        "label": "main",
+        "create": false,
+        "title": "Kahawai Server",
+        "width": 720,
+        "height": 560,
+        "minWidth": 720,
+        "minHeight": 560
+      }
     ]
   },
   "build": {

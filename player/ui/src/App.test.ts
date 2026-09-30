@@ -94,6 +94,25 @@ describe("App: boot", () => {
     expect(calls.some((c) => c.url.endsWith("/api/playlists"))).toBe(true);
   });
 
+  it("tells the shell it's ready (closing the splash) once the library is showing, and only once", async () => {
+    tauriApp();
+    const calls = online();
+    const w = await bootApp();
+    expect(w.text()).toContain("Stranger in the Alps");
+    expect(tauri.callsTo("app_ready")).toHaveLength(1);
+    latestEventSource()!.emit("catalog-updated");
+    await settle();
+    expect(tauri.callsTo("app_ready")).toHaveLength(1);
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it("is ready with the server unreachable too: the splash doesn't wait for it", async () => {
+    tauriApp();
+    mockFetch({});
+    await bootApp();
+    expect(tauri.callsTo("app_ready")).toHaveLength(1);
+  });
+
   it("clears the offline banner once the server comes up, when it started showing the cached library", async () => {
     tauriApp();
     let serverUp = false;

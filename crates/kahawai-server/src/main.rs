@@ -207,8 +207,10 @@ fn main() {
             desktop::setup_server_status,
             desktop::setup_reveal_config,
             desktop::setup_quit,
+            desktop::setup_app_ready,
         ])
         .setup(|app| {
+            desktop::open_windows(app)?;
             desktop::autostart(app);
             Ok(())
         })

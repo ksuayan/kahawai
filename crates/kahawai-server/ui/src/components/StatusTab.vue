@@ -1,10 +1,16 @@
 <script setup lang="ts">
+import { onUnmounted, ref } from "vue";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import { useSetupStore } from "../stores/setup";
-import type { ScanJob } from "../types";
+import { scanTiming, type ScanJob } from "../types";
 
 const setup = useSetupStore();
+
+/** Ticks every second, so a running scan's elapsed time counts up. */
+const now = ref(Date.now());
+const clock = window.setInterval(() => (now.value = Date.now()), 1000);
+onUnmounted(() => window.clearInterval(clock));
 
 function scanLabel(j: ScanJob): string {
   if (j.status === "failed") return "Failed";
@@ -57,11 +63,14 @@ function scanClass(j: ScanJob): string {
 
     <h3 class="heading-3 mb-2 mt-2">Recent scans</h3>
     <ul v-if="setup.recentScans.length" class="mb-2 flex flex-col gap-1 text-[13px]">
-      <li v-for="j in setup.recentScans" :key="j.id" class="flex items-start justify-between gap-3">
-        <span :class="scanClass(j)">{{ scanLabel(j) }}</span>
-        <span class="min-w-0 flex-1 truncate text-right text-dim" :title="j.message ?? undefined">
+      <li v-for="j in setup.recentScans" :key="j.id" class="flex flex-col" data-testid="recent-scan">
+        <div class="flex items-baseline gap-2">
+          <span class="w-20 shrink-0" :class="scanClass(j)">{{ scanLabel(j) }}</span>
+          <span class="tabular-nums text-dim" data-testid="scan-timing">{{ scanTiming(j, now) }}</span>
+        </div>
+        <div class="min-h-[1.25rem] truncate pl-[5.5rem] text-xs text-faint" :title="j.message ?? undefined">
           {{ j.message ?? "" }}
-        </span>
+        </div>
       </li>
     </ul>
     <UiHint v-else tone="faint">No scans yet.</UiHint>

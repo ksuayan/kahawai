@@ -102,6 +102,34 @@ export interface ScanJob {
   progress: number;
   status: JobStatus;
   message?: string | null;
+  /** When it started running, Unix ms (absent from older servers). */
+  started_at?: number | null;
+  /** When it ended (done or failed), Unix ms. */
+  finished_at?: number | null;
+}
+
+/** A job's start, in the user's own locale and time zone:
+ *  "Sep 30, 2026, 9:41 PM". */
+export function formatWhen(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/** A duration: "45 s", "12 min 4 s", "1 h 3 min". */
+export function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${s % 60} s`;
+  return `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+
+/** "Sep 30, 2026, 9:41 PM · took 12 min 4 s", or "· running for 3 min 1 s". */
+export function scanTiming(j: ScanJob, now: number): string {
+  if (!j.started_at) return j.status === "queued" ? "Waiting to start" : "";
+  const when = formatWhen(j.started_at);
+  if (j.finished_at) return `${when} · took ${formatElapsed(j.finished_at - j.started_at)}`;
+  if (j.status === "running") return `${when} · running for ${formatElapsed(now - j.started_at)}`;
+  return when;
 }
 
 export function isJobActive(j: { status: JobStatus }): boolean {
