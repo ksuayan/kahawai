@@ -66,9 +66,11 @@ const stopCatalogEvents = onCatalogUpdated(() => void lib.loadAll());
 // The library and playlists load once at launch. If the server wasn't up yet
 // (it started after the player, or the NAS is still booting), retry them as
 // soon as the event stream connects. Only after a failed load: a healthy
-// reconnect doesn't refetch the whole catalog.
+// reconnect doesn't refetch the whole catalog. "Failed" includes showing the
+// cached library because the server was offline: that isn't an error, but
+// it needs the sync (and the offline banner cleared) all the same.
 const stopReloadOnConnect = onServerConnected(() => {
-  if (lib.error) void lib.loadAll();
+  if (lib.error || lib.serverOnline === false) void lib.loadAll();
   if (playlists.error) void playlists.reload();
 });
 const stopServerHealth = serverHealth.init();

@@ -94,6 +94,26 @@ describe("App: boot", () => {
     expect(calls.some((c) => c.url.endsWith("/api/playlists"))).toBe(true);
   });
 
+  it("clears the offline banner once the server comes up, when it started showing the cached library", async () => {
+    tauriApp();
+    let serverUp = false;
+    tauri
+      .on("catalog_cached", { rev: 7, albums, artists: [{ id: 1, name: "Phoebe Bridgers" }], genres: [] })
+      .on("catalog_sync", () => (serverUp ? { status: "unchanged", changed: 0 } : { status: "offline", changed: 0 }));
+    mockFetch({});
+    const w = await bootApp();
+    expect(w.get('[role="alert"]').text()).toContain("Offline: showing your cached library");
+    expect(w.text()).toContain("Stranger in the Alps");
+
+    serverUp = true;
+    online();
+    latestEventSource()!.emit("open");
+    await settle();
+    await settle();
+    expect(w.find('[role="alert"]').exists()).toBe(false);
+    expect(tauri.callsTo("catalog_sync")).toHaveLength(2);
+  });
+
   it("does not refetch the catalog on a reconnect when the last load worked", async () => {
     tauriApp();
     const calls = online();
