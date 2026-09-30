@@ -50,11 +50,21 @@ export interface Album {
   artwork_hash?: string | null;
   track_ids: number[];
   track_count: number;
+  /** "White Album, The": sort by this; absent from older servers. */
+  sort_title?: string | null;
+  /** "Beatles, The". */
+  sort_artist?: string | null;
+  /** MusicBrainz release ID, from embedded tags (or later a lookup). */
+  mbid?: string | null;
+  /** Where the cover came from: "embedded" (or later "caa"). */
+  artwork_source?: string | null;
 }
 
 export interface Artist {
   id: number;
   name: string;
+  /** "Beatles, The": sort by this; absent from older servers. */
+  sort_name?: string | null;
 }
 
 export interface Playlist {

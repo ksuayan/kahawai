@@ -10,6 +10,7 @@ mod dsd;
 mod dsd_meta;
 mod hashing;
 mod jobs;
+mod normalize;
 mod resample;
 mod scanner;
 mod stream;
@@ -91,6 +92,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/artists/{id}", get(api::get_artist))
         .route("/api/tracks/{id}", get(api::get_track))
         .route("/api/search", get(api::search))
+        .route("/api/enrichment/coverage", get(api::enrichment_coverage))
         .route(
             "/api/playlists",
             get(api::list_playlists).post(api::create_playlist),
@@ -797,6 +799,43 @@ mod integration_tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(v["items"].as_array().unwrap().len(), 1);
         assert_eq!(v["items"][0]["title"], "Kind of Blue");
+    }
+
+    /// Coverage counts albums, those matched from embedded MusicBrainz IDs,
+    /// and those a lookup would still have to find. Albums carry their sort
+    /// keys and ID in the API.
+    #[tokio::test]
+    async fn enrichment_coverage_and_album_fields() {
+        let (app, state, _dir) = scanned_app().await;
+        let (status, v) = get_json(&app, "/api/enrichment/coverage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            v,
+            serde_json::json!({ "total_albums": 3, "with_embedded_mbid": 0, "pending_lookup": 3 })
+        );
+
+        let id: i64 = sqlx::query("SELECT id FROM albums WHERE title = 'Blue Train'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap()
+            .get(0);
+        sqlx::query(
+            "UPDATE albums SET mbid = '3cc4b4b4-5b0b-4d2d-9d3c-1a9e2f0c4c11',
+             enrich_status = 'matched', enrich_source = 'embedded' WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let (_, v) = get_json(&app, "/api/enrichment/coverage").await;
+        assert_eq!(v["with_embedded_mbid"], 1);
+        assert_eq!(v["pending_lookup"], 2);
+
+        let (_, d) = get_json(&app, &format!("/api/albums/{id}")).await;
+        assert_eq!(d["album"]["mbid"], "3cc4b4b4-5b0b-4d2d-9d3c-1a9e2f0c4c11");
+        assert_eq!(d["album"]["sort_title"], "Blue Train");
+        assert_eq!(d["album"]["sort_artist"], "John Coltrane");
+        assert_eq!(d["album"]["artwork_source"], "embedded");
     }
 
     #[tokio::test]

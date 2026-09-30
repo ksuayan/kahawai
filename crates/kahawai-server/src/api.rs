@@ -143,8 +143,15 @@ fn album_from_row(r: &sqlx::sqlite::SqliteRow, track_count: u64) -> Album {
         artwork_hash: r.get("artwork_hash"),
         track_ids: Vec::new(),
         track_count,
+        sort_title: r.get("sort_title"),
+        sort_artist: r.get("sort_artist"),
+        mbid: r.get("mbid"),
+        artwork_source: r.get("artwork_source"),
     }
 }
+
+const ALBUM_COLS: &str =
+    "id, title, artist, year, artwork_hash, sort_title, sort_artist, mbid, artwork_source";
 
 pub async fn list_albums(
     State(s): State<AppState>,
@@ -157,10 +164,10 @@ pub async fn list_albums(
         .await
         .map_err(db::cvt)?
         .get(0);
-    let rows = sqlx::query(
-        "SELECT id, title, artist, year, artwork_hash FROM albums
-         ORDER BY title LIMIT ? OFFSET ?",
-    )
+    let rows = sqlx::query(&format!(
+        "SELECT {ALBUM_COLS} FROM albums
+         ORDER BY COALESCE(sort_title, title) LIMIT ? OFFSET ?"
+    ))
     .bind(per_page as i64)
     .bind(((page - 1) * per_page) as i64)
     .fetch_all(&s.pool)
@@ -189,7 +196,7 @@ pub async fn get_album(
     State(s): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<AlbumDetail>, ApiError> {
-    let r = sqlx::query("SELECT id, title, artist, year, artwork_hash FROM albums WHERE id = ?")
+    let r = sqlx::query(&format!("SELECT {ALBUM_COLS} FROM albums WHERE id = ?"))
         .bind(id)
         .fetch_optional(&s.pool)
         .await
@@ -202,16 +209,46 @@ pub async fn get_album(
     Ok(Json(AlbumDetail { album, tracks }))
 }
 
+/// How much of the library already has a MusicBrainz release ID from its own
+/// tags, and how many albums a lookup would still have to find. Tells the
+/// real enrichment workload up front.
+#[derive(Debug, Serialize)]
+pub struct EnrichmentCoverage {
+    pub total_albums: u64,
+    pub with_embedded_mbid: u64,
+    pub pending_lookup: u64,
+}
+
+pub async fn enrichment_coverage(
+    State(s): State<AppState>,
+) -> Result<Json<EnrichmentCoverage>, ApiError> {
+    let r = sqlx::query(
+        "SELECT COUNT(*), SUM(enrich_source = 'embedded'), SUM(enrich_status = 'pending')
+         FROM albums",
+    )
+    .fetch_one(&s.pool)
+    .await
+    .map_err(db::cvt)?;
+    let count = |i: usize| r.get::<Option<i64>, _>(i).unwrap_or(0).max(0) as u64;
+    Ok(Json(EnrichmentCoverage {
+        total_albums: count(0),
+        with_embedded_mbid: count(1),
+        pending_lookup: count(2),
+    }))
+}
+
 pub async fn list_artists(State(s): State<AppState>) -> Result<Json<Vec<Artist>>, ApiError> {
-    let rows = sqlx::query("SELECT id, name FROM artists ORDER BY name")
-        .fetch_all(&s.pool)
-        .await
-        .map_err(db::cvt)?;
+    let rows =
+        sqlx::query("SELECT id, name, sort_name FROM artists ORDER BY COALESCE(sort_name, name)")
+            .fetch_all(&s.pool)
+            .await
+            .map_err(db::cvt)?;
     Ok(Json(
         rows.iter()
             .map(|r| Artist {
                 id: r.get("id"),
                 name: r.get("name"),
+                sort_name: r.get("sort_name"),
             })
             .collect(),
     ))
@@ -227,7 +264,7 @@ pub async fn get_artist(
     State(s): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<ArtistDetail>, ApiError> {
-    let r = sqlx::query("SELECT id, name FROM artists WHERE id = ?")
+    let r = sqlx::query("SELECT id, name, sort_name FROM artists WHERE id = ?")
         .bind(id)
         .fetch_optional(&s.pool)
         .await
@@ -236,11 +273,13 @@ pub async fn get_artist(
     let artist = Artist {
         id,
         name: r.get("name"),
+        sort_name: r.get("sort_name"),
     };
     let album_rows = sqlx::query(
-        "SELECT a.id, a.title, a.artist, a.year, a.artwork_hash
+        "SELECT a.id, a.title, a.artist, a.year, a.artwork_hash, a.sort_title, a.sort_artist,
+           a.mbid, a.artwork_source
          FROM albums a JOIN album_artists aa ON aa.album_id = a.id
-         WHERE aa.artist_id = ? ORDER BY a.title",
+         WHERE aa.artist_id = ? ORDER BY COALESCE(a.sort_title, a.title)",
     )
     .bind(id)
     .fetch_all(&s.pool)

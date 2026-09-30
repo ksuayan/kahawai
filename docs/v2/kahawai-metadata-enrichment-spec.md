@@ -1,5 +1,17 @@
 # Spec: metadata remapping & enrichment (Phase C)
 
+## Status
+
+**Local part implemented** on the `phase-c-local` branch (`normalize.rs`, migration `007_metadata_local.sql`, `scanner.rs`, `GET /api/enrichment/coverage`). The external part (MusicBrainz client, Cover Art Archive, the `enrich_metadata` job, Paused/Cancelled job states) is not started; see `docs/Backlog.md`.
+
+What landed, and where it differs from the text below:
+
+- **Grouping and sort keys** are computed at scan time, not in a separate Phase C job: albums match on `title_key` / `artist_key` (case and spacing collapsed), and `sort_title`, `sort_artist`, `artists.sort_name` move a leading "The "/"A " to the end. A cheap pass refreshes every key before and after each scan, so existing catalogs and renamed albums stay consistent. Display strings are never changed.
+- **Year sanity** applies at scan time and, once, to existing rows in migration 007 (outside 1900 to next year becomes NULL). lofty reads only the first four digits of a date tag, so a typo like `19999` arrives as 1999 and is kept.
+- **Embedded MusicBrainz IDs** (Picard's `MUSICBRAINZ_ALBUMID`, `MUSICBRAINZ_TRACKID`) are read during the scan and stored as `albums.mbid` and `tracks.recording_mbid`; the album is marked `matched` / `embedded`. Malformed IDs are ignored. Files already in a catalog get a one-time tag-only re-read on the next scan (`tracks.mbid_checked`), like the MQA backfill. DSF/DFF files and SACD ISOs are not read for IDs.
+- **Not done on purpose: the `album_artist` NULL → `artist` fallback.** The scanner already groups files without an album-artist tag by folder, then by artist, promoting mixed folders to "Various Artists". A blanket fallback to the track artist would split compilations back into one album per artist, the regression the album-grouping fix removed.
+- **Deferred to the external part:** `enrich_attempts`, `enriched_at`, and the `mb_cache` table (only lookups need them).
+
 ## Goal
 
 Fix inconsistent metadata and fill gaps without touching embedded tags:

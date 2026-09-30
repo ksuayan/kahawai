@@ -29,16 +29,18 @@ export const useLibraryStore = defineStore("library", () => {
   const serverOnline = ref<boolean | null>(null);
   const error = ref<string | null>(null);
 
+  // Sort keys from the server ("Beatles, The"), falling back to the display
+  // strings for an older server.
   const sortedAlbums = computed(() =>
     [...albums.value].sort((a, b) =>
-      (a.artist ?? "").localeCompare(b.artist ?? "") ||
+      (a.sort_artist ?? a.artist ?? "").localeCompare(b.sort_artist ?? b.artist ?? "") ||
       (a.year ?? 0) - (b.year ?? 0) ||
-      a.title.localeCompare(b.title),
+      (a.sort_title ?? a.title).localeCompare(b.sort_title ?? b.title),
     ),
   );
 
   const sortedArtists = computed(() =>
-    [...artists.value].sort((a, b) => a.name.localeCompare(b.name)),
+    [...artists.value].sort((a, b) => (a.sort_name ?? a.name).localeCompare(b.sort_name ?? b.name)),
   );
 
   function cacheTracks(tracks: Track[]): void {

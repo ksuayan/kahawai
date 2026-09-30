@@ -57,7 +57,7 @@ fn default_true() -> bool {
 
 /// Album grouping. `track_ids` is populated on detail endpoints; list
 /// endpoints may leave it empty to avoid N+1 queries.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Album {
     pub id: i64,
     pub title: String,
@@ -71,12 +71,27 @@ pub struct Album {
     /// carry `track_ids` instead.
     #[serde(default)]
     pub track_count: u64,
+    /// Title for sorting ("White Album, The"). Absent from older servers.
+    #[serde(default)]
+    pub sort_title: Option<String>,
+    /// Artist for sorting ("Beatles, The").
+    #[serde(default)]
+    pub sort_artist: Option<String>,
+    /// MusicBrainz release ID, from embedded tags (or later a lookup).
+    #[serde(default)]
+    pub mbid: Option<String>,
+    /// Where the cover came from: "embedded" (or later "caa").
+    #[serde(default)]
+    pub artwork_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Artist {
     pub id: i64,
     pub name: String,
+    /// Name for sorting ("Beatles, The"). Absent from older servers.
+    #[serde(default)]
+    pub sort_name: Option<String>,
 }
 
 /// Ordered playlist. Positions are 0-based and dense. (Spec §3.2,
@@ -302,6 +317,10 @@ mod tests {
             artwork_hash: Some("abc123".into()),
             track_ids: vec![42, 43, 44],
             track_count: 3,
+            sort_title: Some("Kind of Blue".into()),
+            sort_artist: Some("Miles Davis".into()),
+            mbid: Some("3cc4b4b4-5b0b-4d2d-9d3c-1a9e2f0c4c11".into()),
+            artwork_source: Some("embedded".into()),
         };
         assert_eq!(round_trip(&album), album);
 

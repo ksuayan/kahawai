@@ -51,6 +51,22 @@ describe("loadAll", () => {
       "B2001x",
     ]);
   });
+
+  it("sorts by the server's sort keys, so a leading 'The' doesn't file under T", async () => {
+    const lib = useLibraryStore();
+    lib.albums = [
+      makeAlbum({ artist: "The Beatles", sort_artist: "Beatles, The", title: "The White Album", sort_title: "White Album, The" }),
+      makeAlbum({ artist: "The Beatles", sort_artist: "Beatles, The", title: "Abbey Road", sort_title: "Abbey Road" }),
+      makeAlbum({ artist: "Coltrane", title: "Blue Train" }), // older server: no sort keys
+    ];
+    expect(lib.sortedAlbums.map((a) => a.title)).toEqual(["Abbey Road", "The White Album", "Blue Train"]);
+    lib.artists = [
+      { id: 1, name: "The Beatles", sort_name: "Beatles, The" },
+      { id: 2, name: "Coltrane" },
+      { id: 3, name: "Abe" },
+    ];
+    expect(lib.sortedArtists.map((a) => a.name)).toEqual(["Abe", "The Beatles", "Coltrane"]);
+  });
 });
 
 describe("getAlbumDetail", () => {
