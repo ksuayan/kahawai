@@ -1,3 +1,8 @@
 [toolchain]
 channel = "1.94.1"
 components = ["rustfmt", "clippy"]
+# Both Mac architectures: build-client-universal.sh / build-combined-dmg.sh
+# make universal (Intel + Apple Silicon) apps, and rustup installs these
+# with the toolchain instead of failing the build until someone runs
+# `rustup target add`.
+targets = ["x86_64-apple-darwin", "aarch64-apple-darwin"]
