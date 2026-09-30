@@ -10,6 +10,7 @@ import {
   fetchTrack,
   searchTracks,
 } from "../api";
+import { catalogAlbumTracks, catalogCached, catalogSync, catalogTracks, type CachedCatalog } from "../tauri";
 import type { Album, Artist, Genre, Track } from "../types";
 
 function sortTracks(tracks: Track[]): Track[] {
@@ -31,6 +32,9 @@ export const useLibraryStore = defineStore("library", () => {
   const loading = ref(false);
   const serverOnline = ref<boolean | null>(null);
   const error = ref<string | null>(null);
+  /** True while the lists come from the local cache and the server can't
+   *  be reached (browse works; playback needs the server). */
+  const showingCached = ref(false);
 
   // Sort keys from the server ("Beatles, The"), falling back to the display
   // strings for an older server.
@@ -50,9 +54,52 @@ export const useLibraryStore = defineStore("library", () => {
     for (const t of tracks) trackCache.value.set(t.id, t);
   }
 
+  function applyCached(c: CachedCatalog): void {
+    albums.value = c.albums;
+    artists.value = c.artists;
+    genres.value = c.genres;
+  }
+
+  /**
+   * In the app: render from the local catalog cache at once, then sync it
+   * with the server (one small request when nothing changed, else a delta
+   * or a full pull) and re-render if anything came in. Server unreachable:
+   * keep showing the cache. Outside the app, or against a server without
+   * the catalog endpoint, fetch the lists directly as before.
+   */
   async function loadAll(): Promise<void> {
     loading.value = true;
     error.value = null;
+    const cached = await catalogCached();
+    const haveCache = cached !== undefined && cached.rev !== null;
+    if (haveCache) {
+      applyCached(cached);
+      loading.value = false;
+    }
+    const report = await catalogSync();
+    if (report && report.status !== "unsupported") {
+      if (report.status === "offline") {
+        serverOnline.value = false;
+        showingCached.value = haveCache;
+        if (!haveCache) error.value = "Server not reachable";
+      } else {
+        serverOnline.value = true;
+        showingCached.value = false;
+        if (report.status !== "unchanged" || !haveCache) {
+          const fresh = await catalogCached();
+          if (fresh) applyCached(fresh);
+        }
+      }
+      loading.value = false;
+      return;
+    }
+    await loadFromServer();
+  }
+
+  async function loadFromServer(): Promise<void> {
+    loading.value = true;
+    error.value = null;
+    showingCached.value = false;
     try {
       const online = await checkHealth();
       serverOnline.value = online;
@@ -75,7 +122,12 @@ export const useLibraryStore = defineStore("library", () => {
 
   /** Fetch any missing tracks and return them in id order. */
   async function ensureTracks(ids: number[]): Promise<Track[]> {
-    const missing = ids.filter((id) => !trackCache.value.has(id));
+    let missing = ids.filter((id) => !trackCache.value.has(id));
+    if (missing.length > 0 && showingCached.value) {
+      // Offline: the local catalog has every present track.
+      cacheTracks((await catalogTracks(missing)) ?? []);
+      missing = ids.filter((id) => !trackCache.value.has(id));
+    }
     if (missing.length > 0) {
       const fetched = await Promise.all(missing.map((id) => fetchTrack(id)));
       cacheTracks(fetched);
@@ -87,7 +139,18 @@ export const useLibraryStore = defineStore("library", () => {
 
   /** Full album detail: album record + its tracks, sorted by disc/track. */
   async function getAlbumDetail(id: number): Promise<{ album: Album; tracks: Track[] }> {
-    const { album, tracks: served } = await fetchAlbumDetail(id);
+    let detail;
+    try {
+      detail = await fetchAlbumDetail(id);
+    } catch (e) {
+      // Offline: the album and its tracks from the local catalog.
+      const album = albums.value.find((a) => a.id === id);
+      const cachedTracks = album ? await catalogAlbumTracks(id) : undefined;
+      if (!album || !cachedTracks) throw e;
+      cacheTracks(cachedTracks);
+      return { album, tracks: sortTracks(cachedTracks) };
+    }
+    const { album, tracks: served } = detail;
     // The server ships the tracks with the album; cache them and only
     // fetch individually if it left any out.
     cacheTracks(served);
@@ -96,7 +159,15 @@ export const useLibraryStore = defineStore("library", () => {
   }
 
   async function getArtistAlbums(id: number): Promise<{ artist: Artist; albums: Album[] }> {
-    const detail = await fetchArtistDetail(id);
+    let detail;
+    try {
+      detail = await fetchArtistDetail(id);
+    } catch (e) {
+      // Offline: the artist's albums by name, from the cached lists.
+      const artist = artists.value.find((a) => a.id === id);
+      if (!artist || albums.value.length === 0) throw e;
+      return { artist, albums: albums.value.filter((a) => a.artist === artist.name) };
+    }
     if (detail.albums) return { artist: detail.artist, albums: detail.albums };
     // Fallback: the endpoint returned just the artist; filter locally.
     if (albums.value.length === 0) albums.value = await fetchAllAlbums();
@@ -140,6 +211,7 @@ export const useLibraryStore = defineStore("library", () => {
     searching,
     loading,
     serverOnline,
+    showingCached,
     error,
     sortedAlbums,
     sortedArtists,

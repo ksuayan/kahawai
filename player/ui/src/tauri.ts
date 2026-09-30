@@ -6,7 +6,10 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  Album,
   AnalogSettings,
+  Artist,
+  Genre,
   CrossfeedSettings,
   BitPerfectMode,
   DsdStory,
@@ -295,4 +298,41 @@ export async function onPlayerState(cb: (s: PlayerState) => void): Promise<Unlis
     console.error("[tauri] could not subscribe to player-state:", err);
     return null;
   }
+}
+
+// --- Catalog cache (docs/v2/kahawai-player-catalog-cache-spec.md) ------------
+
+/** The library as last synced, straight from the shell's cache file. */
+export interface CachedCatalog {
+  /** `null` until the cache has been filled once. */
+  rev: number | null;
+  albums: Album[];
+  artists: Artist[];
+  genres: Genre[];
+}
+
+export type CatalogSyncStatus = "unchanged" | "updated" | "full" | "offline" | "unsupported";
+
+export interface CatalogSyncReport {
+  status: CatalogSyncStatus;
+  changed: number;
+  message?: string | null;
+}
+
+/** `undefined` outside Tauri or when the command fails. */
+export async function catalogCached(): Promise<CachedCatalog | undefined> {
+  return inTauri() ? cmd<CachedCatalog>("catalog_cached") : undefined;
+}
+
+/** Bring the cache up to date with the server. */
+export async function catalogSync(): Promise<CatalogSyncReport | undefined> {
+  return inTauri() ? cmd<CatalogSyncReport>("catalog_sync") : undefined;
+}
+
+export async function catalogAlbumTracks(albumId: number): Promise<Track[] | undefined> {
+  return inTauri() ? cmd<Track[]>("catalog_album_tracks", { albumId }) : undefined;
+}
+
+export async function catalogTracks(ids: number[]): Promise<Track[] | undefined> {
+  return inTauri() ? cmd<Track[]>("catalog_tracks", { ids }) : undefined;
 }

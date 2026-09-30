@@ -33,7 +33,30 @@ pub async fn open(db_path: &Path) -> anyhow::Result<SqlitePool> {
         .execute(&pool)
         .await?;
     run_migrations(&pool).await?;
+    optimize(&pool).await?;
     Ok(pool)
+}
+
+/// Keep the query planner's statistics current. Without them SQLite guesses
+/// index selectivity, and on this schema it guessed badly (see migration
+/// 011). The first time, a full `ANALYZE` (well under a second for a big
+/// library). After that, `PRAGMA optimize` re-analyzes only tables whose
+/// size changed a lot, which costs next to nothing when nothing did. Run
+/// at open and after every scan.
+pub async fn optimize(pool: &SqlitePool) -> Result<(), MusicError> {
+    let has_stats: bool =
+        sqlx::query("SELECT COUNT(*) > 0 FROM sqlite_master WHERE name = 'sqlite_stat1'")
+            .fetch_one(pool)
+            .await
+            .map_err(cvt)?
+            .get(0);
+    let sql = if has_stats {
+        "PRAGMA optimize"
+    } else {
+        "ANALYZE"
+    };
+    sqlx::query(sql).execute(pool).await.map_err(cvt)?;
+    Ok(())
 }
 
 async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
@@ -49,6 +72,8 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         (7, include_str!("../migrations/007_metadata_local.sql")),
         (8, include_str!("../migrations/008_enrichment.sql")),
         (9, include_str!("../migrations/009_genres.sql")),
+        (10, include_str!("../migrations/010_catalog_rev.sql")),
+        (11, include_str!("../migrations/011_indexes.sql")),
     ];
     // One connection throughout: `PRAGMA foreign_keys` is per connection, and
     // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off
@@ -115,18 +140,42 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 /// Execute a migration file: strip full-line comments (the naive statement
 /// splitter would trip on semicolons inside comments), then split on ';'.
 async fn apply_sql(conn: &mut sqlx::SqliteConnection, sql: &str) -> anyhow::Result<()> {
+    for stmt in split_statements(sql) {
+        sqlx::query(&stmt).execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+/// A migration file's statements, split on ';'. A `CREATE TRIGGER` body
+/// holds statements of its own, so it runs through to its closing `END`.
+fn split_statements(sql: &str) -> Vec<String> {
     let cleaned: String = sql
         .lines()
         .filter(|l| !l.trim_start().starts_with("--"))
         .collect::<Vec<_>>()
         .join("\n");
-    for stmt in cleaned.split(';') {
-        if stmt.trim().is_empty() {
+    let mut out = Vec::new();
+    let mut pending = String::new();
+    for piece in cleaned.split(';') {
+        if !pending.is_empty() {
+            pending.push(';');
+        }
+        pending.push_str(piece);
+        let stmt = pending.trim();
+        let upper = stmt.to_ascii_uppercase();
+        if upper.starts_with("CREATE TRIGGER") && !upper.ends_with("END") {
             continue;
         }
-        sqlx::query(stmt).execute(&mut *conn).await?;
+        if !stmt.is_empty() {
+            out.push(stmt.to_string());
+        }
+        pending.clear();
     }
-    Ok(())
+    let rest = pending.trim();
+    if !rest.is_empty() {
+        out.push(rest.to_string());
+    }
+    out
 }
 
 fn track_from_row(r: &SqliteRow) -> Track {
@@ -172,6 +221,23 @@ pub async fn get_track(pool: &SqlitePool, id: i64) -> Result<Option<Track>, Musi
     Ok(row.map(|r| track_from_row(&r)))
 }
 
+/// Tracks matching a `WHERE` clause with one integer parameter, by id.
+/// Backs the player catalog snapshot and delta.
+pub async fn tracks_where(
+    conn: &mut sqlx::SqliteConnection,
+    clause: &str,
+    arg: i64,
+) -> Result<Vec<Track>, MusicError> {
+    let rows = sqlx::query(&format!(
+        "SELECT {TRACK_COLS} FROM tracks WHERE {clause} ORDER BY id"
+    ))
+    .bind(arg)
+    .fetch_all(conn)
+    .await
+    .map_err(cvt)?;
+    Ok(rows.iter().map(track_from_row).collect())
+}
+
 /// Non-missing tracks of one album in play order. (S2 browse.)
 pub async fn tracks_for_album(pool: &SqlitePool, album_id: i64) -> Result<Vec<Track>, MusicError> {
     let rows = sqlx::query(&format!(
@@ -186,11 +252,46 @@ pub async fn tracks_for_album(pool: &SqlitePool, album_id: i64) -> Result<Vec<Tr
     Ok(rows.iter().map(track_from_row).collect())
 }
 
+/// Sort orders for a genre's tracks: by artist, album title or year, either
+/// way. Albums stay together in play order within each. Unknown years sort
+/// last both ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenreSortField {
+    #[default]
+    Artist,
+    Title,
+    Year,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GenreTrackOrder {
+    pub field: GenreSortField,
+    pub descending: bool,
+}
+
+impl GenreTrackOrder {
+    fn sql(self) -> String {
+        let dir = if self.descending { "DESC" } else { "ASC" };
+        let album = "t.album COLLATE NOCASE, t.album_id, t.disc_no, t.track_no, t.id";
+        match self.field {
+            GenreSortField::Artist => format!("t.artist COLLATE NOCASE {dir}, {album}"),
+            GenreSortField::Title => {
+                format!("t.album COLLATE NOCASE {dir}, t.album_id, t.disc_no, t.track_no, t.id")
+            }
+            GenreSortField::Year => {
+                format!("t.year IS NULL, t.year {dir}, t.artist COLLATE NOCASE, {album}")
+            }
+        }
+    }
+}
+
 /// One page of a canonical genre's present tracks, by artist, album and
 /// play order, and how many there are in all.
 pub async fn tracks_for_genre(
     pool: &SqlitePool,
     genre: &str,
+    order: GenreTrackOrder,
     limit: u64,
     offset: u64,
 ) -> Result<(Vec<Track>, u64), MusicError> {
@@ -211,8 +312,9 @@ pub async fn tracks_for_genre(
     let rows = sqlx::query(&format!(
         "SELECT {cols} FROM track_genres g JOIN tracks t ON t.id = g.track_id
          WHERE g.genre = ? AND t.missing = 0
-         ORDER BY t.artist COLLATE NOCASE, t.album COLLATE NOCASE, t.disc_no, t.track_no, t.id
-         LIMIT ? OFFSET ?"
+         ORDER BY {}
+         LIMIT ? OFFSET ?",
+        order.sql()
     ))
     .bind(genre)
     .bind(limit as i64)
@@ -221,17 +323,6 @@ pub async fn tracks_for_genre(
     .await
     .map_err(cvt)?;
     Ok((rows.iter().map(track_from_row).collect(), total as u64))
-}
-
-/// Non-missing track count for one album. (S2 browse — avoids N+1.)
-pub async fn album_track_count(pool: &SqlitePool, album_id: i64) -> Result<u64, MusicError> {
-    let n: i64 = sqlx::query("SELECT COUNT(*) FROM tracks WHERE album_id = ? AND missing = 0")
-        .bind(album_id)
-        .fetch_one(pool)
-        .await
-        .map_err(cvt)?
-        .get(0);
-    Ok(n as u64)
 }
 
 /// Minimal insert used by the integration tests to seed a catalog row.
@@ -292,7 +383,10 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            versions(&pool).await,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
 
         // Old row survived; new columns carry their defaults.
         let r = sqlx::query(
@@ -374,7 +468,10 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            versions(&pool).await,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
             .await
@@ -442,7 +539,10 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            versions(&pool).await,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
         let r =
             sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
                 .fetch_one(&pool)
@@ -568,15 +668,76 @@ mod tests {
         );
     }
 
+    /// Opening keeps planner statistics, and the hot queries use the
+    /// indexes meant for them (migration 011).
+    #[tokio::test]
+    async fn statistics_and_index_choices() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pool = open(&dir.path().join("t.db")).await.unwrap();
+        let has_stats: bool =
+            sqlx::query("SELECT COUNT(*) > 0 FROM sqlite_master WHERE name = 'sqlite_stat1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert!(has_stats);
+        let plan = |sql: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.get::<String, _>("detail"))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            }
+        };
+        let album = plan("SELECT id FROM tracks WHERE album_id = 1 AND missing = 0").await;
+        assert!(album.contains("idx_tracks_album"), "{album}");
+        let pending =
+            plan("SELECT id FROM tracks WHERE hash IS NULL AND missing = 0 AND id > 0 ORDER BY id")
+                .await;
+        assert!(pending.contains("idx_tracks_hash_pending"), "{pending}");
+        let artist = plan("SELECT album_id FROM album_artists WHERE artist_id = 1").await;
+        assert!(artist.contains("idx_album_artists_artist"), "{artist}");
+        for gone in ["idx_tracks_missing", "idx_albums_title", "idx_tracks_hash"] {
+            let n: i64 = sqlx::query("SELECT COUNT(*) FROM sqlite_master WHERE name = ?")
+                .bind(gone)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(n, 0, "{gone}");
+        }
+    }
+
+    /// Trigger bodies hold statements of their own and stay whole.
+    #[test]
+    fn split_statements_keeps_trigger_bodies_whole() {
+        let sql = "-- a; comment\nCREATE TABLE t (x);\nCREATE TRIGGER tr AFTER INSERT ON t\nBEGIN\n  UPDATE t SET x = 1;\n  UPDATE t SET x = 2;\nEND;\nINSERT INTO t VALUES (3);\n";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 3, "{stmts:?}");
+        assert!(stmts[1].starts_with("CREATE TRIGGER") && stmts[1].ends_with("END"));
+        assert!(stmts[1].contains("x = 1;") && stmts[1].contains("x = 2"));
+    }
+
     /// Fresh databases get every migration, and reopening is idempotent.
     #[tokio::test]
     async fn fresh_database_gets_all_migrations_idempotently() {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("fresh.db");
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            versions(&pool).await,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            versions(&pool).await,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
     }
 }

@@ -9,6 +9,7 @@
 pub mod analog;
 pub mod artwork;
 pub mod bitperfect;
+pub mod catalog;
 pub mod crossfeed;
 pub mod decode;
 pub mod dop;

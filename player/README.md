@@ -23,6 +23,10 @@ scripts/
 (platform-independent playback engine), and `crates/kahawai-player-audio` (real
 OS audio sinks) live in the workspace root.
 
+What the player stores (its catalog cache and other files), the queries and
+indexes it depends on, and database best practices:
+[DATABASE.md](DATABASE.md).
+
 ## Bit-perfect output and MQA
 
 Settings → **Bit-perfect output** (Off / MQA files only / All tracks; macOS).

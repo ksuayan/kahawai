@@ -6,6 +6,7 @@ import { ResizeObserverStub } from "../test/resizeobserver-mock";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { useQueueStore } from "../stores/queue";
+import { useViewPrefsStore } from "../stores/viewPrefs";
 import AlbumDetail from "./AlbumDetail.vue";
 import AlbumsView from "./AlbumsView.vue";
 import ArtistDetail from "./ArtistDetail.vue";
@@ -51,8 +52,25 @@ describe("AlbumsView", () => {
     const album = makeAlbum({ id: 77 });
     const { wrapper } = mountApp(AlbumsView, {}, {}, seed([album]));
     await settle();
-    await wrapper.get("button").trigger("click");
+    await wrapper.findAll("button").find((b) => b.text().includes(album.title))!.trigger("click");
     expect(useNavStore().view).toEqual({ name: "album", id: 77 });
+  });
+
+  it("shows albums as a list, in the chosen order", async () => {
+    const albums = [
+      makeAlbum({ id: 1, title: "Kind of Blue", artist: "Miles Davis", year: 1959 }),
+      makeAlbum({ id: 2, title: "Bitches Brew", artist: "Miles Davis", year: 1970 }),
+    ];
+    const { wrapper } = mountApp(AlbumsView, {}, {}, () => {
+      seed(albums)();
+      useViewPrefsStore().prefs.albumsLayout = "list";
+      useViewPrefsStore().prefs.albumsSort = "year-desc";
+    });
+    await settle();
+    const rows = wrapper.findAll('[data-testid="album-row"]');
+    expect(rows.map((r) => r.text().split("Miles")[0])).toEqual(["Bitches Brew", "Kind of Blue"]);
+    await rows[1].trigger("click");
+    expect(useNavStore().view).toEqual({ name: "album", id: 1 });
   });
 
   it("shows loading, error and empty states", () => {
@@ -116,7 +134,8 @@ describe("ArtistsView", () => {
       useLibraryStore().artists = [{ id: 2, name: "Stan Getz" }, { id: 1, name: "Bruno Mars" }];
     });
     expect(wrapper.text()).toContain("2 artists");
-    const rows = wrapper.findAll("li button");
+    await settle();
+    const rows = wrapper.findAll("button").filter((b) => /Bruno|Stan/.test(b.text()));
     expect(rows.map((r) => r.text())).toEqual(["BBruno Mars", "SStan Getz"]);
     await rows[1].trigger("click");
     expect(useNavStore().view).toEqual({ name: "artist", id: 2 });

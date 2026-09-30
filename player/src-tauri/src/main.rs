@@ -26,6 +26,8 @@ use kahawai_player_core::{
     EngineController, EqBand, OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, QualityMode,
     RepeatMode,
 };
+use kahawai_core::{Album, Artist, Genre};
+use kahawai_player_core::catalog::{CatalogCache, SyncReport};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Shared shell state. The engine is `Arc` so the event-forwarding thread
@@ -173,6 +175,68 @@ fn set_artwork_cache_max_bytes(state: State<'_, ArtworkState>, max_bytes: u64) -
     state.cache.set_max_bytes(max_bytes);
     ArtworkCacheConfig { max_bytes }.save(&state.config_path);
     artwork_cache_stats_for(&state.cache)
+}
+
+// --- Catalog cache (docs/v2/kahawai-player-catalog-cache-spec.md) ----------
+
+struct CatalogState {
+    cache: Arc<CatalogCache>,
+    engine: Arc<EngineController>,
+}
+
+/// What the library renders from before (or without) the server.
+#[derive(Debug, serde::Serialize)]
+struct CachedCatalogDto {
+    /// `None` until the cache has been filled once.
+    rev: Option<i64>,
+    albums: Vec<Album>,
+    artists: Vec<Artist>,
+    genres: Vec<Genre>,
+}
+
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, kahawai_core::MusicError> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// The cached catalog, straight from disk (no network).
+#[tauri::command]
+async fn catalog_cached(state: State<'_, CatalogState>) -> Result<CachedCatalogDto, String> {
+    let cache = state.cache.clone();
+    blocking(move || {
+        Ok(CachedCatalogDto {
+            rev: cache.state()?.map(|(_, rev)| rev),
+            albums: cache.albums()?,
+            artists: cache.artists()?,
+            genres: cache.genres()?,
+        })
+    })
+    .await
+}
+
+/// Bring the cache up to date with the current server: one small request
+/// when nothing changed, a delta, or a full pull.
+#[tauri::command]
+async fn catalog_sync(state: State<'_, CatalogState>) -> Result<SyncReport, String> {
+    let cache = state.cache.clone();
+    let server = state.engine.server_url();
+    blocking(move || cache.sync(&server)).await
+}
+
+#[tauri::command]
+async fn catalog_album_tracks(state: State<'_, CatalogState>, album_id: i64) -> Result<Vec<Track>, String> {
+    let cache = state.cache.clone();
+    blocking(move || cache.album_tracks(album_id)).await
+}
+
+#[tauri::command]
+async fn catalog_tracks(state: State<'_, CatalogState>, ids: Vec<i64>) -> Result<Vec<Track>, String> {
+    let cache = state.cache.clone();
+    blocking(move || cache.tracks(&ids)).await
 }
 
 /// The analog stage's effect on the level (matches `AnalogLevel` in the UI types).
@@ -870,6 +934,25 @@ fn main() {
                 .unwrap_or_else(|_| std::env::temp_dir().join("kahawai-player-artwork-cache.json"));
             let max_bytes = ArtworkCacheConfig::load(&artwork_config_path).max_bytes;
             let cache = ArtworkCache::new(art_dir, max_bytes).map_err(|e| format!("artwork cache: {e}"))?;
+
+            // Catalog cache: the app data dir (not the cache dir: losing it
+            // costs a full re-pull). An unusable file falls back to memory,
+            // which still syncs, just without surviving a restart.
+            let catalog_path = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("kahawai-player"))
+                .join("catalog.db");
+            let catalog = CatalogCache::open(&catalog_path)
+                .or_else(|e| {
+                    eprintln!("[shell] catalog cache at {}: {e}; using memory", catalog_path.display());
+                    CatalogCache::in_memory()
+                })
+                .map_err(|e| format!("catalog cache: {e}"))?;
+            app.manage(CatalogState {
+                cache: Arc::new(catalog),
+                engine: engine.clone(),
+            });
             app.manage(ArtworkState {
                 cache,
                 engine: engine.clone(),
@@ -912,6 +995,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            catalog_cached,
+            catalog_sync,
+            catalog_album_tracks,
+            catalog_tracks,
             get_queue_tracks,
             set_bit_perfect,
             get_server_url,

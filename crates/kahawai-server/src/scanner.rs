@@ -371,6 +371,9 @@ async fn scan_with_workers(
     refresh_keys(pool).await?;
     // New and re-read files may carry new genre tags.
     crate::genre::refresh_genres(pool).await?;
+    // A scan can change table sizes a lot (a first scan most of all): keep
+    // the planner's statistics current.
+    db::optimize(pool).await?;
 
     report.elapsed_secs = start.elapsed().as_secs_f64();
     sqlx::query(

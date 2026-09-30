@@ -30,53 +30,36 @@ function seedLibrary() {
   lib.albums = [makeAlbum()];
 }
 
-describe("ArtistsView scroll position", () => {
-  it("comes back to where it was left", async () => {
-    const main = makeMain();
-    const { pinia } = mountApp(ArtistsView, {}, {}, seedLibrary);
-    await settle();
-    const first = mountIn(ArtistsView, pinia, main);
-    await settle();
-    main.el.scrollTop = 1800;
-    first.unmount();
+describe("ArtistsView scroll position (its own virtualized scroller)", () => {
+  const scroller = (w: { find: (s: string) => { element: Element } }) => w.find(".overflow-y-auto").element as HTMLElement;
 
-    const again = mountIn(ArtistsView, pinia, main);
-    main.el.scrollTop = 0; // <main> was reused by another view meanwhile
+  it("comes back to where it was left", async () => {
+    const { wrapper, pinia } = mountApp(ArtistsView, {}, {}, seedLibrary);
     await settle();
-    expect(main.el.scrollTop).toBe(1800);
+    scroller(wrapper).scrollTop = 1800;
+    wrapper.unmount();
+    const again = mount(ArtistsView, { attachTo: document.body, global: { plugins: [pinia] } });
+    await settle();
+    expect(scroller(again).scrollTop).toBe(1800);
     again.unmount();
   });
 
-  it("starts at the top when never scrolled, dropping an offset left by another view", async () => {
-    const main = makeMain();
-    const { pinia } = mountApp(ArtistsView, {}, {}, seedLibrary);
-    main.el.scrollTop = 777; // stale, from whatever view was showing
-    const v = mountIn(ArtistsView, pinia, main);
+  it("starts at the top the first time", async () => {
+    const { wrapper } = mountApp(ArtistsView, {}, {}, seedLibrary);
     await settle();
-    expect(main.el.scrollTop).toBe(0);
-    v.unmount();
+    expect(scroller(wrapper).scrollTop).toBe(0);
+    wrapper.unmount();
   });
 
-  it("waits for the artists to load before restoring, and keeps the offset if left while loading", async () => {
-    const main = makeMain();
-    const { pinia } = mountApp(ArtistsView, {}, {}, () => {
+  it("keeps the offset if left while the artists were still loading", async () => {
+    const { wrapper, pinia } = mountApp(ArtistsView, {}, {}, () => {
       seedLibrary();
       useScrollMemoryStore().set("artists", 1200);
       useLibraryStore().loading = true;
     });
-    const v = mountIn(ArtistsView, pinia, main);
     await settle();
-    main.el.scrollTop = 5; // pretend something else scrolled it
-    v.unmount(); // left before the list ever appeared
+    wrapper.unmount();
     expect(useScrollMemoryStore(pinia).get("artists")).toBe(1200);
-
-    const w = mountIn(ArtistsView, pinia, main);
-    await settle();
-    expect(main.el.scrollTop).toBe(5); // not restored yet: still loading
-    useLibraryStore(pinia).loading = false;
-    await settle();
-    expect(main.el.scrollTop).toBe(1200);
-    w.unmount();
   });
 });
 

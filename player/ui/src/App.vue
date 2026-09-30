@@ -52,6 +52,8 @@ const toasts = useToastsStore();
 const abx = useAbxStore();
 const overlays = useOverlaysStore();
 const serverHealth = useServerHealthStore();
+/** Views that scroll inside a virtualized list or grid of their own. */
+const OWN_SCROLLER = new Set(["albums", "artists", "genre"]);
 
 // Cleanup must be registered synchronously: inside the async onMounted below
 // there is no active component instance left after the first await.
@@ -148,19 +150,23 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
         class="border-b border-line bg-warn/15 px-4 py-1.5 text-xs text-warn-fg"
         role="alert"
       >
-        Server unreachable at {{ settings.serverUrl }} — check Settings.
+        <template v-if="lib.showingCached">
+          Offline: showing your cached library. Playback needs the server at {{ settings.serverUrl }}.
+        </template>
+        <template v-else>Server unreachable at {{ settings.serverUrl }} — check Settings.</template>
       </div>
       <div class="flex min-h-0 flex-1">
         <Sidebar />
         <!--
-          Albums is a virtualized grid with its own scroller, so <main> must not scroll
-          for it: two nested scrollbars (and a scroll position split between them) is
-          what you get otherwise. There, <main> is a plain flex column the grid fills.
+          Virtualized views (Albums, Artists, a genre's tracks) have their own scroller,
+          so <main> must not scroll for them: two nested scrollbars (and a scroll
+          position split between them) is what you get otherwise. There, <main> is a
+          plain flex column the view fills.
         -->
         <main
           ref="mainEl"
           class="min-w-0 flex-1"
-          :class="nav.view.name === 'albums' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'"
+          :class="OWN_SCROLLER.has(nav.view.name) ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'"
         >
           <AlbumsView v-if="nav.view.name === 'albums'" />
           <AlbumDetail v-else-if="nav.view.name === 'album'" :id="nav.view.id ?? 0" />
