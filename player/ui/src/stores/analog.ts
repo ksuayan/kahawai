@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { getDspSettings, setAnalog } from "../tauri";
 import { clampAnalog, DEFAULT_ANALOG_SETTINGS, FLAVOUR_INFO, type AnalogFlavour, type AnalogLevel, type AnalogSettings, type ListeningRecipe } from "../types";
+import { uiGet, uiSet } from "../lib/uiState";
 
 export type Slot = "a" | "b";
 
@@ -19,7 +20,7 @@ interface Saved {
 
 function load(): Saved | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = uiGet(KEY);
     if (!raw) return null;
     const v = JSON.parse(raw) as Partial<Saved>;
     if (!v.a || !v.b) return null;
@@ -70,7 +71,7 @@ export const useAnalogStore = defineStore("analog", () => {
 
   function persist(): void {
     try {
-      localStorage.setItem(KEY, JSON.stringify({ a: a.value, b: b.value, active: active.value, masterOn: masterOn.value }));
+      uiSet(KEY, JSON.stringify({ a: a.value, b: b.value, active: active.value, masterOn: masterOn.value }));
     } catch {
       /* storage unavailable: the pair lasts for this session */
     }

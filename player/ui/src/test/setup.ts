@@ -4,6 +4,7 @@ import { tauri } from "./tauri-mock";
 import { MockEventSource, resetEventSourceMock } from "./eventsource-mock";
 import { resetServerEventListenersForTest } from "../api";
 import { resetResizeObserverMock, ResizeObserverStub } from "./resizeobserver-mock";
+import { resetUiStateForTest } from "../lib/uiState";
 
 vi.mock("@tauri-apps/api/core", async () => {
   const { tauri } = await import("./tauri-mock");
@@ -86,6 +87,7 @@ beforeEach(() => {
   resetEventSourceMock();
   resetResizeObserverMock();
   resetServerEventListenersForTest();
+  resetUiStateForTest();
   // Outside Tauri unless a test opts in.
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   vi.spyOn(console, "warn").mockImplementation(() => {});

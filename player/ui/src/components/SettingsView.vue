@@ -17,6 +17,7 @@ import { usePlayerStore } from "../stores/player";
 import { useJobsStore } from "../stores/jobs";
 import { useLibraryStore } from "../stores/library";
 import { usePlaylistsStore } from "../stores/playlists";
+import { useDeveloperStore } from "../stores/developer";
 import { useSettingsStore } from "../stores/settings";
 import {
   STREAM_FORMATS,
@@ -42,6 +43,7 @@ import LimiterSection from "./LimiterSection.vue";
 import SettingsSection from "./SettingsSection.vue";
 
 const settings = useSettingsStore();
+const developer = useDeveloperStore();
 const lib = useLibraryStore();
 const playlists = usePlaylistsStore();
 const dsp = useDspStore();
@@ -549,6 +551,36 @@ const dopRates = computed(() =>
           <span>{{ desc }}</span>
         </li>
       </ul>
+    </SettingsSection>
+
+    <SettingsSection v-if="inTauri()" title="Developer tools">
+      <UiHint>
+        For troubleshooting. Right-clicking where the app has no menu of its own then shows WebKit's menu
+        (Reload, Inspect Element), and the Web Inspector is available. Leave it off otherwise.
+      </UiHint>
+      <p v-if="developer.devBuild" class="m-0 text-xs text-dim" data-testid="developer-dev-build">
+        This is a development build: they're always on here.
+      </p>
+      <template v-else>
+        <UiSwitch
+          :model-value="developer.enabled"
+          label="Developer tools"
+          data-testid="developer-toggle"
+          @update:model-value="(v) => developer.set(v)"
+        />
+        <p
+          v-if="developer.enabled !== developer.inspector"
+          class="m-0 mt-2 text-xs text-dim"
+          role="status"
+          data-testid="developer-restart"
+        >
+          {{
+            developer.enabled
+              ? "WebKit's menu is on now. Restart the app for the Web Inspector."
+              : "WebKit's menu is off now. The Web Inspector goes away when you restart the app."
+          }}
+        </p>
+      </template>
     </SettingsSection>
   </ViewShell>
 </template>

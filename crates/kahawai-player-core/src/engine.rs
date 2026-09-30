@@ -2143,6 +2143,10 @@ struct EngineSettings {
     /// Exclusive bit-perfect output preference (default off).
     #[serde(default)]
     bit_perfect: BitPerfect,
+    /// Last volume (0..=1), restored at launch. `None`: never set (the
+    /// engine's default).
+    #[serde(default)]
+    volume: Option<f32>,
 }
 
 /// Queue state persisted to `queue.json` next to the engine settings file
@@ -2194,6 +2198,7 @@ impl EngineSettings {
                 global_format: None,
                 output_device: None,
                 bit_perfect: BitPerfect::default(),
+                volume: None,
             });
         // One-time migration: a file written before the quality mode existed
         // carries the old individual defaults (or choices made while
@@ -2238,6 +2243,10 @@ pub struct EngineController {
     bit_perfect: Arc<RwLock<BitPerfect>>,
     global_format: Arc<RwLock<Option<StreamFormat>>>,
     settings_path: PathBuf,
+    /// The latest volume not yet written to the settings file. Dragging the
+    /// slider sends many changes a second, so a saver thread writes the
+    /// last one at most every [`VOLUME_SAVE_EVERY`] (and shutdown flushes).
+    volume_to_save: Arc<Mutex<Option<f32>>>,
     /// Signalled by the playback thread once it has saved and is about to
     /// exit; taken by the first [`shutdown`](Self::shutdown).
     stopped: Mutex<Option<mpsc::Receiver<()>>>,
@@ -2280,6 +2289,9 @@ impl EngineController {
         ctrl.send(EngineCommand::SetBitPerfect(settings.bit_perfect));
         *ctrl.bit_perfect.write().expect("bit-perfect lock") = settings.bit_perfect;
         *ctrl.global_format.write().expect("format lock") = settings.global_format;
+        if let Some(v) = settings.volume {
+            ctrl.send(EngineCommand::SetVolume(v));
+        }
         // Restore the persisted queue, if any. Repeat/shuffle ride along in
         // the queue file so the restore is exact (shuffle order is
         // deterministic, so the persisted cursor still points at the same
@@ -2332,10 +2344,13 @@ impl EngineController {
             })
             .expect("spawn playback thread");
 
+        let volume_to_save = Arc::new(Mutex::new(None));
+        spawn_volume_saver(Arc::downgrade(&volume_to_save), settings_path.clone());
         Self {
             tx,
             snapshot,
             events,
+            volume_to_save,
             server_url,
             dsd_story: Arc::new(RwLock::new(DsdStory::default())),
             dsd_devices: Arc::new(RwLock::new(Vec::new())),
@@ -2500,7 +2515,11 @@ impl EngineController {
     pub fn set_track_format(&self, track_id: i64, fmt: Option<StreamFormat>) {
         self.send(EngineCommand::SetTrackFormat(track_id, fmt));
     }
+    /// Persisted (batched: see `volume_to_save`).
     pub fn set_volume(&self, v: f32) {
+        if v.is_finite() {
+            *self.volume_to_save.lock().expect("volume lock") = Some(v.clamp(0.0, 1.0));
+        }
         self.send(EngineCommand::SetVolume(v));
     }
 
@@ -2591,12 +2610,40 @@ impl EngineController {
     /// the periodic save only runs every 5 s, so without it a quit loses up
     /// to that much position. Safe to call more than once.
     pub fn shutdown(&self) {
+        save_volume(&self.volume_to_save, &self.settings_path);
         let _ = self.tx.send(EngineCommand::Shutdown);
         let rx = self.stopped.lock().expect("stopped lock").take();
         if let Some(rx) = rx {
             let _ = rx.recv_timeout(SHUTDOWN_WAIT);
         }
     }
+}
+
+/// How often, at most, a volume change is written to the settings file.
+const VOLUME_SAVE_EVERY: Duration = Duration::from_millis(400);
+
+/// Write the pending volume, if any, into the settings file.
+fn save_volume(pending: &Mutex<Option<f32>>, settings_path: &PathBuf) {
+    let Some(v) = pending.lock().expect("volume lock").take() else {
+        return;
+    };
+    let mut settings = EngineSettings::load(settings_path);
+    settings.volume = Some(v);
+    settings.save(settings_path);
+}
+
+/// Writes pending volume changes every [`VOLUME_SAVE_EVERY`]; exits once
+/// the controller (the only strong owner of `pending`) is gone.
+fn spawn_volume_saver(pending: std::sync::Weak<Mutex<Option<f32>>>, settings_path: PathBuf) {
+    let _ = std::thread::Builder::new()
+        .name("volume-saver".into())
+        .spawn(move || loop {
+            std::thread::sleep(VOLUME_SAVE_EVERY);
+            let Some(pending) = pending.upgrade() else {
+                break;
+            };
+            save_volume(&pending, &settings_path);
+        });
 }
 
 /// How long [`EngineController::shutdown`] waits for the final save. The

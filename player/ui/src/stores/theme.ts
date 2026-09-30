@@ -1,12 +1,13 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { uiGet, uiSet } from "../lib/uiState";
 
 export type Theme = "dark" | "light";
 const KEY = "kahawai-player.theme";
 
 function stored(): Theme | null {
   try {
-    const v = localStorage.getItem(KEY);
+    const v = uiGet(KEY);
     return v === "dark" || v === "light" ? v : null;
   } catch {
     return null;
@@ -34,7 +35,7 @@ export const useThemeStore = defineStore("theme", () => {
     theme.value = t;
     apply();
     try {
-      localStorage.setItem(KEY, t);
+      uiSet(KEY, t);
     } catch {
       /* storage unavailable: the choice lasts for this session */
     }

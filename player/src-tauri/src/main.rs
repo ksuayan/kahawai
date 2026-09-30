@@ -87,6 +87,134 @@ impl ArtworkCacheConfig {
     }
 }
 
+/// The UI's own preferences (view layouts and sorts, theme, EQ rows and
+/// presets, analog A/B, the last view, scroll positions, the last search),
+/// kept in `ui-state.json` next to the other settings: key → string, as the
+/// UI stores them. A file rather than the webview's localStorage, which a
+/// development build (served from localhost) and a release build
+/// (tauri://localhost) don't share, and which clearing webview data wipes.
+struct UiState {
+    values: Mutex<serde_json::Map<String, serde_json::Value>>,
+    path: PathBuf,
+}
+
+impl UiState {
+    fn load(path: PathBuf) -> Self {
+        let values = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        Self {
+            values: Mutex::new(values),
+            path,
+        }
+    }
+
+    fn save(&self, values: &serde_json::Map<String, serde_json::Value>) {
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(t) = serde_json::to_string_pretty(values) {
+            // Temp file + rename: a crash mid-write never leaves half a file.
+            let tmp = self.path.with_extension("json.tmp");
+            if std::fs::write(&tmp, t).is_ok() {
+                let _ = std::fs::rename(&tmp, &self.path);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn get_ui_state(state: State<'_, UiState>) -> serde_json::Map<String, serde_json::Value> {
+    state.values.lock().unwrap().clone()
+}
+
+/// Set one key (`value: null` removes it) and save.
+#[tauri::command]
+fn set_ui_state(state: State<'_, UiState>, key: String, value: Option<String>) {
+    let mut values = state.values.lock().unwrap();
+    match value {
+        Some(v) => {
+            values.insert(key, serde_json::Value::String(v));
+        }
+        None => {
+            values.remove(&key);
+        }
+    }
+    state.save(&values);
+}
+
+/// Settings → Developer tools, kept in `developer.json` next to the other
+/// shell settings. Off by default: a release build then shows no WebKit
+/// menu (Reload, Inspect Element) outside text, and has no Web Inspector.
+/// On, the UI lets WebKit's menu through at once, and the Inspector is there
+/// from the next launch (the window is created with it or without it).
+/// Development builds always have both.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct DeveloperConfig {
+    #[serde(default)]
+    devtools: bool,
+}
+
+impl DeveloperConfig {
+    fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &std::path::Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(t) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(path, t);
+        }
+    }
+}
+
+struct DeveloperState {
+    config: Mutex<DeveloperConfig>,
+    path: PathBuf,
+    /// Whether this launch's window has the Web Inspector.
+    inspector: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DeveloperToolsDto {
+    /// The saved choice.
+    enabled: bool,
+    /// The Web Inspector is available in this window (a restart applies a
+    /// change of `enabled`).
+    inspector: bool,
+    /// A development build: WebKit's menu and the Inspector are always on.
+    dev_build: bool,
+}
+
+fn developer_dto(state: &DeveloperState) -> DeveloperToolsDto {
+    DeveloperToolsDto {
+        enabled: state.config.lock().unwrap().devtools,
+        inspector: state.inspector,
+        dev_build: cfg!(debug_assertions),
+    }
+}
+
+#[tauri::command]
+fn get_developer_tools(state: State<'_, DeveloperState>) -> DeveloperToolsDto {
+    developer_dto(&state)
+}
+
+#[tauri::command]
+fn set_developer_tools(state: State<'_, DeveloperState>, enabled: bool) -> DeveloperToolsDto {
+    {
+        let mut config = state.config.lock().unwrap();
+        config.devtools = enabled;
+        config.save(&state.path);
+    }
+    developer_dto(&state)
+}
+
 /// `artwork://localhost/<hash>` → cached bytes, fetching from the server on
 /// a miss. Runs on a worker thread: the request handler must not block the
 /// UI thread on the network.
@@ -902,6 +1030,35 @@ fn main() {
             // macOS menu bar with a custom About item (the UI shows about.md).
             #[cfg(target_os = "macos")]
             app.set_menu(menu::build_app_menu(app.handle())?)?;
+
+            // The main window is created here rather than from the config
+            // (`create: false`), so the Web Inspector can follow the
+            // Developer tools setting: always in a development build, in a
+            // release build only when the user turned it on.
+            let developer_path = app
+                .path()
+                .app_config_dir()
+                .map(|d| d.join("developer.json"))
+                .unwrap_or_else(|_| std::env::temp_dir().join("kahawai-player-developer.json"));
+            let developer = DeveloperConfig::load(&developer_path);
+            app.manage(UiState::load(developer_path.with_file_name("ui-state.json")));
+            let inspector = cfg!(debug_assertions) || developer.devtools;
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .ok_or("tauri.conf.json has no \"main\" window")?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                .devtools(inspector)
+                .build()?;
+            app.manage(DeveloperState {
+                config: Mutex::new(developer),
+                path: developer_path,
+                inspector,
+            });
             // Persisted engine settings (server URL) live in the app config
             // dir; fall back to a temp file if the dir is unavailable.
             let settings_path = app
@@ -995,6 +1152,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            get_developer_tools,
+            set_developer_tools,
+            get_ui_state,
+            set_ui_state,
             catalog_cached,
             catalog_sync,
             catalog_album_tracks,

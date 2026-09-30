@@ -12,22 +12,30 @@ Related specs: [catalog cache](../docs/v2/kahawai-player-catalog-cache-spec.md),
 ## Overview: where the player keeps things
 
 The player owns one small database, its **catalog cache**. Everything else it
-remembers is a JSON file, a directory of images, or browser storage in the
-webview.
+remembers is a JSON file or a directory of images.
 
 | Store | Location | Owner | Holds |
 |---|---|---|---|
 | Catalog cache | `<app data dir>/catalog.db` (SQLite) | `kahawai-player-core::catalog` | The server's present tracks, albums, artists, genres, and the revision they reflect |
 | Artwork cache | `<app cache dir>/artwork/<hash>.img` | `kahawai-player-core::artwork` | Cover images by content hash, LRU-capped (Settings: 512 MB / 1 GB / 2 GB) |
-| Engine settings | `<app config dir>/engine-settings.json` | `EngineController` | Server URL, DSP settings, output choices |
+| Engine settings | `<app config dir>/engine-settings.json` | `EngineController` | Server URL, DSP settings, output choices, volume |
 | Saved queue | `<app config dir>/queue.json` | `EngineController` | Queue tracks, position, repeat and shuffle |
 | Artwork cap | `<app config dir>/artwork-cache.json` | Tauri shell | The chosen artwork cache size |
-| UI preferences | webview `localStorage` | Pinia stores | `kahawai.viewPrefs` (list/grid, sort per view), `kahawai-player.theme`, `kahawai-player.eq-rows`, `kahawai-player.eq-user-presets`, `kahawai-player.analog-ab` |
+| Developer tools | `<app config dir>/developer.json` | Tauri shell | Settings → Developer tools (WebKit menu, Web Inspector) |
+| UI state | `<app config dir>/ui-state.json` | `lib/uiState.ts` (through the shell) | `kahawai.viewPrefs` (list/grid, sort per view), `kahawai-player.theme`, `kahawai-player.eq-rows`, `kahawai-player.eq-user-presets`, `kahawai-player.analog-ab`, `kahawai.nav` (the last view), `kahawai.scroll` (scroll positions), `kahawai.search` (the last search) |
 
 The app data dir holds what's costly to lose (losing `catalog.db` means a
 full re-pull of about 49 MB). The cache dir holds what the OS may purge
-(artwork refetches on demand). `localStorage` is for per-device conveniences
-only, and every read of it tolerates a missing or unreadable value.
+(artwork refetches on demand).
+
+**UI state** lives in a file, not the webview's `localStorage`: a development
+build (served from `localhost:1420`) and a release build (`tauri://localhost`)
+are different origins with separate storage, and clearing webview data wipes
+it. `main.ts` loads `ui-state.json` before any store is created; `uiGet` /
+`uiSet` read it and write every change through. `localStorage` stays as a
+mirror (the store in a plain browser and in tests), and values saved there
+by earlier versions move into the file the first time they're read. Every
+read tolerates a missing or unreadable value.
 
 The server owns the library itself. The player never writes to it except
 through the HTTP API (playlists, jobs, settings).
@@ -208,6 +216,14 @@ how selective each index is, and on this schema it guessed wrong (see
   marking rows missing to deleting them, as the scanner does.
 - **Keep the startup path cheap.** The delta call with nothing changed must
   stay an index lookup: it runs on every player start.
+
+**Preferences**
+- **Save UI preferences with `uiGet`/`uiSet`, never `localStorage` directly,**
+  so they survive restarts in every build. Validate what you read (an older
+  or hand-edited file may hold anything) and fall back to a default.
+- **Batch high-frequency changes:** a slider or a scroll sends many values a
+  second. Volume is written at most every 0.4 s (and on quit), scroll
+  positions likewise.
 
 **The player's cache**
 - **Store the server's JSON, index only what you query by.** New fields then

@@ -25,13 +25,14 @@ import {
   type EqBandRow,
   type OutputDevice,
 } from "../types";
+import { uiGet, uiSet } from "../lib/uiState";
 
 const ROWS_KEY = "kahawai-player.eq-rows";
 const PRESETS_KEY = "kahawai-player.eq-user-presets";
 
 function loadUserPresets(): EqPreset[] {
   try {
-    const raw = localStorage.getItem(PRESETS_KEY);
+    const raw = uiGet(PRESETS_KEY);
     const list = raw ? (JSON.parse(raw) as { name: string; bands: EqBand[] }[]) : [];
     return list.map((p) => ({ id: `user:${p.name}`, name: p.name, bands: p.bands, builtin: false }));
   } catch {
@@ -52,7 +53,7 @@ export function validateRow(r: EqBandRow): string | null {
  * DSP settings: parametric EQ + loudness normalization. The Rust engine is
  * the source of truth for what is *applied* (persisted in
  * engine-settings.json); this store keeps the UI row model, including
- * per-row enable switches, in localStorage. Disabled rows are excluded
+ * per-row enable switches, in the UI state (lib/uiState). Disabled rows are excluded
  * from the band list pushed to the core. Both EQ and loudness are
  * PCM-only — the exclusive DoP path bypasses them bit-perfectly.
  */
@@ -85,7 +86,7 @@ export const useDspStore = defineStore("dsp", () => {
 
   function persistRows(): void {
     try {
-      localStorage.setItem(ROWS_KEY, JSON.stringify(rows.value));
+      uiSet(ROWS_KEY, JSON.stringify(rows.value));
     } catch {
       /* storage unavailable — rows stay session-local */
     }
@@ -116,7 +117,7 @@ export const useDspStore = defineStore("dsp", () => {
 
     let restored: EqBandRow[] | null = null;
     try {
-      const raw = localStorage.getItem(ROWS_KEY);
+      const raw = uiGet(ROWS_KEY);
       if (raw) restored = JSON.parse(raw) as EqBandRow[];
     } catch {
       restored = null;
@@ -155,7 +156,7 @@ export const useDspStore = defineStore("dsp", () => {
 
   function persistPresets(): void {
     try {
-      localStorage.setItem(
+      uiSet(
         PRESETS_KEY,
         JSON.stringify(userPresets.value.map((p) => ({ name: p.name, bands: p.bands }))),
       );
