@@ -45,6 +45,7 @@ fn album(id: i64) -> Album {
         artwork_hash: None,
         track_ids: vec![1, 2],
         track_count: 2,
+        ..Default::default()
     }
 }
 

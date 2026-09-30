@@ -93,6 +93,14 @@ export const useJobsStore = defineStore("jobs", () => {
           detail: j.message ?? "Job failed",
         });
         prev.toastId = null;
+      } else if (j.status === "paused" || j.status === "cancelled") {
+        if (prev.toastId != null) toasts.dismiss(prev.toastId);
+        // A lookup pauses itself when MusicBrainz is unreachable; the
+        // message says why and that nothing was lost.
+        if (j.status === "paused" && j.message) {
+          toasts.push("info", `${j.label || "Job"} paused`, { detail: j.message });
+        }
+        prev.toastId = null;
       }
       prev.status = j.status;
     }

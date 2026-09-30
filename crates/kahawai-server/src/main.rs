@@ -8,8 +8,11 @@ mod desktop;
 mod dop;
 mod dsd;
 mod dsd_meta;
+mod enrich;
 mod hashing;
 mod jobs;
+mod musicbrainz;
+mod normalize;
 mod resample;
 mod scanner;
 mod stream;
@@ -54,6 +57,9 @@ pub struct AppState {
     /// Ensures only one content-hashing job runs at a time. Separate from
     /// `scan_lock`: hashing can take hours and must not block a rescan.
     pub hash_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Held by the one running metadata-enrichment worker. Separate from the
+    /// scan and hash locks: enrichment talks to the network, not the disks.
+    pub enrich_lock: Arc<tokio::sync::Mutex<()>>,
     /// `GET /api/events` (SSE): lets already-connected clients learn the
     /// catalog changed, or that the server is about to exit, without
     /// polling for either. No receivers is not an error — `send` on an
@@ -91,6 +97,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/artists/{id}", get(api::get_artist))
         .route("/api/tracks/{id}", get(api::get_track))
         .route("/api/search", get(api::search))
+        .route("/api/enrichment/coverage", get(api::enrichment_coverage))
         .route(
             "/api/playlists",
             get(api::list_playlists).post(api::create_playlist),
@@ -107,6 +114,9 @@ pub fn app(state: AppState) -> Router {
         .route("/api/scan", post(api::trigger_scan))
         .route("/api/jobs", get(api::list_jobs).post(api::create_job))
         .route("/api/jobs/{id}", get(api::get_job))
+        .route("/api/jobs/{id}/pause", post(api::pause_job))
+        .route("/api/jobs/{id}/resume", post(api::resume_job))
+        .route("/api/jobs/{id}/cancel", post(api::cancel_job))
         // Timeout errors become 408 via the HandleErrorLayer (tower's
         // timeout error cannot convert to Infallible for Router::layer).
         .layer(
@@ -180,6 +190,9 @@ fn main() {
             desktop::setup_apply_config,
             desktop::setup_recent_scans,
             desktop::setup_live_scan_stats,
+            desktop::setup_enrichment_status,
+            desktop::setup_set_enrichment,
+            desktop::setup_enrichment_action,
             desktop::setup_start_server,
             desktop::setup_stop_server,
             desktop::setup_restart_server,
@@ -227,6 +240,7 @@ pub async fn run_server_with_ready(
         config: Arc::new(std::sync::RwLock::new(config.clone())),
         scan_lock: Arc::new(tokio::sync::Mutex::new(())),
         hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+        enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
         catalog_events,
     };
     if let Some(tx) = ready {
@@ -318,6 +332,7 @@ mod integration_tests {
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
     };
+    use kahawai_core::{JobKind, JobStatus};
     use sqlx::Row;
     use tower::ServiceExt;
 
@@ -347,6 +362,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir, fixture)
@@ -371,6 +387,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir)
@@ -799,6 +816,49 @@ mod integration_tests {
         assert_eq!(v["items"][0]["title"], "Kind of Blue");
     }
 
+    /// Coverage counts albums, those matched from embedded MusicBrainz IDs,
+    /// and those a lookup would still have to find. Albums carry their sort
+    /// keys and ID in the API.
+    #[tokio::test]
+    async fn enrichment_coverage_and_album_fields() {
+        let (app, state, _dir) = scanned_app().await;
+        let (status, v) = get_json(&app, "/api/enrichment/coverage").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "total_albums": 3,
+                "with_embedded_mbid": 0,
+                "matched_online": 0,
+                "no_match": 0,
+                "pending_lookup": 3
+            })
+        );
+
+        let id: i64 = sqlx::query("SELECT id FROM albums WHERE title = 'Blue Train'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap()
+            .get(0);
+        sqlx::query(
+            "UPDATE albums SET mbid = '3cc4b4b4-5b0b-4d2d-9d3c-1a9e2f0c4c11',
+             enrich_status = 'matched', enrich_source = 'embedded' WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        let (_, v) = get_json(&app, "/api/enrichment/coverage").await;
+        assert_eq!(v["with_embedded_mbid"], 1);
+        assert_eq!(v["pending_lookup"], 2);
+
+        let (_, d) = get_json(&app, &format!("/api/albums/{id}")).await;
+        assert_eq!(d["album"]["mbid"], "3cc4b4b4-5b0b-4d2d-9d3c-1a9e2f0c4c11");
+        assert_eq!(d["album"]["sort_title"], "Blue Train");
+        assert_eq!(d["album"]["sort_artist"], "John Coltrane");
+        assert_eq!(d["album"]["artwork_source"], "embedded");
+    }
+
     #[tokio::test]
     async fn album_detail_has_ordered_tracks() {
         let (app, _state, _dir) = scanned_app().await;
@@ -1130,6 +1190,113 @@ mod integration_tests {
         assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 
+    /// Online lookup is opt-in and runs one at a time; pause, resume and
+    /// cancel move it between states and refuse every other kind of job.
+    /// (The enrich_lock is held throughout so no worker reaches the real
+    /// MusicBrainz: as if one were running, paused in place.)
+    #[tokio::test]
+    async fn enrich_job_is_opt_in_and_can_be_paused_resumed_and_cancelled() {
+        let (app, state, _dir) = scanned_app().await;
+        let start = serde_json::json!({"kind": "enrich_metadata", "label": "Album info lookup"});
+        let (status, v) = post_json(&app, "/api/jobs", start.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "off by default");
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("Settings"),
+            "{v}"
+        );
+
+        state.config.write().unwrap().enrichment_enabled = true;
+        let _worker = state.enrich_lock.lock().await;
+        let (status, _) = post_json(&app, "/api/jobs", start).await;
+        assert_eq!(status, StatusCode::CONFLICT, "one at a time");
+
+        let hash = state
+            .jobs
+            .create(JobKind::HashFiles, "Content hashing".into(), None)
+            .await;
+        for action in ["pause", "resume", "cancel"] {
+            let (status, _) = post_json(
+                &app,
+                &format!("/api/jobs/{}/{action}", hash.id),
+                serde_json::json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{action} a hash job");
+        }
+        let (status, _) = post_json(&app, "/api/jobs/nope/pause", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let job = state
+            .jobs
+            .create(JobKind::EnrichMetadata, "Album info lookup".into(), None)
+            .await;
+        state.jobs.set_status(&job.id, JobStatus::Running).await;
+        let act = |action: &str| {
+            let (app, uri) = (app.clone(), format!("/api/jobs/{}/{action}", job.id));
+            async move { post_json(&app, &uri, serde_json::json!({})).await }
+        };
+        let (status, v) = act("pause").await;
+        assert_eq!(
+            (status, v["status"].as_str()),
+            (StatusCode::OK, Some("paused"))
+        );
+        assert_eq!(act("pause").await.0, StatusCode::CONFLICT);
+
+        // A scan finishing now doesn't queue a second lookup behind the
+        // paused one: that one is the user's to resume.
+        api::maybe_queue_enrich(&state).await.unwrap();
+        let lookups = state
+            .jobs
+            .list()
+            .into_iter()
+            .filter(|j| j.kind == JobKind::EnrichMetadata)
+            .count();
+        assert_eq!(lookups, 1);
+
+        state
+            .jobs
+            .set_message(&job.id, Some("Paused: offline".into()))
+            .await;
+        let (status, v) = act("resume").await;
+        assert_eq!(
+            (status, v["status"].as_str()),
+            (StatusCode::OK, Some("running"))
+        );
+        assert!(v["message"].is_null(), "the pause reason is cleared");
+        assert_eq!(act("resume").await.0, StatusCode::CONFLICT);
+
+        let (status, v) = act("cancel").await;
+        assert_eq!(
+            (status, v["status"].as_str()),
+            (StatusCode::OK, Some("cancelled"))
+        );
+        for action in ["pause", "resume", "cancel"] {
+            assert_eq!(
+                act(action).await.0,
+                StatusCode::CONFLICT,
+                "{action} after cancel"
+            );
+        }
+
+        // Settings: the threshold is range-checked, and turning lookup off
+        // cancels one in progress (no names leave the LAN once it's off).
+        assert!(matches!(
+            api::set_enrichment(&state, true, 0.3).await,
+            Err(kahawai_core::MusicError::BadRequest(_))
+        ));
+        let job = state
+            .jobs
+            .create(JobKind::EnrichMetadata, "Album info lookup".into(), None)
+            .await;
+        state.jobs.set_status(&job.id, JobStatus::Paused).await;
+        api::set_enrichment(&state, false, 0.8).await.unwrap();
+        assert_eq!(
+            state.jobs.get(&job.id).unwrap().status,
+            JobStatus::Cancelled
+        );
+        assert_eq!(state.config.read().unwrap().enrichment_min_confidence, 0.8);
+    }
+
     /// The desktop shell edits `AppState.config` in place (add a music
     /// folder, Apply) rather than restarting the process; this is the
     /// plumbing that makes that possible.
@@ -1333,6 +1500,7 @@ mod integration_tests {
             config: Arc::new(std::sync::RwLock::new(config)),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state), dir)
@@ -1584,6 +1752,7 @@ mod integration_tests {
             config: Arc::new(std::sync::RwLock::new(config)),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state.clone()), state, dir, bits)
@@ -1860,6 +2029,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -1899,6 +2069,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -1949,6 +2120,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -2008,6 +2180,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -2066,6 +2239,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -2120,6 +2294,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         let app = app(state);
@@ -2217,6 +2392,7 @@ mod integration_tests {
             })),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
+            enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
         };
         (app(state), dir)

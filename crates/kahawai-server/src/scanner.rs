@@ -44,6 +44,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tracing::{info, warn};
 
 use crate::db;
+use crate::normalize::{current_year, group_key, sane_year, sort_key};
 
 /// Outcome of one scan run. Recorded in `scan_log`.
 #[derive(Debug, Default)]
@@ -85,6 +86,10 @@ struct FileAnalysis {
     /// MQA-encoded (MQAENCODER tag) and the pre-fold master rate.
     mqa: bool,
     original_sample_rate: Option<u32>,
+    /// MusicBrainz release ID from the tags (Picard's MUSICBRAINZ_ALBUMID).
+    release_mbid: Option<String>,
+    /// MusicBrainz recording ID (Picard's MUSICBRAINZ_TRACKID).
+    recording_mbid: Option<String>,
 }
 
 struct ArtworkData {
@@ -124,8 +129,9 @@ enum Work {
         mtime: Option<i64>,
         is_new: bool,
     },
-    /// An unchanged row cataloged before MQA detection: read its tags only.
-    MqaBackfill { path: PathBuf },
+    /// An unchanged row whose tags were read before MQA detection or
+    /// MusicBrainz IDs existed: read its tags only.
+    TagBackfill { path: PathBuf },
 }
 
 /// One catalog change, applied by the single writer task.
@@ -134,11 +140,19 @@ enum CatalogWrite {
         analysis: Box<FileAnalysis>,
         is_new: bool,
     },
-    Mqa {
+    Tags {
         path: String,
-        mqa: bool,
-        original: Option<u32>,
+        tags: TagInfo,
     },
+}
+
+/// What a tag-only re-read learns about an unchanged file.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct TagInfo {
+    mqa: bool,
+    original_sample_rate: Option<u32>,
+    release_mbid: Option<String>,
+    recording_mbid: Option<String>,
 }
 
 /// Throughput counters, so the next bottleneck is measured rather than guessed.
@@ -232,10 +246,13 @@ async fn scan_with_workers(
     .iter()
     .map(|r| r.get::<String, _>("path"))
     .collect();
-    // Rows cataloged before MQA detection existed: tags are read the next
-    // time the file is visited.
-    let mut mqa_unchecked: HashSet<String> =
-        sqlx::query("SELECT path FROM tracks WHERE mqa_checked = 0")
+    // Grouping keys must be current before any track is matched to an album
+    // (rows from before the keys existed, or renamed by the last scan).
+    refresh_keys(pool).await?;
+    // Rows whose tags were read before MQA detection or MusicBrainz IDs
+    // existed: tags are read the next time the file is visited.
+    let mut tags_unchecked: HashSet<String> =
+        sqlx::query("SELECT path FROM tracks WHERE mqa_checked = 0 OR mbid_checked = 0")
             .fetch_all(pool)
             .await
             .map_err(db::cvt)?
@@ -283,10 +300,10 @@ async fn scan_with_workers(
                 Some((ksize, kmtime, _)) if *ksize == Some(size) && *kmtime == mtime);
         let work = if unchanged {
             report.files_skipped += 1;
-            if !mqa_unchecked.remove(&path_str) {
+            if !tags_unchecked.remove(&path_str) {
                 continue;
             }
-            Work::MqaBackfill { path }
+            Work::TagBackfill { path }
         } else {
             let is_new = !known.contains_key(&path_str);
             Work::Analyze {
@@ -347,6 +364,8 @@ async fn scan_with_workers(
     if merged > 0 {
         info!(merged, "merged duplicate album rows");
     }
+    // Merges and "Various Artists" promotions change album artists.
+    refresh_keys(pool).await?;
 
     report.elapsed_secs = start.elapsed().as_secs_f64();
     sqlx::query(
@@ -461,13 +480,12 @@ fn do_work(work: Work, metrics: &ScanMetrics) -> Option<CatalogWrite> {
                 }
             }
         }
-        Work::MqaBackfill { path } => {
-            let (mqa, original) = std::panic::catch_unwind(AssertUnwindSafe(|| read_mqa(&path)))
-                .unwrap_or((false, None));
-            Some(CatalogWrite::Mqa {
+        Work::TagBackfill { path } => {
+            let tags =
+                std::panic::catch_unwind(AssertUnwindSafe(|| read_tags(&path))).unwrap_or_default();
+            Some(CatalogWrite::Tags {
                 path: path.to_string_lossy().to_string(),
-                mqa,
-                original,
+                tags,
             })
         }
     }
@@ -494,21 +512,31 @@ async fn write_catalog(
                         updated += 1;
                     }
                 }
-                CatalogWrite::Mqa {
-                    path,
-                    mqa,
-                    original,
-                } => {
+                CatalogWrite::Tags { path, tags } => {
                     sqlx::query(
-                        "UPDATE tracks SET mqa = ?, original_sample_rate = ?, mqa_checked = 1
+                        "UPDATE tracks SET mqa = ?, original_sample_rate = ?, mqa_checked = 1,
+                         recording_mbid = COALESCE(?, recording_mbid), mbid_checked = 1
                          WHERE path = ?",
                     )
-                    .bind(i64::from(mqa))
-                    .bind(original.map(i64::from))
+                    .bind(i64::from(tags.mqa))
+                    .bind(tags.original_sample_rate.map(i64::from))
+                    .bind(&tags.recording_mbid)
                     .bind(&path)
                     .execute(&mut *tx)
                     .await
                     .map_err(db::cvt)?;
+                    if let Some(mbid) = &tags.release_mbid {
+                        sqlx::query(
+                            "UPDATE albums SET mbid = ?, enrich_status = 'matched',
+                             enrich_source = 'embedded'
+                             WHERE mbid IS NULL AND id = (SELECT album_id FROM tracks WHERE path = ?)",
+                        )
+                        .bind(mbid)
+                        .bind(&path)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db::cvt)?;
+                    }
                 }
             }
         }
@@ -557,6 +585,8 @@ fn analyze_meta(path: &Path, size: i64, mtime: Option<i64>) -> Result<FileAnalys
         decodable: format.is_directly_streamable(),
         mqa: false,
         original_sample_rate: None,
+        release_mbid: None,
+        recording_mbid: None,
     };
 
     // Best effort: undecodable-yet sources (DSD/ISO) may not parse; they are
@@ -576,10 +606,15 @@ fn analyze_meta(path: &Path, size: i64, mtime: Option<i64>) -> Result<FileAnalys
                 a.album = tag.album().map(|c| c.into_owned());
                 a.album_artist = tag.get_string(&ItemKey::AlbumArtist).map(str::to_string);
                 a.genre = tag.genre().map(|c| c.into_owned());
-                a.year = tag.year().and_then(|y| u16::try_from(y).ok());
+                a.year = sane_year(
+                    tag.year().and_then(|y| u16::try_from(y).ok()),
+                    current_year(),
+                );
                 a.track_no = tag.track();
                 a.disc_no = tag.disk();
                 (a.mqa, a.original_sample_rate) = mqa_of(tag);
+                a.release_mbid = mbid_of(tag, &ItemKey::MusicBrainzReleaseId);
+                a.recording_mbid = mbid_of(tag, &ItemKey::MusicBrainzRecordingId);
                 if let Some(pic) = tag.pictures().iter().find(|p| !p.data().is_empty()) {
                     let mime = pic
                         .mime_type()
@@ -639,12 +674,38 @@ fn mqa_of(tag: &lofty::tag::Tag) -> (bool, Option<u32>) {
     (mqa, original.filter(|_| mqa))
 }
 
-/// Tags only (no hashing): used to backfill MQA info for rows cataloged
-/// before the column existed.
-fn read_mqa(path: &Path) -> (bool, Option<u32>) {
-    match lofty::read_from_path(path) {
-        Ok(tagged) => tagged.primary_tag().map(mqa_of).unwrap_or((false, None)),
-        Err(_) => (false, None),
+/// A MusicBrainz ID from the tags, if it is one: the 36-character hyphenated
+/// form, lowercased. Anything else (an empty or mangled field) is ignored.
+fn mbid_of(tag: &lofty::tag::Tag, key: &ItemKey) -> Option<String> {
+    tag.get_string(key)
+        .map(str::trim)
+        .filter(|s| is_mbid(s))
+        .map(str::to_ascii_lowercase)
+}
+
+fn is_mbid(s: &str) -> bool {
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Tags only (no full analysis): backfills MQA info and MusicBrainz IDs for
+/// rows cataloged before those were read.
+fn read_tags(path: &Path) -> TagInfo {
+    let Ok(tagged) = lofty::read_from_path(path) else {
+        return TagInfo::default();
+    };
+    let Some(tag) = tagged.primary_tag() else {
+        return TagInfo::default();
+    };
+    let (mqa, original_sample_rate) = mqa_of(tag);
+    TagInfo {
+        mqa,
+        original_sample_rate,
+        release_mbid: mbid_of(tag, &ItemKey::MusicBrainzReleaseId),
+        recording_mbid: mbid_of(tag, &ItemKey::MusicBrainzRecordingId),
     }
 }
 
@@ -678,7 +739,7 @@ fn apply_dsd(path: &Path, a: &mut FileAnalysis) {
         a.album = t.album;
         a.album_artist = t.album_artist;
         a.genre = t.genre;
-        a.year = t.year;
+        a.year = sane_year(t.year, current_year());
         a.track_no = t.track_no;
         a.disc_no = t.disc_no;
         if let Some(p) = t.picture {
@@ -721,8 +782,9 @@ async fn ensure_artist(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     name: &str,
 ) -> Result<i64, MusicError> {
-    sqlx::query("INSERT OR IGNORE INTO artists (name) VALUES (?)")
+    sqlx::query("INSERT OR IGNORE INTO artists (name, sort_name) VALUES (?, ?)")
         .bind(name)
+        .bind(sort_key(name))
         .execute(&mut **tx)
         .await
         .map_err(db::cvt)?;
@@ -737,7 +799,9 @@ async fn ensure_artist(
 
 /// Find or create the album row for a track.
 ///
-/// Files are matched to an existing album with the same title, in order:
+/// Titles match on their grouping key (case and spacing ignored), and so do
+/// artists. Files are matched to an existing album with the same title, in
+/// order:
 ///
 /// 1. **Album-artist tag** equal to the album's artist (tagged rips).
 ///
@@ -754,50 +818,56 @@ async fn ensure_artist(
 ///
 /// Otherwise a new album is created. (Before this ordering, untagged files
 /// only ever matched an empty album-artist, so every track got its own album.)
+///
+/// An embedded MusicBrainz release ID fills an album's `mbid` if it has none,
+/// and marks it matched from embedded tags.
 async fn resolve_album(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     title: &str,
-    album_artist: Option<&str>,
-    track_artist: Option<&str>,
-    year: Option<u16>,
+    a: &FileAnalysis,
     artwork_hash: Option<&str>,
-    dir: Option<&str>,
 ) -> Result<i64, MusicError> {
+    let (album_artist, track_artist) = (a.album_artist.as_deref(), a.artist.as_deref());
     let display = album_artist.or(track_artist);
-    let rows = sqlx::query("SELECT id, artist, year, artwork_hash FROM albums WHERE title = ?")
-        .bind(title)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(db::cvt)?;
+    let title_key = group_key(title);
+    let same_artist = |r: &sqlx::sqlite::SqliteRow, name: &str| {
+        r.get::<Option<String>, _>("artist")
+            .is_some_and(|x| group_key(&x) == group_key(name))
+    };
+    let rows =
+        sqlx::query("SELECT id, artist, year, artwork_hash, mbid FROM albums WHERE title_key = ?")
+            .bind(&title_key)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(db::cvt)?;
 
     struct AlbumChoice {
         id: i64,
         artist: Option<String>,
         year: Option<i64>,
         artwork_hash: Option<String>,
+        mbid: Option<String>,
     }
     let choice_of = |r: &sqlx::sqlite::SqliteRow| AlbumChoice {
         id: r.get("id"),
         artist: r.get("artist"),
         year: r.get("year"),
         artwork_hash: r.get("artwork_hash"),
+        mbid: r.get("mbid"),
     };
 
     let mut chosen: Option<AlbumChoice> = None;
     if let Some(aa) = album_artist {
         // 1. Album-artist tag.
-        chosen = rows
-            .iter()
-            .find(|r| r.get::<Option<String>, _>("artist").as_deref() == Some(aa))
-            .map(choice_of);
+        chosen = rows.iter().find(|r| same_artist(r, aa)).map(choice_of);
     } else {
         // 2. Same folder.
-        if let Some(dir) = dir {
+        if let Some(dir) = parent_dir(&a.path) {
             let siblings = sqlx::query(
                 "SELECT DISTINCT a.id AS id, t.path AS path FROM albums a
-                 JOIN tracks t ON t.album_id = a.id WHERE a.title = ?",
+                 JOIN tracks t ON t.album_id = a.id WHERE a.title_key = ?",
             )
-            .bind(title)
+            .bind(&title_key)
             .fetch_all(&mut **tx)
             .await
             .map_err(db::cvt)?;
@@ -815,42 +885,61 @@ async fn resolve_album(
         // 3. Same track artist.
         if chosen.is_none() {
             if let Some(artist) = track_artist {
-                chosen = rows
-                    .iter()
-                    .find(|r| r.get::<Option<String>, _>("artist").as_deref() == Some(artist))
-                    .map(choice_of);
+                chosen = rows.iter().find(|r| same_artist(r, artist)).map(choice_of);
             }
         }
         // 4. An already-promoted "Various Artists" row.
         if chosen.is_none() {
             chosen = rows
                 .iter()
-                .find(|r| {
-                    r.get::<Option<String>, _>("artist").as_deref() == Some("Various Artists")
-                })
+                .find(|r| same_artist(r, VARIOUS_ARTISTS))
                 .map(choice_of);
         }
     }
 
     if let Some(choice) = chosen {
-        let mut new_artist: Option<String> = None;
-        match (choice.artist.as_deref(), display) {
-            (Some(cur), Some(d)) if cur != d && cur != "Various Artists" => {
-                new_artist = Some("Various Artists".to_string());
+        let new_artist = match (choice.artist.as_deref(), display) {
+            (Some(cur), Some(d))
+                if group_key(cur) != group_key(d)
+                    && group_key(cur) != group_key(VARIOUS_ARTISTS) =>
+            {
+                Some(VARIOUS_ARTISTS)
             }
-            _ => {}
-        }
-        let new_year = (choice.year.is_none() && year.is_some()).then(|| year.unwrap() as i64);
-        let new_art = (choice.artwork_hash.is_none() && artwork_hash.is_some())
-            .then(|| artwork_hash.unwrap());
-        if new_artist.is_some() || new_year.is_some() || new_art.is_some() {
+            _ => None,
+        };
+        let new_year = if choice.year.is_none() {
+            a.year.map(i64::from)
+        } else {
+            None
+        };
+        let new_art = if choice.artwork_hash.is_none() {
+            artwork_hash
+        } else {
+            None
+        };
+        let new_mbid = if choice.mbid.is_none() {
+            a.release_mbid.as_deref()
+        } else {
+            None
+        };
+        if new_artist.is_some() || new_year.is_some() || new_art.is_some() || new_mbid.is_some() {
             sqlx::query(
-                "UPDATE albums SET artist = COALESCE(?, artist), year = COALESCE(?, year),
-                 artwork_hash = COALESCE(?, artwork_hash) WHERE id = ?",
+                "UPDATE albums SET artist = COALESCE(?1, artist),
+                   artist_key = COALESCE(?2, artist_key), sort_artist = COALESCE(?3, sort_artist),
+                   year = COALESCE(?4, year),
+                   artwork_hash = COALESCE(?5, artwork_hash),
+                   artwork_source = CASE WHEN ?5 IS NOT NULL THEN 'embedded' ELSE artwork_source END,
+                   mbid = COALESCE(?6, mbid),
+                   enrich_status = CASE WHEN ?6 IS NOT NULL THEN 'matched' ELSE enrich_status END,
+                   enrich_source = CASE WHEN ?6 IS NOT NULL THEN 'embedded' ELSE enrich_source END
+                 WHERE id = ?7",
             )
             .bind(new_artist)
+            .bind(new_artist.map(group_key))
+            .bind(new_artist.map(sort_key))
             .bind(new_year)
             .bind(new_art)
+            .bind(new_mbid)
             .bind(choice.id)
             .execute(&mut **tx)
             .await
@@ -859,18 +948,96 @@ async fn resolve_album(
         return Ok(choice.id);
     }
 
+    let mbid = a.release_mbid.as_deref();
     let id: i64 = sqlx::query(
-        "INSERT INTO albums (title, artist, year, artwork_hash) VALUES (?, ?, ?, ?) RETURNING id",
+        "INSERT INTO albums (title, title_key, sort_title, artist, artist_key, sort_artist, year,
+           artwork_hash, artwork_source, mbid, enrich_status, enrich_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(title)
+    .bind(&title_key)
+    .bind(sort_key(title))
     .bind(display)
-    .bind(year.map(|y| y as i64))
+    .bind(display.map(group_key))
+    .bind(display.map(sort_key))
+    .bind(a.year.map(i64::from))
     .bind(artwork_hash)
+    .bind(artwork_hash.map(|_| "embedded"))
+    .bind(mbid)
+    .bind(if mbid.is_some() { "matched" } else { "pending" })
+    .bind(mbid.map(|_| "embedded"))
     .fetch_one(&mut **tx)
     .await
     .map_err(db::cvt)?
     .get("id");
     Ok(id)
+}
+
+const VARIOUS_ARTISTS: &str = "Various Artists";
+
+/// Bring every album's grouping and sort keys, and every artist's sort name,
+/// in line with its display strings. Cheap (one pass over albums and
+/// artists), so it runs before a scan (rows from before the keys existed)
+/// and after it (merges and "Various Artists" promotions rename albums).
+pub(crate) async fn refresh_keys(pool: &SqlitePool) -> Result<(), MusicError> {
+    let albums = sqlx::query(
+        "SELECT id, title, artist, title_key, artist_key, sort_title, sort_artist FROM albums",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db::cvt)?;
+    let artists = sqlx::query("SELECT id, name, sort_name FROM artists")
+        .fetch_all(pool)
+        .await
+        .map_err(db::cvt)?;
+    let mut tx = pool.begin().await.map_err(db::cvt)?;
+    for r in &albums {
+        let title: String = r.get("title");
+        let artist: Option<String> = r.get("artist");
+        let want = (
+            Some(group_key(&title)),
+            artist.as_deref().map(group_key),
+            Some(sort_key(&title)),
+            artist.as_deref().map(sort_key),
+        );
+        let have: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = (
+            r.get("title_key"),
+            r.get("artist_key"),
+            r.get("sort_title"),
+            r.get("sort_artist"),
+        );
+        if want != have {
+            sqlx::query(
+                "UPDATE albums SET title_key = ?, artist_key = ?, sort_title = ?, sort_artist = ?
+                 WHERE id = ?",
+            )
+            .bind(want.0)
+            .bind(want.1)
+            .bind(want.2)
+            .bind(want.3)
+            .bind(r.get::<i64, _>("id"))
+            .execute(&mut *tx)
+            .await
+            .map_err(db::cvt)?;
+        }
+    }
+    for r in &artists {
+        let want = sort_key(&r.get::<String, _>("name"));
+        if r.get::<Option<String>, _>("sort_name").as_deref() != Some(want.as_str()) {
+            sqlx::query("UPDATE artists SET sort_name = ? WHERE id = ?")
+                .bind(want)
+                .bind(r.get::<i64, _>("id"))
+                .execute(&mut *tx)
+                .await
+                .map_err(db::cvt)?;
+        }
+    }
+    tx.commit().await.map_err(db::cvt)
 }
 
 /// Parent directory of a catalog path (as stored: a plain string).
@@ -919,8 +1086,8 @@ pub async fn consolidate_albums(pool: &SqlitePool) -> Result<u64, MusicError> {
     let mut by_dir: HashMap<(String, String), i64> = HashMap::new();
     for r in &rows {
         let id: i64 = r.get("id");
-        let title: String = r.get("title");
-        let artist: Option<String> = r.get("artist");
+        let title = group_key(&r.get::<String, _>("title"));
+        let artist = r.get::<Option<String>, _>("artist").map(|a| group_key(&a));
         let path: String = r.get("path");
         find(&mut parent, id);
         if let Some(a) = artist {
@@ -972,19 +1139,25 @@ pub async fn consolidate_albums(pool: &SqlitePool) -> Result<u64, MusicError> {
                 .execute(&mut *tx)
                 .await
                 .map_err(db::cvt)?;
+            // SET expressions all see the row's old values, so the CASEs
+            // below test what `keep` had before this merge.
             sqlx::query(
                 "UPDATE albums SET
-                   year = COALESCE(year, (SELECT year FROM albums WHERE id = ?)),
-                   artwork_hash = COALESCE(artwork_hash, (SELECT artwork_hash FROM albums WHERE id = ?)),
+                   year = COALESCE(year, (SELECT year FROM albums WHERE id = ?1)),
+                   artwork_hash = COALESCE(artwork_hash, (SELECT artwork_hash FROM albums WHERE id = ?1)),
+                   artwork_source = CASE WHEN artwork_hash IS NULL
+                     THEN (SELECT artwork_source FROM albums WHERE id = ?1) ELSE artwork_source END,
+                   mbid = COALESCE(mbid, (SELECT mbid FROM albums WHERE id = ?1)),
+                   enrich_status = CASE WHEN mbid IS NULL AND (SELECT mbid FROM albums WHERE id = ?1) IS NOT NULL
+                     THEN (SELECT enrich_status FROM albums WHERE id = ?1) ELSE enrich_status END,
+                   enrich_source = CASE WHEN mbid IS NULL AND (SELECT mbid FROM albums WHERE id = ?1) IS NOT NULL
+                     THEN (SELECT enrich_source FROM albums WHERE id = ?1) ELSE enrich_source END,
                    artist = CASE
-                     WHEN artist IS NULL THEN (SELECT artist FROM albums WHERE id = ?)
-                     WHEN artist = COALESCE((SELECT artist FROM albums WHERE id = ?), artist) THEN artist
+                     WHEN artist IS NULL THEN (SELECT artist FROM albums WHERE id = ?1)
+                     WHEN artist_key = COALESCE((SELECT artist_key FROM albums WHERE id = ?1), artist_key) THEN artist
                      ELSE 'Various Artists' END
-                 WHERE id = ?",
+                 WHERE id = ?2",
             )
-            .bind(dup)
-            .bind(dup)
-            .bind(dup)
             .bind(dup)
             .bind(keep)
             .execute(&mut *tx)
@@ -1023,18 +1196,7 @@ async fn upsert_track(
     };
 
     let album_id: Option<i64> = match &a.album {
-        Some(title) => Some(
-            resolve_album(
-                tx,
-                title,
-                a.album_artist.as_deref(),
-                a.artist.as_deref(),
-                a.year,
-                artwork_hash.as_deref(),
-                parent_dir(&a.path),
-            )
-            .await?,
-        ),
+        Some(title) => Some(resolve_album(tx, title, a, artwork_hash.as_deref()).await?),
         None => None,
     };
 
@@ -1052,7 +1214,7 @@ async fn upsert_track(
                      artist = ?, album_id = ?, track_no = ?, disc_no = ?, genre = ?,
                      year = ?, artwork_hash = ?, file_size = ?, file_mtime = ?,
                      missing = 0, decodable = ?, mqa = ?, original_sample_rate = ?,
-                     mqa_checked = 1 WHERE id = ?",
+                     mqa_checked = 1, recording_mbid = ?, mbid_checked = 1 WHERE id = ?",
             )
             .bind(a.format.wire_name())
             .bind(a.sample_rate.map(i64::from))
@@ -1074,6 +1236,7 @@ async fn upsert_track(
             .bind(decodable)
             .bind(i64::from(a.mqa))
             .bind(a.original_sample_rate.map(i64::from))
+            .bind(&a.recording_mbid)
             .bind(id)
             .execute(&mut **tx)
             .await
@@ -1089,8 +1252,8 @@ async fn upsert_track(
             "INSERT INTO tracks (path, format, sample_rate, bit_depth, channels,
                      duration_ms, bitrate, title, album, artist, album_id, track_no, disc_no,
                      genre, year, artwork_hash, file_size, file_mtime, missing, decodable,
-                     mqa, original_sample_rate, mqa_checked)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1)
+                     mqa, original_sample_rate, mqa_checked, recording_mbid, mbid_checked)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, 1)
                      RETURNING id",
         )
         .bind(&a.path)
@@ -1114,6 +1277,7 @@ async fn upsert_track(
         .bind(decodable)
         .bind(i64::from(a.mqa))
         .bind(a.original_sample_rate.map(i64::from))
+        .bind(&a.recording_mbid)
         .fetch_one(&mut **tx)
         .await
         .map_err(db::cvt)?
@@ -3083,5 +3247,275 @@ mod mqa_tests {
             .unwrap()
             .get(0);
         assert_eq!(m1, 1);
+    }
+}
+
+/// Phase C, local part: embedded MusicBrainz IDs, grouping and sort keys,
+/// year sanity.
+#[cfg(test)]
+mod metadata_tests {
+    use super::fixtures::*;
+    use super::*;
+    use lofty::{
+        file::TaggedFileExt,
+        tag::{ItemValue, TagExt, TagItem},
+    };
+
+    const RELEASE: &str = "3cc4b4b4-5b0b-4d2d-9d3c-1a9e2f0c4c11";
+    const RECORDING: &str = "b2a4a7c0-1f4e-4f51-9c6e-7e3d5a6b8c22";
+
+    struct Spec<'a> {
+        dir: &'a str,
+        file: &'a str,
+        album: &'a str,
+        album_artist: Option<&'a str>,
+        artist: &'a str,
+        year: Option<&'a str>,
+        extra: &'a [(&'a str, &'a str)],
+    }
+
+    fn flac(lib: &Path, s: Spec) {
+        make_track(
+            lib,
+            None,
+            &fixtures::TrackSpec {
+                dir: s.dir,
+                file: s.file,
+                codec: "flac",
+                title: s.file,
+                artist: s.artist,
+                album: s.album,
+                album_artist: s.album_artist,
+                track_no: 1,
+                year: s.year,
+                genre: None,
+                art: false,
+            },
+        );
+        if s.extra.is_empty() {
+            return;
+        }
+        let path = lib.join(s.dir).join(s.file);
+        let mut tagged = lofty::read_from_path(&path).unwrap();
+        let tag = tagged.primary_tag_mut().unwrap();
+        for (k, v) in s.extra {
+            tag.insert_unchecked(TagItem::new(
+                ItemKey::Unknown((*k).to_string()),
+                ItemValue::Text((*v).to_string()),
+            ));
+        }
+        tag.save_to_path(&path, lofty::config::WriteOptions::default())
+            .unwrap();
+    }
+
+    fn spec<'a>(
+        dir: &'a str,
+        file: &'a str,
+        album: &'a str,
+        extra: &'a [(&'a str, &'a str)],
+    ) -> Spec<'a> {
+        Spec {
+            dir,
+            file,
+            album,
+            album_artist: Some("Dave Brubeck"),
+            artist: "Dave Brubeck",
+            year: Some("1959"),
+            extra,
+        }
+    }
+
+    async fn scan(lib: &Path, db: &Path) -> (SqlitePool, ScanReport) {
+        let pool = db::open(db).await.unwrap();
+        let r = run_scan_with_progress(&pool, &[lib.to_path_buf()], |_, _| {})
+            .await
+            .unwrap();
+        (pool, r)
+    }
+
+    async fn album(pool: &SqlitePool, title: &str) -> (Option<String>, String, Option<String>) {
+        let r =
+            sqlx::query("SELECT mbid, enrich_status, enrich_source FROM albums WHERE title = ?")
+                .bind(title)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        (r.get(0), r.get(1), r.get(2))
+    }
+
+    /// Picard writes MUSICBRAINZ_ALBUMID / MUSICBRAINZ_TRACKID: the scan
+    /// stores them and marks the album matched from embedded tags, with no
+    /// lookup. An album without them stays pending; a mangled ID is ignored.
+    #[tokio::test]
+    async fn embedded_musicbrainz_ids_are_stored_and_mark_the_album_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let picard = [
+            ("MUSICBRAINZ_ALBUMID", RELEASE),
+            ("MUSICBRAINZ_TRACKID", RECORDING),
+        ];
+        flac(&lib, spec("A", "01.flac", "Time Out", &picard));
+        flac(&lib, spec("B", "01.flac", "Time Further Out", &[]));
+        flac(
+            &lib,
+            spec(
+                "C",
+                "01.flac",
+                "Jazz Goes to College",
+                &[("MUSICBRAINZ_ALBUMID", "not-an-id")],
+            ),
+        );
+        let (pool, _) = scan(&lib, &dir.path().join("t.db")).await;
+
+        assert_eq!(
+            album(&pool, "Time Out").await,
+            (
+                Some(RELEASE.into()),
+                "matched".into(),
+                Some("embedded".into())
+            )
+        );
+        let rec: Option<String> =
+            sqlx::query("SELECT recording_mbid FROM tracks WHERE album = 'Time Out'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(rec.as_deref(), Some(RECORDING));
+        assert_eq!(
+            album(&pool, "Time Further Out").await,
+            (None, "pending".into(), None)
+        );
+        assert_eq!(
+            album(&pool, "Jazz Goes to College").await,
+            (None, "pending".into(), None)
+        );
+    }
+
+    /// A catalog scanned before IDs were read picks them up on the next
+    /// scan from a tag-only re-read, without re-analyzing unchanged files.
+    #[tokio::test]
+    async fn an_existing_catalog_picks_up_embedded_ids_without_a_full_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let picard = [
+            ("MUSICBRAINZ_ALBUMID", RELEASE),
+            ("MUSICBRAINZ_TRACKID", RECORDING),
+        ];
+        flac(&lib, spec("A", "01.flac", "Time Out", &picard));
+        let db_path = dir.path().join("t.db");
+        let (pool, _) = scan(&lib, &db_path).await;
+        // Back to the state of a catalog from before this feature.
+        sqlx::query("UPDATE tracks SET recording_mbid = NULL, mbid_checked = 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE albums SET mbid = NULL, enrich_status = 'pending', enrich_source = NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let r = run_scan_with_progress(&pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            (r.files_added, r.files_updated, r.files_skipped),
+            (0, 0, 1),
+            "no re-analysis"
+        );
+        assert_eq!(
+            album(&pool, "Time Out").await,
+            (
+                Some(RELEASE.into()),
+                "matched".into(),
+                Some("embedded".into())
+            )
+        );
+        let checked: i64 = sqlx::query("SELECT mbid_checked FROM tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(checked, 1, "read once, never again");
+    }
+
+    /// Titles and artists that differ only in case or spacing are one album;
+    /// display strings keep what the tags say.
+    #[tokio::test]
+    async fn case_and_spacing_differences_do_not_split_an_album() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        flac(
+            &lib,
+            Spec {
+                album_artist: Some("Miles Davis"),
+                ..spec("CD1", "01.flac", "Kind of Blue", &[])
+            },
+        );
+        flac(
+            &lib,
+            Spec {
+                album_artist: Some("miles  davis"),
+                ..spec("CD2", "02.flac", "Kind Of  Blue", &[])
+            },
+        );
+        let (pool, _) = scan(&lib, &dir.path().join("t.db")).await;
+        let rows = sqlx::query("SELECT title, artist, title_key FROM albums")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one album");
+        assert_eq!(rows[0].get::<String, _>("title_key"), "kind of blue");
+        let tracks: i64 = sqlx::query("SELECT COUNT(*) FROM tracks WHERE album_id IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(tracks, 2);
+    }
+
+    #[tokio::test]
+    async fn sort_keys_move_a_leading_article_and_bad_years_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        flac(
+            &lib,
+            Spec {
+                album_artist: Some("The Beatles"),
+                artist: "The Beatles",
+                year: Some("1850"),
+                ..spec("A", "01.flac", "The White Album", &[])
+            },
+        );
+        let (pool, _) = scan(&lib, &dir.path().join("t.db")).await;
+        let r = sqlx::query("SELECT sort_title, sort_artist, year FROM albums")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(r.get::<String, _>("sort_title"), "White Album, The");
+        assert_eq!(r.get::<String, _>("sort_artist"), "Beatles, The");
+        assert_eq!(
+            r.get::<Option<i64>, _>("year"),
+            None,
+            "1850 is before any release"
+        );
+        let sort_name: String =
+            sqlx::query("SELECT sort_name FROM artists WHERE name = 'The Beatles'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(sort_name, "Beatles, The");
+    }
+
+    #[test]
+    fn only_well_formed_ids_count() {
+        assert!(is_mbid(RELEASE));
+        assert!(is_mbid(&RELEASE.to_uppercase()));
+        assert!(!is_mbid("not-an-id"));
+        assert!(!is_mbid(&RELEASE[..35]));
+        assert!(!is_mbid(&RELEASE.replace('-', "x")));
     }
 }

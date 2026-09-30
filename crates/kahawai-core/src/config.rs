@@ -51,6 +51,19 @@ pub struct ServerConfig {
     /// Run the library scanner once at startup. Default off.
     #[serde(default)]
     pub scan_on_startup: bool,
+    /// Look up albums without a MusicBrainz ID online (MusicBrainz, Cover
+    /// Art Archive). Default off: it sends artist and album names off the
+    /// LAN, so it is opt-in.
+    #[serde(default)]
+    pub enrichment_enabled: bool,
+    /// How sure a lookup must be before an album takes its result, 0.5-1.0.
+    /// Below it the album is left unmatched: a wrong ID is worse than none.
+    #[serde(default = "default_min_confidence")]
+    pub enrichment_min_confidence: f32,
+}
+
+fn default_min_confidence() -> f32 {
+    0.9
 }
 
 impl ServerConfig {
@@ -135,6 +148,8 @@ impl Default for ServerConfig {
             preferred_ladder: default_ladder(),
             dsd_story: DsdStory::default(),
             scan_on_startup: false,
+            enrichment_enabled: false,
+            enrichment_min_confidence: default_min_confidence(),
         }
     }
 }

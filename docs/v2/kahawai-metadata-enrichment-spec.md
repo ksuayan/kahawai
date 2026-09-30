@@ -1,5 +1,37 @@
 # Spec: metadata remapping & enrichment (Phase C)
 
+## Status
+
+**Implemented.** The local part is on `phase-c-local` (`normalize.rs`, migration `007_metadata_local.sql`, `scanner.rs`, `GET /api/enrichment/coverage`). The external part is on `phase-c-enrich`: `musicbrainz.rs` (client), `enrich.rs` (worker), migration `008_enrichment.sql`, the `enrich_metadata` job with the `Paused` and `Cancelled` states, and Settings → Album info in the desktop app.
+
+### Local part: what landed, and where it differs from the text below
+
+- **Grouping and sort keys** are computed at scan time, not in a separate Phase C job: albums match on `title_key` / `artist_key` (case and spacing collapsed), and `sort_title`, `sort_artist`, `artists.sort_name` move a leading "The "/"A " to the end. A cheap pass refreshes every key before and after each scan, so existing catalogs and renamed albums stay consistent. Display strings are never changed.
+- **Year sanity** applies at scan time and, once, to existing rows in migration 007 (outside 1900 to next year becomes NULL). lofty reads only the first four digits of a date tag, so a typo like `19999` arrives as 1999 and is kept.
+- **Embedded MusicBrainz IDs** (Picard's `MUSICBRAINZ_ALBUMID`, `MUSICBRAINZ_TRACKID`) are read during the scan and stored as `albums.mbid` and `tracks.recording_mbid`; the album is marked `matched` / `embedded`. Malformed IDs are ignored. Files already in a catalog get a one-time tag-only re-read on the next scan (`tracks.mbid_checked`), like the MQA backfill. DSF/DFF files and SACD ISOs are not read for IDs.
+- **Not done on purpose: the `album_artist` NULL → `artist` fallback.** The scanner already groups files without an album-artist tag by folder, then by artist, promoting mixed folders to "Various Artists". A blanket fallback to the track artist would split compilations back into one album per artist, the regression the album-grouping fix removed.
+
+### External part: what landed
+
+- **Opt-in.** `enrichment_enabled` (config, default off) is set from Settings → Album info in the desktop app, applied live and saved. Turning it off cancels a lookup in progress. While it's on, every completed scan queues a lookup if an album is waiting and no lookup is running or paused.
+- **What is looked up:** albums with no `mbid` whose status is `pending`, or `error` with fewer than 3 attempts. Picard-tagged albums cost nothing. `no_match` is terminal.
+- **MusicBrainz etiquette** (their published rules: about 1 request per second per IP, 503 when over, a meaningful User-Agent; there is no quota and no API key):
+  - one request at a time, spaced at least 1.1 s apart plus up to 0.25 s of random jitter;
+  - User-Agent `Kahawai/<version> ( https://github.com/ksuayan/kahawai )`;
+  - 503/429 honours `Retry-After`, otherwise backs off exponentially up to 60 s, and stops after 5 retries;
+  - every response is kept in `mb_cache` (keyed by the request URL's hash), so re-runs and restarts don't ask again.
+- **Matching** is album-level: a search on `release:"title" AND artist:"artist"` (10 candidates), each scored 0–1 as 0.35 × title similarity + 0.25 × artist similarity + 0.25 × track-count agreement + 0.15 × MusicBrainz's own score. A missing artist or track count scores 0.5 for that part. The best candidate is accepted only at or above `enrichment_min_confidence` (default 0.9; Settings offers Relaxed 80%, Balanced 90%, Strict 95%; clamped to 0.5–1.0). MusicBrainz has no minimum-score parameter of its own, so this threshold is ours.
+- **Fills blanks only:** a match sets `mbid`, `enrich_status = 'matched'`, `enrich_source = 'musicbrainz'`, `enriched_at`, and `year` only when it's NULL. The Cover Art Archive front cover (`front-500`) is attached only when the album has no artwork (`artwork_source = 'caa'`, stored in the content-addressed `artwork` table). Tags are never overwritten.
+- **Outages:** no internet connection, DNS failure, a timeout, 5xx, or 503s past the retry limit count as *unreachable*, not as the album's fault. The job pauses itself with a message ("Nothing was lost; N albums still to look up"), no album is charged an attempt, and Resume carries on. A bad response for one album (for example a parse error) marks just that album `error` and counts an attempt.
+- **Job control:** `POST /api/jobs/{id}/pause`, `/resume`, `/cancel` (album info lookups only). The worker checks the job's status between albums: paused, it waits without sending anything; cancelled, it stops. A paused job survives a server restart, and Resume starts a new worker when none is running.
+- **Coverage** (`GET /api/enrichment/coverage`) now also reports `matched_online` and `no_match`, and `pending_lookup` includes failed albums that will be retried.
+
+### Deviations from the text below
+
+- **No per-track recording lookup** and no track-duration scoring: matching is by release title, artist, and track count. Recording IDs come only from embedded tags.
+- **No `tracks.rev` / `catalog_rev` bump:** those don't exist in this codebase. A run that matched anything sends the existing `CatalogUpdated` event, and players reload.
+- **Acceptance** is covered by tests against a local stub server (request spacing and User-Agent, cache hits, retry on busy, offline and down vs a bad response, fills blanks only, `no_match` not re-requested, retry limit, pause, resume, and cancel), not by a 500-album dry run against the live service.
+
 ## Goal
 
 Fix inconsistent metadata and fill gaps without touching embedded tags:

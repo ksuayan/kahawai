@@ -1,0 +1,9 @@
+# `cargo tauri dev` restarts the app when a watched file changes. When
+# ui/dist is missing, build.rs runs npm in ui/, and npm's own writes would
+# otherwise restart the build that ran them, over and over. Ignore just those
+# outputs: ignoring all of ui/ hides ui/package.json, and the CLI then can't
+# find the frontend to run `npm run dev` in.
+ui/node_modules/
+ui/dist/
+ui/package-lock.json
+ui/*.tsbuildinfo

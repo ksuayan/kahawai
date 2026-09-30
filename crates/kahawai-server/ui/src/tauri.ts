@@ -9,6 +9,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type {
   ApplyConfigInput,
   DirValidation,
+  EnrichAction,
+  EnrichmentStatus,
   LiveScanStats,
   ScanJob,
   ServerConfigShape,
@@ -91,6 +93,22 @@ export async function setupLiveScanStats(): Promise<LiveScanStats> {
   return (
     (await cmd<LiveScanStats>("setup_live_scan_stats")) ?? { albums: 0, artists: 0, tracks: 0 }
   );
+}
+
+/** Settings → Album info. `undefined` when no server is running. */
+export async function setupEnrichmentStatus(): Promise<EnrichmentStatus | undefined> {
+  return cmd<EnrichmentStatus>("setup_enrichment_status");
+}
+
+/** Turn online lookup on/off and set its threshold (live and saved).
+ *  Throws the backend's error string. */
+export async function setupSetEnrichment(enabled: boolean, minConfidence: number): Promise<void> {
+  await invoke("setup_set_enrichment", { enabled, minConfidence });
+}
+
+/** Start, pause, resume or cancel a lookup. Throws the backend's error string. */
+export async function setupEnrichmentAction(action: EnrichAction, jobId?: string): Promise<void> {
+  await invoke("setup_enrichment_action", { action, jobId: jobId ?? null });
 }
 
 /** Stops the server process without quitting the app. */

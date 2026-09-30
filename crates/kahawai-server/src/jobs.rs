@@ -52,6 +52,7 @@ fn kind_to_str(kind: JobKind) -> &'static str {
         JobKind::Transcode => "transcode",
         JobKind::Scan => "scan",
         JobKind::HashFiles => "hash_files",
+        JobKind::EnrichMetadata => "enrich_metadata",
     }
 }
 
@@ -61,6 +62,7 @@ fn kind_from_str(s: &str) -> Option<JobKind> {
         "transcode" => Some(JobKind::Transcode),
         "scan" => Some(JobKind::Scan),
         "hash_files" => Some(JobKind::HashFiles),
+        "enrich_metadata" => Some(JobKind::EnrichMetadata),
         _ => None,
     }
 }
@@ -71,6 +73,8 @@ fn status_to_str(status: JobStatus) -> &'static str {
         JobStatus::Running => "running",
         JobStatus::Done => "done",
         JobStatus::Failed => "failed",
+        JobStatus::Paused => "paused",
+        JobStatus::Cancelled => "cancelled",
     }
 }
 
@@ -80,6 +84,8 @@ fn status_from_str(s: &str) -> Option<JobStatus> {
         "running" => Some(JobStatus::Running),
         "done" => Some(JobStatus::Done),
         "failed" => Some(JobStatus::Failed),
+        "paused" => Some(JobStatus::Paused),
+        "cancelled" => Some(JobStatus::Cancelled),
         _ => None,
     }
 }
@@ -105,7 +111,8 @@ impl JobStore {
 
     /// Durable store backed by the `jobs` table. Applies the S9 restart
     /// rule first: any persisted `queued`/`running` job becomes `failed`
-    /// with the error `"server restarted"`. Completed jobs load intact.
+    /// with the error `"server restarted"`. Completed and paused jobs load
+    /// intact (a paused job's work is resumable, so resume carries on).
     /// Call after migrations have run.
     pub async fn persistent(pool: &SqlitePool) -> Result<Self, kahawai_core::MusicError> {
         sqlx::query(
@@ -178,7 +185,10 @@ impl JobStore {
     async fn write_through(&self, job: &Job) {
         let Some(pool) = &self.pool else { return };
         let (result, error) = match job.status {
-            JobStatus::Done => (job.message.as_deref(), None),
+            // A paused job's message (why it stopped) survives a restart too.
+            JobStatus::Done | JobStatus::Paused | JobStatus::Cancelled => {
+                (job.message.as_deref(), None)
+            }
             JobStatus::Failed => (None, job.message.as_deref()),
             _ => (None, None),
         };
@@ -311,6 +321,36 @@ impl JobStore {
         };
         self.write_through(&job).await;
         true
+    }
+
+    /// Replace a job's message (shown with its status).
+    pub async fn set_message(&self, id: &str, message: Option<String>) -> bool {
+        let job = {
+            let mut inner = self.inner.write().unwrap();
+            let Some(job) = inner.get_mut(id) else {
+                return false;
+            };
+            job.message = message;
+            job.clone()
+        };
+        self.write_through(&job).await;
+        true
+    }
+
+    /// Move a job to `to` if its status is one of `from`. Returns the
+    /// updated job, or `None` when it is missing or in another state.
+    pub async fn transition(&self, id: &str, from: &[JobStatus], to: JobStatus) -> Option<Job> {
+        let job = {
+            let mut inner = self.inner.write().unwrap();
+            let job = inner.get_mut(id)?;
+            if !from.contains(&job.status) {
+                return None;
+            }
+            job.status = to;
+            job.clone()
+        };
+        self.write_through(&job).await;
+        Some(job)
     }
 }
 

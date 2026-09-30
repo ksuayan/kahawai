@@ -50,11 +50,21 @@ export interface Album {
   artwork_hash?: string | null;
   track_ids: number[];
   track_count: number;
+  /** "White Album, The": sort by this; absent from older servers. */
+  sort_title?: string | null;
+  /** "Beatles, The". */
+  sort_artist?: string | null;
+  /** MusicBrainz release ID, from embedded tags (or later a lookup). */
+  mbid?: string | null;
+  /** Where the cover came from: "embedded" (or later "caa"). */
+  artwork_source?: string | null;
 }
 
 export interface Artist {
   id: number;
   name: string;
+  /** "Beatles, The": sort by this; absent from older servers. */
+  sort_name?: string | null;
 }
 
 export interface Playlist {
@@ -746,8 +756,9 @@ export function formatDuration(ms?: number | null): string {
 // --- C3: jobs, DSD preference, playlist import -------------------------------
 
 /** Server job (`GET /api/jobs`). Shapes mirror kahawai-core (snake_case). */
-export type JobKind = "extract_iso" | "transcode" | "scan" | "hash_files";
-export type JobStatus = "queued" | "running" | "done" | "failed";
+export type JobKind = "extract_iso" | "transcode" | "scan" | "hash_files" | "enrich_metadata";
+/** `paused` and `cancelled` only happen to album info lookups (`enrich_metadata`). */
+export type JobStatus = "queued" | "running" | "done" | "failed" | "paused" | "cancelled";
 
 export interface JobInfo {
   id: string;

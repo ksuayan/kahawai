@@ -46,6 +46,8 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         (4, include_str!("../migrations/004_mqa.sql")),
         (5, include_str!("../migrations/005_hash_pending.sql")),
         (6, include_str!("../migrations/006_albums_title_index.sql")),
+        (7, include_str!("../migrations/007_metadata_local.sql")),
+        (8, include_str!("../migrations/008_enrichment.sql")),
     ];
     // One connection throughout: `PRAGMA foreign_keys` is per connection, and
     // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off
@@ -252,7 +254,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
         // Old row survived; new columns carry their defaults.
         let r = sqlx::query(
@@ -334,7 +336,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
             .await
@@ -402,7 +404,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let r =
             sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
                 .fetch_one(&pool)
@@ -458,15 +460,85 @@ mod tests {
             .unwrap();
     }
 
+    /// Migration 007 on an existing catalog: impossible years are cleared,
+    /// embedded covers are labelled, DSD rows skip the ID re-read (their tag
+    /// reader has no MusicBrainz IDs), and every album starts pending.
+    #[tokio::test]
+    async fn migration_007_cleans_years_and_queues_the_id_backfill() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("v6.db");
+        let pool = SqlitePool::connect_with(
+            SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (v, sql) in [
+            (1, include_str!("../migrations/001_init.sql")),
+            (2, include_str!("../migrations/002_scan_columns.sql")),
+            (3, include_str!("../migrations/003_jobs.sql")),
+            (4, include_str!("../migrations/004_mqa.sql")),
+            (5, include_str!("../migrations/005_hash_pending.sql")),
+            (6, include_str!("../migrations/006_albums_title_index.sql")),
+        ] {
+            apply_sql(&mut pool.acquire().await.unwrap(), sql)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+                .bind(v)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for stmt in [
+            "INSERT INTO albums (id, title, year, artwork_hash) VALUES (1, 'Old', 1800, 'abc')",
+            "INSERT INTO albums (id, title, year) VALUES (2, 'Fine', 1959)",
+            "INSERT INTO tracks (path, format, year) VALUES ('/m/a.flac', 'flac', 0)",
+            "INSERT INTO tracks (path, format, year) VALUES ('/m/b.dsf', 'dsf', 1959)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        let pool = open(&db_path).await.unwrap();
+        let albums: Vec<(i64, Option<i64>, Option<String>, String)> = sqlx::query_as(
+            "SELECT id, year, artwork_source, enrich_status FROM albums ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            albums,
+            vec![
+                (1, None, Some("embedded".into()), "pending".into()),
+                (2, Some(1959), None, "pending".into()),
+            ]
+        );
+        let tracks: Vec<(String, Option<i64>, i64)> =
+            sqlx::query_as("SELECT format, year, mbid_checked FROM tracks ORDER BY path")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            tracks,
+            vec![("flac".into(), None, 0), ("dsf".into(), Some(1959), 1)]
+        );
+    }
+
     /// Fresh databases get every migration, and reopening is idempotent.
     #[tokio::test]
     async fn fresh_database_gets_all_migrations_idempotently() {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("fresh.db");
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }
