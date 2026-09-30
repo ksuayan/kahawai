@@ -521,6 +521,9 @@ impl FlacStreamEncoder {
 #[cfg(feature = "encode-opus")]
 mod ogg {
     /// Build the 256-entry CRC table for the Ogg polynomial 0x04C11DB7.
+    /// Ogg's CRC-32 is not zlib's (not bit-reflected, zero initial value, no
+    /// final XOR), so crc32fast, which is in the build via flate2, can't
+    /// compute it.
     pub fn crc_table() -> [u32; 256] {
         let mut table = [0u32; 256];
         for (i, slot) in table.iter_mut().enumerate() {

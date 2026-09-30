@@ -53,7 +53,7 @@ const abx = useAbxStore();
 const overlays = useOverlaysStore();
 const serverHealth = useServerHealthStore();
 /** Views that scroll inside a virtualized list or grid of their own. */
-const OWN_SCROLLER = new Set(["albums", "artists", "genre"]);
+const OWN_SCROLLER = new Set(["albums", "artists", "genre", "album", "search", "queue"]);
 
 // Cleanup must be registered synchronously: inside the async onMounted below
 // there is no active component instance left after the first await.
@@ -158,7 +158,7 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
       <div class="flex min-h-0 flex-1">
         <Sidebar />
         <!--
-          Virtualized views (Albums, Artists, a genre's tracks) have their own scroller,
+          Virtualized views (Albums, Artists, an album, a genre, Search, Queue) have their own scroller,
           so <main> must not scroll for them: two nested scrollbars (and a scroll
           position split between them) is what you get otherwise. There, <main> is a
           plain flex column the view fills.

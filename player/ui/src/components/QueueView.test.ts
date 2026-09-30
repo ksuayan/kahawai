@@ -5,6 +5,7 @@ import { tauri } from "../test/tauri-mock";
 import { usePlayerStore } from "../stores/player";
 import { useLibraryStore } from "../stores/library";
 import { useQueueStore } from "../stores/queue";
+import { useViewPrefsStore } from "../stores/viewPrefs";
 import QueueView from "./QueueView.vue";
 
 const a = makeTrack({ title: "Alpha", artist: "AA" });
@@ -293,5 +294,51 @@ describe("QueueView", () => {
       expect(tauri.callsTo("set_shuffle")).toEqual([{ on: false }]);
       expect(tauri.callsTo("set_repeat")).toHaveLength(1);
     });
+  });
+});
+
+describe("QueueView: sort and grid", () => {
+  const x = makeTrack({ title: "Xi", artist: "Zed", album: "Z", year: 1990 });
+  const y = makeTrack({ title: "Ypsilon", artist: "Abe", album: "A", year: 2001 });
+  const setView = (sort: string, layout = "list") => () => {
+    useViewPrefsStore().prefs.queueSort = sort as never;
+    useViewPrefsStore().prefs.queueLayout = layout as never;
+  };
+
+  it("sorted, it shows another order but keeps the play order and turns rearranging off", async () => {
+    const { wrapper: w } = mountApp(QueueView, {}, {}, () => {
+      useQueueStore().tracks = [x, y].map((t) => ({ ...t }));
+      useQueueStore().index = 0;
+      setView("artist-asc")();
+    });
+    await settle();
+    const r = w.findAll('[data-testid="queue-row"]');
+    expect(r.map((row) => row.text().includes("Ypsilon"))).toEqual([true, false]); // Abe before Zed
+    expect(r[0].text()).toContain("2"); // its real queue position
+    expect(w.get('[data-testid="queue-sort-hint"]').text()).toContain("play order is unchanged");
+    expect(r[0].attributes("draggable")).toBe("false");
+    expect(r[0].findAll("button").find((b) => b.attributes("aria-label") === "Move down")!.attributes("disabled")).toBeDefined();
+
+    await r[0].trigger("dblclick");
+    await settle();
+    const call = tauri.callsTo("queue_play")[0] as { tracks: { id: number }[]; index: number };
+    expect(call.index).toBe(1); // Ypsilon's place in the real queue
+    expect(call.tracks.map((t) => t.id)).toEqual([x.id, y.id]);
+  });
+
+  it("the grid shows every entry, a track queued twice included, with its position", async () => {
+    const { wrapper: w } = mountApp(QueueView, {}, {}, () => {
+      useQueueStore().tracks = [x, y, x].map((t) => ({ ...t }));
+      useQueueStore().index = 2;
+      setView("default", "grid")();
+    });
+    await settle();
+    const cards = w.findAll('[data-testid="track-card"]');
+    expect(cards).toHaveLength(3);
+    expect(cards.map((c) => c.text().slice(0, 1))).toEqual(["1", "2", "3"]);
+    expect(cards[2].attributes("data-current")).toBe("true");
+    await cards[1].get("button").trigger("click");
+    await settle();
+    expect((tauri.callsTo("queue_play")[0] as { index: number }).index).toBe(1);
   });
 });

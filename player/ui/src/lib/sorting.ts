@@ -4,7 +4,7 @@
  * each either way. Unknown years sort last in both directions: "newest
  * first" shouldn't open on a wall of undated albums.
  */
-import type { Album } from "../types";
+import type { Album, Track } from "../types";
 
 export type SortField = "artist" | "title" | "year";
 export type SortDir = "asc" | "desc";
@@ -54,5 +54,50 @@ export function sortAlbums(albums: Album[], key: SortKey): Album[] {
     }
     if (field === "title") return sign * byTitle(a, b) || byArtist(a, b);
     return sign * byArtist(a, b) || byYear(a, b) || byTitle(a, b);
+  });
+}
+
+/** Track lists also offer their own natural order first (queue order,
+ *  track number, search relevance): "default". */
+export type TrackSortKey = "default" | SortKey;
+
+/** The six album orders, after the view's own natural order. */
+export function trackSortOptions(defaultLabel: string): { value: TrackSortKey; label: string }[] {
+  return [{ value: "default", label: defaultLabel }, ...SORT_OPTIONS];
+}
+
+export function isTrackSortKey(v: unknown): v is TrackSortKey {
+  return v === "default" || isSortKey(v);
+}
+
+/**
+ * Items holding tracks, in the given order ("default" keeps them as they
+ * are). Albums stay together in play order within each order; unknown
+ * years sort last either way. `track` reads the track out of an item, so
+ * callers can sort wrappers (a queue entry and its position) too.
+ */
+export function sortTracks<T>(items: T[], key: TrackSortKey, track: (item: T) => Track): T[] {
+  if (key === "default") return items;
+  const { field, dir } = parseSort(key);
+  const sign = dir === "asc" ? 1 : -1;
+  const inAlbum = (a: Track, b: Track) =>
+    cmpText(text(a.album), text(b.album)) ||
+    (a.album_id ?? 0) - (b.album_id ?? 0) ||
+    (a.disc_no ?? 1) - (b.disc_no ?? 1) ||
+    (a.track_no ?? 0) - (b.track_no ?? 0);
+  const byArtist = (a: Track, b: Track) => cmpText(text(a.artist), text(b.artist));
+  return [...items].sort((x, y) => {
+    const a = track(x);
+    const b = track(y);
+    if (field === "year") {
+      const ay = a.year ?? null;
+      const by = b.year ?? null;
+      if (ay === null || by === null) {
+        if (ay !== by) return ay === null ? 1 : -1;
+      } else if (ay !== by) return sign * (ay - by);
+      return byArtist(a, b) || inAlbum(a, b);
+    }
+    if (field === "title") return sign * cmpText(text(a.album), text(b.album)) || inAlbum(a, b);
+    return sign * byArtist(a, b) || inAlbum(a, b);
   });
 }

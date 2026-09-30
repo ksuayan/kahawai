@@ -18,7 +18,8 @@ export type TrackFormat =
 export interface Track {
   id: number;
   path: string;
-  /** Content hash; null until the server has hashed the file. */
+  /** BLAKE3 of the file's contents, as hex; null until the server has
+   *  hashed it (a background job after the scan). */
   hash?: string | null;
   format: TrackFormat;
   sample_rate?: number | null;

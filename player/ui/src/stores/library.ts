@@ -46,6 +46,13 @@ export const useLibraryStore = defineStore("library", () => {
     ),
   );
 
+  /** Album id → cover hash, for track lists (a lookup per row, not a search). */
+  const albumArtwork = computed(() => new Map(albums.value.map((a) => [a.id, a.artwork_hash ?? null])));
+
+  function artworkFor(track: Track): string | null {
+    return track.album_id != null ? (albumArtwork.value.get(track.album_id) ?? null) : null;
+  }
+
   const sortedArtists = computed(() =>
     [...artists.value].sort((a, b) => (a.sort_name ?? a.name).localeCompare(b.sort_name ?? b.name)),
   );
@@ -215,6 +222,7 @@ export const useLibraryStore = defineStore("library", () => {
     error,
     sortedAlbums,
     sortedArtists,
+    artworkFor,
     loadAll,
     cacheTracks,
     ensureTracks,

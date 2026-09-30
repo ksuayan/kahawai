@@ -12,17 +12,14 @@ import StateMessage from "../ui/StateMessage.vue";
 import UiButton from "../ui/UiButton.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import ListToolbar from "./ListToolbar.vue";
+import TrackCollection from "./TrackCollection.vue";
 import TrackMenu from "./TrackMenu.vue";
-import TrackRow from "./TrackRow.vue";
-import VirtualList from "./VirtualList.vue";
 
 const props = defineProps<{ name: string }>();
 
 /** Tracks per request: big genres hold thousands, so they load in pages
  *  as the list scrolls toward the end. */
 const PAGE = 200;
-/** TrackRow with artwork: 36px cover + padding, plus a 2px gap. */
-const ROW_HEIGHT = 52;
 
 const lib = useLibraryStore();
 const nav = useNavStore();
@@ -85,7 +82,6 @@ watch(() => props.name, load);
 watch(() => view.prefs.genreTracksSort, load);
 
 const playable = computed(() => tracks.value.filter(isPlayable));
-const artworkByAlbum = computed(() => new Map(lib.albums.map((a) => [a.id, a.artwork_hash])));
 
 function playAll(): void {
   if (playable.value.length > 0) void queue.playAll(playable.value, 0);
@@ -116,29 +112,26 @@ function playFrom(track: Track): void {
             <TrackMenu :tracks="tracks" layout="buttons" />
           </div>
         </div>
-        <ListToolbar v-model:sort="view.prefs.genreTracksSort" :sort-options="SORT_OPTIONS" />
+        <ListToolbar
+          v-model:layout="view.prefs.genreTracksLayout"
+          v-model:sort="view.prefs.genreTracksSort"
+          :sort-options="SORT_OPTIONS"
+        />
       </header>
-      <VirtualList
+      <TrackCollection
         :items="tracks"
+        :track="(t) => t"
+        :layout="view.prefs.genreTracksLayout"
         :scroll-key="`genre:${name}:${view.prefs.genreTracksSort}`"
-        :row-height="ROW_HEIGHT"
-        :get-key="(t) => t.id"
+        :is-current="(t) => queue.current?.id === t.id"
+        @play="playFrom"
         @near-end="more"
       >
-        <template #item="{ item }">
-          <TrackRow
-            :track="item"
-            :show-artwork="true"
-            :artwork-hash="item.album_id != null ? artworkByAlbum.get(item.album_id) : undefined"
-            :current="queue.current?.id === item.id"
-            @play="playFrom"
-          />
-        </template>
         <template #footer>
           <p v-if="loadingMore" class="px-2.5 py-3 text-xs text-dim" data-testid="loading-more">Loading more…</p>
           <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>
         </template>
-      </VirtualList>
+      </TrackCollection>
     </template>
   </ViewShell>
 </template>
