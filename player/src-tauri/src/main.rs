@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod logfile;
 mod menu;
 
 use kahawai_core::{StreamFormat, Track};
@@ -89,13 +90,20 @@ impl ArtworkCacheConfig {
 
 // --- Splash window ------------------------------------------------------------
 
-/// Shown at least this long, so it never just flashes.
-const SPLASH_MIN: Duration = Duration::from_millis(1200);
+/// Shown at least this long once it has actually appeared (its page reports
+/// that: `splash_shown`), so it never just flashes.
+const SPLASH_MIN: Duration = Duration::from_millis(1500);
+/// How long to wait for the splash page to report it has appeared before
+/// counting SPLASH_MIN from the window's creation instead. A release app's
+/// first webview paint on a cold start can take about a second.
+const SPLASH_PAINT_WAIT: Duration = Duration::from_secs(3);
 /// Closed after this long even if the UI never says it's ready.
 const SPLASH_MAX: Duration = Duration::from_secs(20);
 
 struct SplashState {
-    shown_at: std::time::Instant,
+    created_at: std::time::Instant,
+    /// When the splash page reported its artwork on screen.
+    shown_at: std::sync::Mutex<Option<std::time::Instant>>,
     done: std::sync::atomic::AtomicBool,
 }
 
@@ -114,16 +122,23 @@ fn splash_url(app: &tauri::App) -> tauri::WebviewUrl {
     tauri::WebviewUrl::App(url.into())
 }
 
-/// Show the main window and close the splash, once: after SPLASH_MIN.
+/// Show the main window and close the splash, once: SPLASH_MIN after the
+/// splash has appeared.
 fn finish_splash(app: &AppHandle) {
     let Some(state) = app.try_state::<SplashState>() else { return };
     if state.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let wait = SPLASH_MIN.saturating_sub(state.shown_at.elapsed());
     let app = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(wait);
+        // The splash must have been seen: wait for its page to report it has
+        // appeared (at most SPLASH_PAINT_WAIT), then keep it up SPLASH_MIN.
+        let state = app.state::<SplashState>();
+        while state.shown_at.lock().unwrap().is_none() && state.created_at.elapsed() < SPLASH_PAINT_WAIT {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let since = state.shown_at.lock().unwrap().unwrap_or(state.created_at);
+        std::thread::sleep(SPLASH_MIN.saturating_sub(since.elapsed()));
         let app2 = app.clone();
         let _ = app.run_on_main_thread(move || {
             if let Some(main) = app2.get_webview_window("main") {
@@ -135,6 +150,21 @@ fn finish_splash(app: &AppHandle) {
             }
         });
     });
+}
+
+/// The splash page has its artwork on screen: the minimum display time
+/// starts now.
+#[tauri::command]
+fn splash_shown(app: AppHandle) {
+    if let Some(state) = app.try_state::<SplashState>() {
+        state.shown_at.lock().unwrap().get_or_insert_with(std::time::Instant::now);
+    }
+}
+
+/// Settings: show the log folder (~/Library/Logs/Kahawai Player).
+#[tauri::command]
+fn reveal_logs() {
+    logfile::reveal();
 }
 
 /// The UI is up (settings loaded, the library showing): swap the splash for
@@ -1078,6 +1108,18 @@ fn set_dsd_device_confirmed(state: State<'_, AppState>, confirmed: bool) -> Resu
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // A log file for when the app is opened from Finder (nothing reads its
+    // output then). Info and up by default; RUST_LOG overrides.
+    let log_path = logfile::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .init();
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), log = ?log_path, "Kahawai Player starting");
+
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("artwork", |ctx, request, responder| {
             serve_artwork(ctx.app_handle().clone(), request, responder);
@@ -1119,7 +1161,8 @@ fn main() {
                 .skip_taskbar(true)
                 .build()?;
             app.manage(SplashState {
-                shown_at: std::time::Instant::now(),
+                created_at: std::time::Instant::now(),
+                shown_at: std::sync::Mutex::new(None),
                 done: std::sync::atomic::AtomicBool::new(false),
             });
             tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
@@ -1232,6 +1275,8 @@ fn main() {
             get_developer_tools,
             set_developer_tools,
             app_ready,
+            reveal_logs,
+            splash_shown,
             get_ui_state,
             set_ui_state,
             catalog_cached,

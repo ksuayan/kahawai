@@ -62,7 +62,10 @@ scripts/start-server.sh -d    # start the server in the background (builds it th
 scripts/start-client.sh       # wait for the server, then open the player
 ```
 
-That's it. Day to day:
+That's it. **Installing the beta from the disk image instead?** See
+[docs/Installation.md](docs/Installation.md): installation, troubleshooting and FAQ.
+
+Day to day:
 
 | Script | What it does |
 |---|---|

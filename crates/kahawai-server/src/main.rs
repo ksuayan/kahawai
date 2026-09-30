@@ -15,6 +15,8 @@ mod genre_aliases;
 mod hashing;
 mod jobs;
 #[cfg(target_os = "macos")]
+mod logfile;
+#[cfg(target_os = "macos")]
 mod menu;
 mod musicbrainz;
 mod normalize;
@@ -192,9 +194,23 @@ async fn main() -> anyhow::Result<()> {
 /// it touches, is absent from their dependency graph.
 #[cfg(target_os = "macos")]
 fn main() {
+    // A log file for when the app is opened from Finder (nothing reads its
+    // output then). Info and up by default; RUST_LOG overrides.
+    let log_path = logfile::init();
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        build = env!("KAHAWAI_GIT_COMMIT"),
+        profile = env!("KAHAWAI_PROFILE"),
+        log = ?log_path,
+        "Kahawai Server starting"
+    );
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -218,10 +234,23 @@ fn main() {
             desktop::setup_reveal_config,
             desktop::setup_quit,
             desktop::setup_app_ready,
+            desktop::splash_shown,
+            desktop::setup_reveal_logs,
             desktop::setup_stop_other_server,
             desktop::setup_server_identity,
         ])
         .on_menu_event(menu::on_menu_event)
+        // Closing the main window hides it: the server keeps running for the
+        // players using it. The Dock icon brings the window back (Reopen,
+        // below); Quit (⌘Q, or Quit App) stops everything.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             // App menu with a custom About item (the UI shows about.md).
             app.set_menu(menu::build_app_menu(app.handle())?)?;
@@ -229,8 +258,16 @@ fn main() {
             desktop::autostart(app);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the Kahawai Server desktop shell");
+        .build(tauri::generate_context!())
+        .expect("error while building the Kahawai Server desktop shell")
+        .run(|app, event| {
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(main) = tauri::Manager::get_webview_window(app, "main") {
+                    let _ = main.show();
+                    let _ = main.set_focus();
+                }
+            }
+        });
 }
 
 /// Everything after config load: open the catalog, run the startup scan,
