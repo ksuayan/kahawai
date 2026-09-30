@@ -26,6 +26,26 @@ set -m  # each background job gets its own process group, so we can kill it (and
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Install a UI's npm dependencies when they're missing or out of date:
+# package.json or package-lock.json changed since the last install (a merge
+# that added a dependency, say). node_modules/.package-lock.json is npm's
+# record of the last install; it's touched afterwards so an install with
+# nothing to do doesn't repeat on every run.
+ensure_npm_deps() {
+  local ui="$1"
+  local stamp="${ui}/node_modules/.package-lock.json"
+  if [[ ! -f "${stamp}" || "${ui}/package.json" -nt "${stamp}" || "${ui}/package-lock.json" -nt "${stamp}" ]]; then
+    echo "==> npm install in ${ui#"${ROOT}"/} (dependencies missing or changed)…"
+    (cd "${ui}" && npm install --no-audit --no-fund)
+    touch "${stamp}"
+  fi
+}
+
+# Both apps' dev servers (beforeDevCommand: npm run dev) need their npm
+# dependencies installed and current.
+ensure_npm_deps "${ROOT}/crates/kahawai-server/ui"
+ensure_npm_deps "${ROOT}/player/ui"
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "error: kahawai-server's Tauri wizard UI is macOS-only (this is $(uname -s))." >&2
   echo "Use scripts/start-server.sh for the headless server and" >&2
