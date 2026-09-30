@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { isPlayable, trackTitle, unplayableReason, type Track } from "../types";
 import Artwork from "./Artwork.vue";
+import ItemContextMenu from "./ItemContextMenu.vue";
 import TrackMenu from "./TrackMenu.vue";
 
 /** One track in a grid: its album's cover, title, artist. Click plays it. */
@@ -23,6 +24,7 @@ const title = computed(() => trackTitle(props.track));
 </script>
 
 <template>
+  <ItemContextMenu :track="track" @play="emit('play', track)">
   <div
     class="group relative"
     :class="!playable && 'opacity-45'"
@@ -60,4 +62,5 @@ const title = computed(() => trackTitle(props.track));
       <TrackMenu :track="track" />
     </div>
   </div>
+  </ItemContextMenu>
 </template>
