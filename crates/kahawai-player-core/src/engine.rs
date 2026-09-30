@@ -1505,6 +1505,26 @@ impl Player {
                 }
             }
         }
+        // Opened exclusively but won't start (seen with a USB DAC): fall back
+        // to shared output, as for a device that won't open, rather than
+        // failing the track.
+        if bit_perfect {
+            if let Err(e) = self.sink.play() {
+                tracing::error!(
+                    track_id = track.id,
+                    error = %e,
+                    "bit-perfect: exclusive output would not start; using shared output"
+                );
+                let _ = self.sink.stop();
+                bit_perfect = false;
+                self.sink.select_output_path(OutputPath::Pcm);
+                self.add_notice(
+                    "Played on shared output: your DAC couldn't be started for exclusive use \
+                     (another app may be using it)."
+                        .to_string(),
+                );
+            }
+        }
         self.output_path = if bit_perfect {
             OutputPath::PcmExclusive
         } else {
@@ -1514,18 +1534,15 @@ impl Player {
         let sink_rate;
         let resampler;
         if bit_perfect {
-            // Untouched: native rate, no resampler.
+            // Untouched: native rate, no resampler. Already started above.
             sink_rate = spec.sample_rate;
             resampler = None;
-            if self.sink.play().is_err() {
-                self.fail("Couldn't start the audio output.");
-                return;
-            }
         } else {
             // Open the sink before the resample decision: C2's cpal sink
             // negotiates the device rate in open(), so the query below sees
             // the real rate (native when the device takes it).
-            if self.sink.open(track).is_err() {
+            if let Err(e) = self.sink.open(track) {
+                tracing::error!(track_id = track.id, error = %e, "shared output would not open");
                 self.fail("Couldn't open the audio output.");
                 return;
             }
@@ -1540,7 +1557,8 @@ impl Player {
                 ),
                 _ => (None, spec.sample_rate),
             };
-            if self.sink.play().is_err() {
+            if let Err(e) = self.sink.play() {
+                tracing::error!(track_id = track.id, error = %e, "shared output would not start");
                 self.fail("Couldn't start the audio output.");
                 return;
             }

@@ -2206,6 +2206,21 @@ fn best_quality_goes_exclusive_on_an_external_dac() {
     assert!(h.player.snapshot().notice.is_none());
 }
 
+/// The DAC opens exclusively but won't start (seen with a USB DAC another
+/// app is using): the track plays on shared output with a notice, instead
+/// of failing with "Couldn't start the audio output."
+#[test]
+fn an_exclusive_device_that_will_not_start_falls_back_to_shared_output() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.sink.0.lock().unwrap().fail_exclusive_start = true;
+    play_one(&mut h);
+    let s = h.player.snapshot();
+    assert!(s.error.is_none(), "no error: {:?}", s.error);
+    assert_eq!(s.output_path, OutputPath::Pcm);
+    assert!(s.notice.unwrap_or_default().contains("couldn't be started for exclusive use"));
+    assert!(!h.samples().is_empty(), "the track played on shared output");
+}
+
 #[test]
 fn best_quality_stays_shared_on_built_in_output() {
     let mut h = best_harness(kahawai_player_core::QualityMode::Best, false);

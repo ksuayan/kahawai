@@ -248,6 +248,9 @@ pub struct VecSink {
     pub shared_opens: u32,
     /// Make `open_exclusive_pcm` fail (device refused / busy).
     pub fail_exclusive_open: bool,
+    /// Make `play` fail on the exclusive path: the device opened but won't
+    /// start (seen with a USB DAC).
+    pub fail_exclusive_start: bool,
 }
 
 impl VecSink {
@@ -285,6 +288,9 @@ impl AudioSink for VecSink {
     }
 
     fn play(&mut self) -> Result<(), MusicError> {
+        if self.fail_exclusive_start && self.selected_path == Some(OutputPath::PcmExclusive) {
+            return Err(MusicError::Audio("exclusive device would not start".into()));
+        }
         self.state = SinkState::Playing;
         Ok(())
     }
