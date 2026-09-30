@@ -67,6 +67,12 @@ export interface Artist {
   sort_name?: string | null;
 }
 
+/** A canonical genre (`GET /api/genres`): raw genre tags map to these. */
+export interface Genre {
+  name: string;
+  track_count: number;
+}
+
 export interface Playlist {
   id: number;
   name: string;

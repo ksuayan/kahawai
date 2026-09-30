@@ -3,6 +3,8 @@ import { onMounted, onUnmounted, provide, ref } from "vue";
 import AlbumsView from "./components/AlbumsView.vue";
 import AlbumDetail from "./components/AlbumDetail.vue";
 import ArtistsView from "./components/ArtistsView.vue";
+import GenreDetail from "./components/GenreDetail.vue";
+import GenresView from "./components/GenresView.vue";
 import ArtistDetail from "./components/ArtistDetail.vue";
 import NowPlayingBar from "./components/NowPlayingBar.vue";
 import NowPlayingView from "./components/NowPlayingView.vue";
@@ -164,6 +166,8 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
           <AlbumDetail v-else-if="nav.view.name === 'album'" :id="nav.view.id ?? 0" />
           <ArtistsView v-else-if="nav.view.name === 'artists'" />
           <ArtistDetail v-else-if="nav.view.name === 'artist'" :id="nav.view.id ?? 0" />
+          <GenresView v-else-if="nav.view.name === 'genres'" />
+          <GenreDetail v-else-if="nav.view.name === 'genre'" :name="nav.view.genre ?? ''" />
           <NowPlayingView v-else-if="nav.view.name === 'nowplaying'" />
           <PlaylistsView v-else-if="nav.view.name === 'playlists'" />
           <PlaylistDetail v-else-if="nav.view.name === 'playlist'" :id="nav.view.id ?? 0" />

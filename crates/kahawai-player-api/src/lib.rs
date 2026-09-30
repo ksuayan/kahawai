@@ -10,7 +10,8 @@
 
 use kahawai_core::{
     api::{
-        Album, Artist, Job, NewPlaylist, Page, Playlist, SetPlaylistTracks, StreamFormat, Track,
+        Album, Artist, Genre, Job, NewPlaylist, Page, Playlist, SetPlaylistTracks, StreamFormat,
+        Track,
     },
     MusicError,
 };
@@ -96,6 +97,37 @@ impl Client {
             .http
             .get(self.url("/api/search"))
             .query(&[("q", q)])
+            .send()
+            .await
+            .map_err(reqwest_err)?;
+        json_or_error(resp).await
+    }
+
+    // -- genres -------------------------------------------------------------
+
+    /// Canonical genres with track counts, most tracks first.
+    pub async fn genres(&self) -> Result<Vec<Genre>, MusicError> {
+        self.get("/api/genres").await
+    }
+
+    /// One page of a genre's tracks.
+    pub async fn genre_tracks(
+        &self,
+        name: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Page<Track>, MusicError> {
+        let mut url = reqwest::Url::parse(&self.url("/api/genres"))
+            .map_err(|e| MusicError::Http(format!("bad server URL: {e}")))?;
+        // Path-segment encoding: "R&B", "Children's", "Drum & Bass".
+        url.path_segments_mut()
+            .map_err(|_| MusicError::Http("bad server URL".to_string()))?
+            .push(name)
+            .push("tracks");
+        let resp = self
+            .http
+            .get(url)
+            .query(&[("page", page), ("per_page", per_page)])
             .send()
             .await
             .map_err(reqwest_err)?;

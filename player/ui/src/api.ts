@@ -4,6 +4,7 @@
 import type {
   Album,
   Artist,
+  Genre,
   ImportPlaylistResult,
   JobInfo,
   JobKind,
@@ -307,6 +308,28 @@ export async function searchTracks(q: string): Promise<Track[]> {
     `/api/search?q=${encodeURIComponent(q)}`,
   );
   return Array.isArray(res) ? res : asItems(res as Page<Track>);
+}
+
+/** GET /api/genres: canonical genres, most tracks first. An older server
+ *  without the endpoint yields an empty list. */
+export async function fetchGenres(): Promise<Genre[]> {
+  try {
+    return await get<Genre[]>(`/api/genres`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return [];
+    throw e;
+  }
+}
+
+/** GET /api/genres/{name}/tracks: one page of a genre's present tracks. */
+export async function fetchGenreTracks(
+  name: string,
+  page = 1,
+  perPage = 200,
+): Promise<Page<Track>> {
+  return get<Page<Track>>(
+    `/api/genres/${encodeURIComponent(name)}/tracks?page=${page}&per_page=${perPage}`,
+  );
 }
 
 export async function fetchPlaylists(): Promise<Playlist[]> {

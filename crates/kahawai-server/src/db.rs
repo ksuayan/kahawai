@@ -48,6 +48,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         (6, include_str!("../migrations/006_albums_title_index.sql")),
         (7, include_str!("../migrations/007_metadata_local.sql")),
         (8, include_str!("../migrations/008_enrichment.sql")),
+        (9, include_str!("../migrations/009_genres.sql")),
     ];
     // One connection throughout: `PRAGMA foreign_keys` is per connection, and
     // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off
@@ -185,6 +186,43 @@ pub async fn tracks_for_album(pool: &SqlitePool, album_id: i64) -> Result<Vec<Tr
     Ok(rows.iter().map(track_from_row).collect())
 }
 
+/// One page of a canonical genre's present tracks, by artist, album and
+/// play order, and how many there are in all.
+pub async fn tracks_for_genre(
+    pool: &SqlitePool,
+    genre: &str,
+    limit: u64,
+    offset: u64,
+) -> Result<(Vec<Track>, u64), MusicError> {
+    let total: i64 = sqlx::query(
+        "SELECT COUNT(*) FROM track_genres g JOIN tracks t ON t.id = g.track_id
+         WHERE g.genre = ? AND t.missing = 0",
+    )
+    .bind(genre)
+    .fetch_one(pool)
+    .await
+    .map_err(cvt)?
+    .get(0);
+    let cols = TRACK_COLS
+        .split(", ")
+        .map(|c| format!("t.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = sqlx::query(&format!(
+        "SELECT {cols} FROM track_genres g JOIN tracks t ON t.id = g.track_id
+         WHERE g.genre = ? AND t.missing = 0
+         ORDER BY t.artist COLLATE NOCASE, t.album COLLATE NOCASE, t.disc_no, t.track_no, t.id
+         LIMIT ? OFFSET ?"
+    ))
+    .bind(genre)
+    .bind(limit as i64)
+    .bind(offset as i64)
+    .fetch_all(pool)
+    .await
+    .map_err(cvt)?;
+    Ok((rows.iter().map(track_from_row).collect(), total as u64))
+}
+
 /// Non-missing track count for one album. (S2 browse — avoids N+1.)
 pub async fn album_track_count(pool: &SqlitePool, album_id: i64) -> Result<u64, MusicError> {
     let n: i64 = sqlx::query("SELECT COUNT(*) FROM tracks WHERE album_id = ? AND missing = 0")
@@ -254,7 +292,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
         // Old row survived; new columns carry their defaults.
         let r = sqlx::query(
@@ -336,7 +374,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
             .await
@@ -392,8 +430,8 @@ mod tests {
         for stmt in [
             "INSERT INTO albums (id, title) VALUES (1, 'Blue Train')",
             "INSERT INTO artists (id, name) VALUES (1, 'John Coltrane')",
-            "INSERT INTO tracks (id, path, hash, format, title, album_id, file_size, mqa, mqa_checked)
-             VALUES (7, '/m/a.flac', 'abc123', 'flac', 'Moment''s Notice', 1, 100, 1, 1)",
+            "INSERT INTO tracks (id, path, hash, format, title, artist, album_id, file_size, mqa, mqa_checked)
+             VALUES (7, '/m/a.flac', 'abc123', 'flac', 'Moment''s Notice', 'John Coltrane', 1, 100, 1, 1)",
             "INSERT INTO track_artists (track_id, artist_id) VALUES (7, 1)",
             "INSERT INTO playlists (id, name) VALUES (1, 'mix')",
             "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (1, 0, 7)",
@@ -404,7 +442,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let r =
             sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
                 .fetch_one(&pool)
@@ -536,9 +574,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("fresh.db");
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 }

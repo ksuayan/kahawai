@@ -1,5 +1,24 @@
 # Spec: genre normalization + browse/search
 
+## Status
+
+**Implemented** on the `genre-cleanup` branch: `genre.rs` (normalizer and refresh), `genre_aliases.rs` (alias table and keyword list), migration `009_genres.sql`, `GET /api/genres`, `GET /api/genres/{name}/tracks`, `GET /api/genres/report`, genre in the search index, `Genre` in `kahawai-core`, `genres` / `genre_tracks` in `kahawai-player-api`, and a Genres view in the player (sidebar, shortcut `g`).
+
+Measured on the real library (888 distinct raw values on 70,119 tagged tracks of 81,316): **65 genres**. That's the 62-genre taxonomy plus 3 leftovers (a label, an album title, a band: 42 tracks), left under their own names for curation. 193 tracks were mapped by the keyword fallback, and 1,613 tracks carry values that aren't genres ("Other", "Unknown genre", "Divers", "0", a URL).
+
+Where it differs from the text below:
+
+- **No tag re-read to backfill.** The raw tag is already in `tracks.genre`, so `genre_map` and `track_genres` are rebuilt from it at startup (when no startup scan runs), at the start of every scan, and at its end. An edit to the alias table applies on the next scan, and a rescan with an edited tag updates the mapping without rehashing anything.
+- **No `genres` table.** Counts come from `track_genres` (present tracks only). `genre_map(raw, genre, how)` records how each raw value was mapped, for the report.
+- **Keyword fallback.** A value the alias table doesn't list is mapped by the genre words inside it ("Pinoy Rock" -> Rock, "Uplifting Trance" -> Trance) before falling back to itself. The report lists these separately (`by_keyword`), next to `unmapped` and `ignored`.
+- **Not-genre values are dropped:** placeholders ("Other", "Unknown", "Various", "Divers", "Onbekend"), bare numbers, "Genre_013"-style values and web addresses. This departs from "never dropped" only for values that aren't genres. The raw tag is still kept.
+- **Separators** also include a spaced dash ("Punk - New Wave - Pop"). Brackets anywhere are removed ("New Wave (A-Z)"). Spelling variants match on letters only ("Synth-pop", "Synthpop", "Synthie Pop").
+- **ID3v1 numbers:** none occur in the real library. `(17)Rock` keeps its name, and a bare number is dropped.
+- **No `tracks.rev` bump** (it doesn't exist in this codebase). The scan's `CatalogUpdated` event makes players reload, including genres.
+- **The search index stores the raw tag,** so "jazz" finds jazz tracks and "rap" finds "Hip-Hop/Rap" ones.
+- **Player:** genres are chips sorted by track count. A genre's tracks load 200 at a time with "Show more", and Play plays the loaded tracks.
+- **Taxonomy:** grown from the starter list to fit the library, for example Downtempo, Lounge, Chillout, Breakbeat, New Age, Easy Listening, Instrumental, Vocal, Acoustic and World. Sub-genres fold into their parent (Deep House -> House, Hard Bop -> Jazz).
+
 ## Goal
 
 Browse and search tracks by genre despite messy embedded tags. Thousands of

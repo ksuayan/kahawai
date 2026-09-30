@@ -10,9 +10,9 @@ use axum::{
     Json,
 };
 use kahawai_core::{
-    Album, Artist, AudioFormat, ImportPlaylistJson, ImportPlaylistResult, Job, JobKind, JobStatus,
-    MusicError, NewPlaylist, Page, Playlist, PlaylistTracksMode, SetPlaylistTracks, StreamFormat,
-    Track,
+    Album, Artist, AudioFormat, Genre, ImportPlaylistJson, ImportPlaylistResult, Job, JobKind,
+    JobStatus, MusicError, NewPlaylist, Page, Playlist, PlaylistTracksMode, SetPlaylistTracks,
+    StreamFormat, Track,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -343,6 +343,115 @@ pub async fn search(
         }
     }
     Ok(Json(out))
+}
+
+// ---------------------------------------------------------------------------
+// Genres  (docs/v2/kahawai-genre-normalization-spec.md)
+// ---------------------------------------------------------------------------
+
+/// Canonical genres with their present-track counts, most tracks first.
+pub async fn list_genres(State(s): State<AppState>) -> Result<Json<Vec<Genre>>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT g.genre, COUNT(*) AS n FROM track_genres g JOIN tracks t ON t.id = g.track_id
+         WHERE t.missing = 0 GROUP BY g.genre ORDER BY n DESC, g.genre",
+    )
+    .fetch_all(&s.pool)
+    .await
+    .map_err(db::cvt)?;
+    Ok(Json(
+        rows.iter()
+            .map(|r| Genre {
+                name: r.get(0),
+                track_count: r.get::<i64, _>(1).max(0) as u64,
+            })
+            .collect(),
+    ))
+}
+
+/// One page of a genre's tracks. 404 for a genre no present track has.
+pub async fn genre_tracks(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Query(p): Query<PageQuery>,
+) -> Result<Json<Page<Track>>, ApiError> {
+    let page = p.page.max(1);
+    let per_page = p.per_page.clamp(1, 500);
+    let (items, total) =
+        db::tracks_for_genre(&s.pool, &name, per_page, (page - 1) * per_page).await?;
+    if total == 0 {
+        return Err(MusicError::NotFound(format!("genre {name}")).into());
+    }
+    Ok(Json(Page {
+        items,
+        page,
+        per_page,
+        total,
+    }))
+}
+
+/// A raw genre tag and how many tracks carry it, for the curation report.
+#[derive(Debug, Serialize)]
+pub struct RawGenre {
+    pub raw: String,
+    pub track_count: u64,
+    /// Canonical genres it maps to (empty for ignored values).
+    pub genres: Vec<String>,
+}
+
+/// `GET /api/genres/report`: the feedback loop for growing the alias
+/// table. Canonical genres by size, then the raw tags (most tracks first)
+/// that the table didn't cover: mapped only by a genre word inside them,
+/// not mapped at all (each its own genre), or ignored as not a genre.
+#[derive(Debug, Serialize)]
+pub struct GenreReport {
+    pub genres: Vec<Genre>,
+    pub distinct_raw: u64,
+    pub by_keyword: Vec<RawGenre>,
+    pub unmapped: Vec<RawGenre>,
+    pub ignored: Vec<RawGenre>,
+}
+
+const REPORT_LIMIT: i64 = 200;
+
+async fn raw_genres(pool: &SqlitePool, how: &str) -> Result<Vec<RawGenre>, MusicError> {
+    let rows = sqlx::query(
+        "SELECT m.raw, (SELECT COUNT(*) FROM tracks t WHERE t.genre = m.raw AND t.missing = 0) AS n,
+                GROUP_CONCAT(m.genre, char(31)) AS genres
+         FROM genre_map m WHERE m.how = ?
+         GROUP BY m.raw ORDER BY n DESC, m.raw LIMIT ?",
+    )
+    .bind(how)
+    .bind(REPORT_LIMIT)
+    .fetch_all(pool)
+    .await
+    .map_err(db::cvt)?;
+    Ok(rows
+        .iter()
+        .map(|r| RawGenre {
+            raw: r.get(0),
+            track_count: r.get::<i64, _>(1).max(0) as u64,
+            genres: r
+                .get::<Option<String>, _>(2)
+                .map(|g| g.split('\u{1f}').map(str::to_string).collect())
+                .unwrap_or_default(),
+        })
+        .collect())
+}
+
+pub async fn genre_report(State(s): State<AppState>) -> Result<Json<GenreReport>, ApiError> {
+    let Json(genres) = list_genres(State(s.clone())).await?;
+    let distinct_raw: i64 = sqlx::query("SELECT COUNT(DISTINCT raw) FROM genre_map")
+        .fetch_one(&s.pool)
+        .await
+        .map_err(db::cvt)?
+        .get(0);
+    Ok(Json(GenreReport {
+        genres,
+        distinct_raw: distinct_raw.max(0) as u64,
+        by_keyword: raw_genres(&s.pool, "keyword").await?,
+        unmapped: raw_genres(&s.pool, "unmapped").await?,
+        ignored: raw_genres(&s.pool, "ignored").await?,
+    }))
 }
 
 /// Build a safe FTS5 MATCH expression: every whitespace-separated token

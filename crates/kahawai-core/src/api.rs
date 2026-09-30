@@ -94,6 +94,14 @@ pub struct Artist {
     pub sort_name: Option<String>,
 }
 
+/// A canonical genre and how many present tracks carry it
+/// (`GET /api/genres`). Raw genre tags map to one or more of these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Genre {
+    pub name: String,
+    pub track_count: u64,
+}
+
 /// Ordered playlist. Positions are 0-based and dense. (Spec §3.2,
 /// §3.8.)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

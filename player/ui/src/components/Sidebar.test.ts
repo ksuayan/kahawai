@@ -10,7 +10,7 @@ const labels = (w: ReturnType<typeof mountApp>["wrapper"]) => w.findAll("button"
 describe("Sidebar", () => {
   it("lists the library sections and Settings", () => {
     const { wrapper } = mountApp(Sidebar);
-    expect(labels(wrapper)).toEqual(["Albums", "Artists", "Playlists", "Search", "Queue", "Settings"]);
+    expect(labels(wrapper)).toEqual(["Albums", "Artists", "Genres", "Playlists", "Search", "Queue", "Settings"]);
   });
 
   it("marks the current section and navigates on click", async () => {
@@ -31,7 +31,7 @@ describe("Sidebar", () => {
   it("keeps the parent section highlighted on detail pages", async () => {
     const { wrapper } = mountApp(Sidebar);
     const nav = useNavStore();
-    for (const [view, section] of [["album", "Albums"], ["artist", "Artists"], ["playlist", "Playlists"]] as const) {
+    for (const [view, section] of [["album", "Albums"], ["artist", "Artists"], ["genre", "Genres"], ["playlist", "Playlists"]] as const) {
       nav.go(view, 7);
       await wrapper.vm.$nextTick();
       expect(wrapper.findAll('[aria-current="page"]').map((b) => b.text())).toEqual([section]);
@@ -56,6 +56,7 @@ describe("Sidebar", () => {
     expect(icons).toEqual([
       { label: "Albums", icon: "lucide-disc-3" },
       { label: "Artists", icon: "lucide-mic-vocal" },
+      { label: "Genres", icon: "lucide-tags" },
       { label: "Playlists", icon: "lucide-list-music" },
       { label: "Search", icon: "lucide-search" },
       { label: "Queue", icon: "lucide-list-ordered" },
