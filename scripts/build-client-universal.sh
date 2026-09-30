@@ -97,10 +97,18 @@ case "${archs}" in
   *) echo "error: ${BIN_OUT} is not universal (${archs})." >&2; exit 1 ;;
 esac
 file "${BIN_OUT}"
+# The bundle must carry a valid (ad-hoc) signature: on Apple Silicon a
+# downloaded app with an unsigned bundle is refused as "damaged". Tauri signs
+# it (bundle.macOS.signingIdentity "-" in tauri.conf.json).
+if ! codesign --verify --deep --strict "${OUT}/${APP_NAME}.app"; then
+  echo "error: ${APP_NAME}.app is not properly signed (see signingIdentity in tauri.conf.json)." >&2
+  exit 1
+fi
+codesign -dv "${OUT}/${APP_NAME}.app" 2>&1 | grep -E "^Signature=" || true
 
 cat <<'EOF2'
 
-Universal bundle is ready (unsigned, unnotarized).
+Universal bundle is ready (ad-hoc signed, not notarized).
 
 Manual signing & notarization (requires a paid Apple Developer identity;
 NOT attempted here):
