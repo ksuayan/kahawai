@@ -60,7 +60,7 @@ First scan of a 2.5 TB / ~125k-file SMB share reaches a browsable library (Phase
 
 ## Status and measurements
 
-Phases A and B are implemented on the `tune-up` branch: migrations 005 and 006 and `scanner.rs` (A), `hashing.rs` and the `hash_files` job kind (B). Not done: the `catalog_rev` bump (the player-catalog-cache spec that defines it doesn't exist in code yet), and a Phase B timing on the real share.
+Phases A and B are implemented on the `tune-up` branch: migrations 005 and 006 and `scanner.rs` (A), `hashing.rs` and the `hash_files` job kind (B). Not done: the `catalog_rev` bump (the player-catalog-cache spec that defines it doesn't exist in code yet).
 
 First scan into an empty catalog: 105,248 files (81,316 audio), local `_Dev-Media` plus the `NetMusic` SMB share on 1 GbE, release build. Measured with the ignored `first_scan_benchmark` test in `scanner.rs`.
 
@@ -75,6 +75,17 @@ First scan into an empty catalog: 105,248 files (81,316 audio), local `_Dev-Medi
 - More workers don't help. At 64, per-file time rose about fourfold and files/s stayed at ~40: the share (or the macOS SMB client) is saturated at ~40–45 files/s, so it is throughput-bound, not latency-bound. 16 stays the default. Further gains would have to come from reading less per file.
 - The catalog writer was the second bottleneck: the album match for files without an album-artist tag scanned every track. Migration 006 fixed it.
 - Around 120 files with accented names, and one folder, were intermittently unreadable through the macOS SMB mount: `readdir` lists them, `stat` fails under every Unicode normalization. It depends on the SMB session (a later run read them all), not the scanner. The scan now logs and counts these (`walk_errors`, "stat failed" warnings) instead of skipping them silently.
+
+Phase B, hashing the whole library from that first-scan catalog: 81,214 pending tracks, 1,976 GB, same share and link, release build, measured with the ignored `hash_benchmark` test in `hashing.rs`.
+
+| Run | Files hashed | Data | Wall time | Throughput |
+| --- | --- | --- | --- | --- |
+| 1, killed with `kill -9` at 591 s | 3,406 | 65 GB | 9.9 min | 107 MB/s |
+| 2, restarted to completion | 77,773 (35 left pending) | 1,910 GB | 5.2 h | 102 MB/s |
+
+- A full content hash takes about **5.3 h** on 1 GbE. 4 workers with 1 MiB reads keep the link saturated (~105 MB/s), so hashing is bound by the network: a faster link, not more workers, would shorten it.
+- **Kill -9 resume, verified.** Run 2 started with exactly the 77,808 rows still pending, and the 3,406 hashes written before the kill were byte-identical afterwards: zero rehash. The database passed `PRAGMA integrity_check` after the kill.
+- All 81,179 hashes are 64-character BLAKE3 hex labelled `blake3-v1`. The 35 files left pending are the same accented-name SMB problem as above ("No such file or directory"); a later run retries them.
 
 ## Non-goals
 
