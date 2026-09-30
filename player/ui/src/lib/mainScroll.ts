@@ -1,5 +1,6 @@
 import { inject, nextTick, onBeforeUnmount, watch, type InjectionKey, type Ref } from "vue";
 import { useScrollMemoryStore } from "../stores/scrollMemory";
+import { saveWhileScrolling } from "./ownScroll";
 
 /** The app's shared scrolling `<main>` (provided by App.vue). Most views scroll
  *  inside it rather than in a container of their own. */
@@ -20,6 +21,7 @@ export function useMainScrollMemory(key: string, ready: () => boolean): void {
   if (!scroller) return;
   const memory = useScrollMemoryStore();
   let restored = false;
+  let stopSaving: (() => void) | undefined;
 
   watch(
     ready,
@@ -30,12 +32,14 @@ export function useMainScrollMemory(key: string, ready: () => boolean): void {
         if (!el || restored) return;
         el.scrollTop = memory.get(key); // 0 when never scrolled: also drops a stale offset
         restored = true;
+        stopSaving = saveWhileScrolling(el, () => memory.set(key, el.scrollTop));
       });
     },
     { immediate: true },
   );
 
   onBeforeUnmount(() => {
+    stopSaving?.();
     const el = scroller.value;
     if (el && restored) memory.set(key, el.scrollTop);
   });

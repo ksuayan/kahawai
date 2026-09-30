@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, watch } from "vue";
 import { isSortKey, isTrackSortKey, type SortKey, type TrackSortKey } from "../lib/sorting";
+import { uiGet, uiSet } from "../lib/uiState";
 
 export type LayoutMode = "list" | "grid";
 
@@ -46,7 +47,7 @@ const layouts = ["list", "grid"];
 function load(): ViewPrefs {
   const prefs = { ...DEFAULTS };
   try {
-    const raw = JSON.parse(localStorage.getItem(KEY) ?? "{}") as Record<string, unknown>;
+    const raw = JSON.parse(uiGet(KEY) ?? "{}") as Record<string, unknown>;
     for (const k of [
       "albumsLayout",
       "artistsLayout",
@@ -73,14 +74,14 @@ function load(): ViewPrefs {
   return prefs;
 }
 
-/** Remembered per view across launches (a viewer convenience: localStorage). */
+/** Remembered per view across launches (ui-state.json; see lib/uiState). */
 export const useViewPrefsStore = defineStore("viewPrefs", () => {
   const prefs = ref<ViewPrefs>(load());
   watch(
     prefs,
     (p) => {
       try {
-        localStorage.setItem(KEY, JSON.stringify(p));
+        uiSet(KEY, JSON.stringify(p));
       } catch {
         // Storage unavailable: the choice lasts this session.
       }

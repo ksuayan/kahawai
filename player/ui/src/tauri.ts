@@ -336,3 +336,30 @@ export async function catalogAlbumTracks(albumId: number): Promise<Track[] | und
 export async function catalogTracks(ids: number[]): Promise<Track[] | undefined> {
   return inTauri() ? cmd<Track[]>("catalog_tracks", { ids }) : undefined;
 }
+
+// --- Developer tools (Settings) ----------------------------------------------
+
+export interface DeveloperTools {
+  enabled: boolean;
+  /** This window has the Web Inspector (a change applies after a restart). */
+  inspector: boolean;
+  dev_build: boolean;
+}
+
+export async function getDeveloperTools(): Promise<DeveloperTools | undefined> {
+  return cmd<DeveloperTools>("get_developer_tools");
+}
+
+export async function setDeveloperTools(enabled: boolean): Promise<DeveloperTools | undefined> {
+  return cmd<DeveloperTools>("set_developer_tools", { enabled });
+}
+
+// --- UI state (ui-state.json; see lib/uiState.ts) ------------------------------
+
+export async function getUiState(): Promise<Record<string, unknown> | undefined> {
+  return cmd<Record<string, unknown>>("get_ui_state");
+}
+
+export async function setUiState(key: string, value: string | null): Promise<void> {
+  await cmd("set_ui_state", { key, value });
+}

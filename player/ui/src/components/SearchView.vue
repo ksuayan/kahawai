@@ -17,7 +17,11 @@ const view = useViewPrefsStore();
 const input = ref<InstanceType<typeof UiInput> | null>(null);
 const SORTS = trackSortOptions("Relevance");
 
-onMounted(() => input.value?.focus());
+onMounted(() => {
+  input.value?.focus();
+  // Back on Search after a restart: the query is remembered, the results aren't.
+  if (lib.searchQuery.trim() && lib.searchResults.length === 0 && !lib.searching) lib.search(lib.searchQuery);
+});
 
 /** Results in the chosen order ("Relevance" is the server's ranking). */
 const shown = computed(() => sortTracks(lib.searchResults, view.prefs.searchSort, (t) => t));

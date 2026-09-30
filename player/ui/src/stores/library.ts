@@ -12,6 +12,9 @@ import {
 } from "../api";
 import { catalogAlbumTracks, catalogCached, catalogSync, catalogTracks, type CachedCatalog } from "../tauri";
 import type { Album, Artist, Genre, Track } from "../types";
+import { uiGet, uiSet } from "../lib/uiState";
+
+const SEARCH_KEY = "kahawai.search";
 
 function sortTracks(tracks: Track[]): Track[] {
   return [...tracks].sort(
@@ -26,7 +29,8 @@ export const useLibraryStore = defineStore("library", () => {
   /** Canonical genres, most tracks first (empty on servers without them). */
   const genres = ref<Genre[]>([]);
   const trackCache = ref(new Map<number, Track>());
-  const searchQuery = ref("");
+  /** The last search, remembered across launches (results are fetched again). */
+  const searchQuery = ref(uiGet(SEARCH_KEY) ?? "");
   const searchResults = ref<Track[]>([]);
   const searching = ref(false);
   const loading = ref(false);
@@ -187,6 +191,7 @@ export const useLibraryStore = defineStore("library", () => {
   let searchTimer: number | undefined;
   function search(q: string): void {
     searchQuery.value = q;
+    uiSet(SEARCH_KEY, q.trim() ? q : null);
     window.clearTimeout(searchTimer);
     if (!q.trim()) {
       searchResults.value = [];

@@ -907,6 +907,28 @@ fn output_device_choice_persists_across_controllers() {
 }
 
 #[test]
+fn volume_persists_across_launches_and_a_drag_is_saved_as_its_last_value() {
+    let dir = std::env::temp_dir().join(format!("kahawai-vol-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("engine-settings.json");
+    {
+        let c = EngineController::new(Box::new(VecSink::new()), path.clone());
+        for v in [0.9, 0.7, 0.5, 0.35] {
+            c.set_volume(v); // a slider drag
+        }
+    } // dropping the controller flushes the pending value
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        (saved["volume"].as_f64().unwrap() - 0.35).abs() < 1e-6,
+        "{saved}"
+    );
+    let c = EngineController::new(Box::new(VecSink::new()), path);
+    wait_for(|| (c.snapshot().volume - 0.35).abs() < 1e-6);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn volume_and_paused_seek_are_visible_in_the_snapshot() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100 * 4)]);
