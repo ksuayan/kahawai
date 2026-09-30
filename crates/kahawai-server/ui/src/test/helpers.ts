@@ -31,3 +31,20 @@ export const settle = async (): Promise<void> => {
 };
 
 export type Wrapper = VueWrapper<never>;
+
+// Reka Select helpers, same as the player's (DOM-only, no vue/pinia).
+export const options = (): HTMLElement[] =>
+  Array.from(document.body.querySelectorAll<HTMLElement>('[role="option"]'));
+
+/** A real mouse selection: down, move, up (Reka selects on pointerup for mice). */
+export function pick(el: HTMLElement): void {
+  for (const type of ["pointerdown", "pointermove", "pointerup"]) {
+    el.dispatchEvent(new PointerEvent(type, { pointerType: "mouse", bubbles: true }));
+  }
+}
+
+/** Open a Reka Select from its trigger (Enter on the combobox). */
+export async function openSelect(trigger: HTMLElement): Promise<void> {
+  trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await settle();
+}

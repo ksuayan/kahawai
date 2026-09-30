@@ -2,6 +2,7 @@
 import { X } from "lucide-vue-next";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
+import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import { computed, onMounted } from "vue";
 import { useEnrichmentStore } from "../stores/enrichment";
 import { useSetupStore } from "../stores/setup";
@@ -21,6 +22,10 @@ const levels = computed(() => {
   }
   return [...CONFIDENCE_LEVELS, { value: current, label: `Custom (${Math.round(current * 100)}%)` }];
 });
+
+const levelOptions = computed<UiSelectOption[]>(() =>
+  levels.value.map((l) => ({ value: String(l.value), label: l.label })),
+);
 
 /** One line for the latest lookup; empty when there's none. */
 const jobLine = computed(() => {
@@ -112,16 +117,15 @@ const jobLine = computed(() => {
       in what's missing (release ID, year, cover); your tags are never changed.
     </UiHint>
     <div v-if="enrich.status" class="mt-2 flex flex-wrap items-center gap-2 text-[13px]">
-      <label for="enrich-threshold">Match strictness</label>
-      <select
-        id="enrich-threshold"
-        class="rounded-md border border-line bg-raised px-2 py-1"
-        :value="enrich.status.min_confidence"
+      <span aria-hidden="true">Match strictness</span>
+      <UiSelect
+        aria-label="Match strictness"
+        trigger-class="w-44"
+        :model-value="String(enrich.status.min_confidence)"
+        :options="levelOptions"
         :disabled="enrich.busy"
-        @change="enrich.setThreshold(Number(($event.target as HTMLSelectElement).value))"
-      >
-        <option v-for="l in levels" :key="l.value" :value="l.value">{{ l.label }}</option>
-      </select>
+        @update:model-value="(v) => v !== null && enrich.setThreshold(Number(v))"
+      />
     </div>
     <UiHint v-if="enrich.status" tone="faint">
       {{ n(enrich.status.coverage.total_albums) }} albums ·

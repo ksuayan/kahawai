@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { tauri } from "@pw/test/tauri-mock";
-import { mountApp, settle } from "../test/helpers";
+import { mountApp, openSelect, options, pick, settle } from "../test/helpers";
 import { dialog } from "../test/dialog-mock";
 import SettingsTab from "./SettingsTab.vue";
 import { useSetupStore } from "../stores/setup";
@@ -149,7 +149,15 @@ describe("SettingsTab: album info", () => {
     tauri.on("setup_enrichment_status", status({ enabled: true }));
     await useEnrichmentStore().load();
     await settle();
-    await wrapper.find("select").setValue("0.95");
+    const trigger = wrapper.get('[role="combobox"]');
+    expect(trigger.text()).toBe("Balanced (90%)");
+    await openSelect(trigger.element as HTMLElement);
+    expect(options().map((o) => o.textContent?.trim())).toEqual([
+      "Relaxed (80%)",
+      "Balanced (90%)",
+      "Strict (95%)",
+    ]);
+    pick(options().find((o) => o.textContent?.includes("Strict"))!);
     await settle();
     expect(tauri.callsTo("setup_set_enrichment")[1]).toEqual({ enabled: true, minConfidence: 0.95 });
   });
