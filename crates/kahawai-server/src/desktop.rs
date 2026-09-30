@@ -29,6 +29,9 @@ pub struct DesktopState {
     /// recent scan jobs — go through this rather than the config file, so
     /// they see and affect the exact same state the HTTP layer does.
     app_state: Arc<Mutex<Option<crate::AppState>>>,
+    /// Another Kahawai Server found holding our port when ours couldn't
+    /// start (its `/api/identity`), for the Status tab's panel.
+    occupant: Arc<Mutex<Option<kahawai_core::ServerIdentity>>>,
 }
 
 #[derive(Serialize)]
@@ -76,6 +79,51 @@ pub struct SetupInput {
 pub struct ServerStatus {
     running: bool,
     bind: String,
+    /// Why the server isn't running, when it tried to start and couldn't.
+    error: Option<String>,
+    /// The other Kahawai Server holding the port, when that's why.
+    occupant: Option<kahawai_core::ServerIdentity>,
+}
+
+/// Where to reach a server bound to `bind` from this machine: its port on
+/// the loopback address (a bind to 0.0.0.0 listens there too).
+fn loopback_url(bind: &str, path: &str) -> Option<String> {
+    let addr: std::net::SocketAddr = bind.parse().ok()?;
+    Some(format!("http://127.0.0.1:{}{path}", addr.port()))
+}
+
+/// Ask whatever holds `bind` who it is: `Some` when it's a Kahawai Server.
+async fn identify(bind: &str) -> Option<kahawai_core::ServerIdentity> {
+    let url = loopback_url(bind, "/api/identity")?;
+    let id: kahawai_core::ServerIdentity = reqwest::Client::new()
+        .get(url)
+        .timeout(std::time::Duration::from_millis(1500))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    (id.service == kahawai_core::KAHAWAI_SERVICE).then_some(id)
+}
+
+/// A start failure, in words: a taken port is the usual one (another Kahawai
+/// Server, often a development build, already listening there).
+fn is_port_taken(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    lower.contains("address already in use") || lower.contains("os error 48")
+}
+
+fn start_error(raw: &str, bind: &str) -> String {
+    if is_port_taken(raw) {
+        format!(
+            "Another program is already using {bind} (probably another Kahawai Server, such as a \
+             development build started by start-dev-combined.sh). Quit it and restart this one, or \
+             change the bind address under Settings > Advanced."
+        )
+    } else {
+        format!("The server couldn't start: {raw}")
+    }
 }
 
 #[tauri::command]
@@ -432,7 +480,8 @@ pub async fn setup_set_enrichment(
     on_disk.save(&path).map_err(|e| e.to_string())
 }
 
-/// Start, pause, resume or cancel album info lookup. `job_id` is needed for
+/// Start, pause, resume or cancel album info lookup, or retry the albums it
+/// couldn't find ("retry"). `job_id` is needed for
 /// all but start.
 #[tauri::command]
 pub async fn setup_enrichment_action(
@@ -446,6 +495,13 @@ pub async fn setup_enrichment_action(
         "start" => crate::api::start_enrich_job(&s, "Album info lookup")
             .await
             .map(drop),
+        // Look the "not found" albums up again, then start.
+        "retry" => match crate::enrich::retry_not_found(&s.pool).await {
+            Ok(_) => crate::api::start_enrich_job(&s, "Album info lookup")
+                .await
+                .map(drop),
+            Err(e) => Err(e),
+        },
         "pause" => crate::api::pause_enrich(&s, &id()?).await.map(drop),
         "resume" => crate::api::resume_enrich(&s, &id()?).await.map(drop),
         "cancel" => crate::api::cancel_enrich(&s, &id()?).await.map(drop),
@@ -484,18 +540,31 @@ async fn spawn_and_check(
     let finished = handle.inner().is_finished();
     *state.server_task.lock().unwrap() = Some(handle);
     if finished {
-        let msg = state
+        // Kept (not taken) so the Status view can say why, later too.
+        let raw = state
             .last_error
             .lock()
             .unwrap()
-            .take()
+            .clone()
             .unwrap_or_else(|| "the server exited immediately after starting".to_string());
-        Err(msg)
+        *state.bind.lock().unwrap() = Some(bind.clone());
+        // A taken port: is it another Kahawai Server? (The Status tab can
+        // then show it, and offer to stop it.)
+        *state.occupant.lock().unwrap() = if is_port_taken(&raw) {
+            identify(&bind).await
+        } else {
+            None
+        };
+        Err(start_error(&raw, &bind))
     } else {
+        *state.last_error.lock().unwrap() = None;
+        *state.occupant.lock().unwrap() = None;
         *state.bind.lock().unwrap() = Some(bind.clone());
         Ok(ServerStatus {
             running: true,
             bind,
+            error: None,
+            occupant: None,
         })
     }
 }
@@ -519,6 +588,68 @@ pub fn setup_stop_server(state: tauri::State<'_, DesktopState>) {
     }
     *state.app_state.lock().unwrap() = None;
     *state.bind.lock().unwrap() = None;
+    *state.last_error.lock().unwrap() = None; // stopped on purpose: no error
+    *state.occupant.lock().unwrap() = None;
+}
+
+/// The Status tab's "Stop it and start this server": ask the other Kahawai
+/// Server holding our port to shut down (`POST /api/shutdown`, which it only
+/// takes from this machine), wait for the port to come free, then start ours.
+#[tauri::command]
+pub async fn setup_stop_other_server(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<ServerStatus, String> {
+    let path = ServerConfig::resolve_path(None).map_err(|e| e.to_string())?;
+    let config = ServerConfig::load(&path).map_err(|e| e.to_string())?;
+    let bind = config.bind.clone();
+    if identify(&bind).await.is_none() {
+        return Err(format!("No Kahawai Server answers on {bind} any more."));
+    }
+    let url = loopback_url(&bind, "/api/shutdown").ok_or("bad bind address")?;
+    let res = reqwest::Client::new()
+        .post(url)
+        .header(crate::api::SHUTDOWN_HEADER, "yes")
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|e| format!("Couldn't reach the other server: {e}"))?;
+    if !res.status().is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!(
+            "The other server didn't stop ({body}). It may be an older version: quit it yourself."
+        ));
+    }
+    // Graceful: in-flight requests finish first. Wait for the port.
+    let port_free = || {
+        std::net::TcpListener::bind(
+            bind.parse::<std::net::SocketAddr>()
+                .unwrap_or_else(|_| ([127, 0, 0, 1], 0).into()),
+        )
+        .is_ok()
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !port_free() {
+        if std::time::Instant::now() > until {
+            return Err("The other server is still running after 10 seconds.".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    setup_stop_server(state.clone());
+    spawn_and_check(state.inner().clone(), config).await
+}
+
+/// This app's running server's identity (version, build, library, start).
+#[tauri::command]
+pub async fn setup_server_identity(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Option<kahawai_core::ServerIdentity>, String> {
+    let Some(app_state) = state.app_state.lock().unwrap().clone() else {
+        return Ok(None);
+    };
+    crate::api::identity_of(&app_state.pool)
+        .await
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 /// Stop, then start again from the on-disk config — e.g. after an Advanced
@@ -541,7 +672,27 @@ pub fn setup_server_status(state: tauri::State<'_, DesktopState>) -> ServerStatu
         .map(|h| !h.inner().is_finished())
         .unwrap_or(false);
     let bind = state.bind.lock().unwrap().clone().unwrap_or_default();
-    ServerStatus { running, bind }
+    let error = if running {
+        None
+    } else {
+        state
+            .last_error
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(|e| start_error(e, &bind))
+    };
+    let occupant = if running {
+        None
+    } else {
+        state.occupant.lock().unwrap().clone()
+    };
+    ServerStatus {
+        running,
+        bind,
+        error,
+        occupant,
+    }
 }
 
 #[tauri::command]

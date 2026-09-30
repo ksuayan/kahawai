@@ -14,6 +14,7 @@ import type {
   LiveScanStats,
   ScanJob,
   ServerConfigShape,
+  ServerIdentity,
   ServerStatus,
   SetupInput,
   SetupState,
@@ -128,4 +129,15 @@ export async function setupQuit(): Promise<void> {
 /** The UI is up: the shell swaps its splash window for this one. */
 export async function setupAppReady(): Promise<void> {
   if (inTauri()) await cmd("setup_app_ready");
+}
+
+/** This app's running server's identity; `undefined` when not running. */
+export async function setupServerIdentity(): Promise<ServerIdentity | undefined> {
+  return (await cmd<ServerIdentity | null>("setup_server_identity")) ?? undefined;
+}
+
+/** Stop the other Kahawai Server holding the port, then start this one.
+ *  Throws the backend's error string. */
+export async function setupStopOtherServer(): Promise<ServerStatus> {
+  return invoke<ServerStatus>("setup_stop_other_server");
 }

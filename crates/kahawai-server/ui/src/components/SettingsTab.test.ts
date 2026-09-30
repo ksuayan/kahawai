@@ -178,4 +178,31 @@ describe("SettingsTab: album info", () => {
     expect(tauri.callsTo("setup_enrichment_action")).toEqual([{ action: "resume", jobId: "job-0009" }]);
     expect(button(wrapper, "Cancel")).toBeDefined();
   });
+
+  it("with nothing waiting but albums not found, offers to retry them", async () => {
+    inTauri();
+    tauri
+      .on("setup_enrichment_status", status({ enabled: true, coverage: { total_albums: 5754, with_embedded_mbid: 1873, matched_online: 2900, no_match: 981, pending_lookup: 0 } }))
+      .on("setup_enrichment_action", undefined);
+    const { wrapper } = boot();
+    await settle();
+    expect(button(wrapper, "Look up now")).toBeUndefined();
+    await button(wrapper, "Retry not found (981)")!.trigger("click");
+    await settle();
+    expect(tauri.callsTo("setup_enrichment_action")).toEqual([{ action: "retry", jobId: null }]);
+  });
 });
+
+describe("SettingsTab: music folders", () => {
+  it("reads the running server's folders when it opens with none (the server was still starting)", async () => {
+    inTauri();
+    tauri
+      .on("setup_enrichment_status", undefined)
+      .on("setup_get_running_config", { music_dirs: ["/Volumes/NetMusic"], bind: "0.0.0.0:8080", db_path: "/d/music.db", preferred_ladder: [], dsd_story: "pcm", scan_on_startup: true })
+      .on("setup_validate_dir", okValidation);
+    const { wrapper } = boot();
+    await settle();
+    expect(wrapper.text()).toContain("/Volumes/NetMusic");
+  });
+});
+

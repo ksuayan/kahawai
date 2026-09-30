@@ -99,7 +99,7 @@ pub struct JobStore {
 }
 
 /// Now, in Unix milliseconds.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

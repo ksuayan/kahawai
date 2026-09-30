@@ -60,6 +60,22 @@ pub async fn pending_count(pool: &SqlitePool) -> Result<u64, MusicError> {
     Ok(n as u64)
 }
 
+/// Put the albums a lookup couldn't match ("not found") back in line, to be
+/// looked up again: after lowering the confidence threshold, or on request.
+/// Their MusicBrainz replies are cached, so a retry re-scores the saved
+/// candidates without asking again (unless an album's tags changed, which
+/// makes a new query). Returns how many.
+pub async fn retry_not_found(pool: &SqlitePool) -> Result<u64, MusicError> {
+    Ok(sqlx::query(
+        "UPDATE albums SET enrich_status = 'pending', enrich_attempts = 0, enriched_at = NULL
+         WHERE enrich_status = 'no_match' AND mbid IS NULL",
+    )
+    .execute(pool)
+    .await
+    .map_err(db::cvt)?
+    .rows_affected())
+}
+
 /// What the job wants the worker to do next.
 enum Next {
     Go,

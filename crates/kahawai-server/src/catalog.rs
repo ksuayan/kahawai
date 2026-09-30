@@ -105,6 +105,12 @@ async fn tombstones(
     )
 }
 
+/// This database's catalog id (random per database, migration 010).
+pub async fn catalog_id(pool: &SqlitePool) -> Result<String, MusicError> {
+    let mut conn = pool.acquire().await.map_err(db::cvt)?;
+    Ok(current(&mut conn).await?.0)
+}
+
 /// Everything a player caches. One read transaction, so every row matches
 /// the revision reported with it.
 pub async fn snapshot(pool: &SqlitePool) -> Result<CatalogSnapshot, MusicError> {

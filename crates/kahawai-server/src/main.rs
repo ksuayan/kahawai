@@ -82,6 +82,12 @@ impl AppState {
     }
 }
 
+/// `POST /api/shutdown` asks the server to stop (see `api::shutdown`). Woken
+/// with `notify_waiters`, which leaves nothing behind for a server started
+/// later in the same process (the desktop app's restart).
+pub(crate) static SHUTDOWN: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
 /// Request bodies larger than this are rejected with 413 (S10).
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// API request timeout (S10): 60s covers even large playlist imports.
@@ -94,6 +100,8 @@ pub fn app(state: AppState) -> Router {
     // routed separately so neither applies to long-lived audio responses.
     let api = Router::new()
         .route("/api/health", get(api::health))
+        .route("/api/identity", get(api::identity))
+        .route("/api/shutdown", post(api::shutdown))
         .route("/api/albums", get(api::list_albums))
         .route("/api/albums/{id}", get(api::get_album))
         .route("/api/artists", get(api::list_artists))
@@ -208,6 +216,8 @@ fn main() {
             desktop::setup_reveal_config,
             desktop::setup_quit,
             desktop::setup_app_ready,
+            desktop::setup_stop_other_server,
+            desktop::setup_server_identity,
         ])
         .setup(|app| {
             desktop::open_windows(app)?;
@@ -234,6 +244,15 @@ pub async fn run_server_with_ready(
     config: ServerConfig,
     ready: Option<tokio::sync::oneshot::Sender<AppState>>,
 ) -> anyhow::Result<()> {
+    // Bind first: if the port is taken (another Kahawai Server, say a
+    // development build), fail before opening the catalog or starting a
+    // scan against a database the other server is using.
+    let addr: std::net::SocketAddr = config.bind.parse()?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not listen on {addr}: {e}"))?;
+
+    api::mark_started();
     let pool = db::open(&config.db_path).await?;
     info!("SQLite catalog open (WAL mode)");
 
@@ -295,17 +314,19 @@ pub async fn run_server_with_ready(
         }
     }
 
-    let addr: std::net::SocketAddr = config.bind.parse()?;
     // S10: the LAN-only posture is logged at every startup, not just in docs.
     warn!(
         %addr,
         "LAN-only build: no authentication, no TLS — bind to a trusted network only"
     );
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     let events = state.catalog_events.clone();
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal(events))
-        .await?;
+    // Connection info: `POST /api/shutdown` only listens to this machine.
+    axum::serve(
+        listener,
+        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(events))
+    .await?;
     info!("shutdown complete");
     Ok(())
 }
@@ -332,6 +353,7 @@ async fn shutdown_signal(events: tokio::sync::broadcast::Sender<ServerEvent>) {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+        _ = SHUTDOWN.notified() => {},
     }
     info!("shutdown signal received; draining in-flight requests");
     // Tell connected clients (Player apps via SSE) before this function's
@@ -416,6 +438,77 @@ mod integration_tests {
             .await
             .unwrap()
             .to_vec()
+    }
+
+    /// `/api/identity`: the Kahawai marker, the version and build, the
+    /// library's id (the same one the catalog reports), and this run's start.
+    #[tokio::test]
+    async fn identity_says_what_and_which_server_this_is() {
+        let (app, _state, _dir) = scanned_app().await;
+        let (status, v) = get_json(&app, "/api/identity").await;
+        assert_eq!(status, StatusCode::OK);
+        let id: kahawai_core::ServerIdentity = serde_json::from_value(v).unwrap();
+        assert_eq!(id.service, kahawai_core::KAHAWAI_SERVICE);
+        assert_eq!(id.name, "Kahawai Server");
+        assert_eq!(id.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(id.api_version, 1);
+        assert!(!id.build.commit.is_empty());
+        assert_eq!(id.build.profile, "debug");
+        assert!(!id.build.target.is_empty());
+        assert!(
+            id.build.built_at.ends_with('Z') && id.build.built_at.len() == 20,
+            "{}",
+            id.build.built_at
+        );
+        let (_, catalog) = get_json(&app, "/api/catalog").await;
+        assert_eq!(id.catalog_id, catalog["catalog_id"]);
+        let (_, again) = get_json(&app, "/api/identity").await;
+        assert_eq!(again["started_at"], id.started_at, "the same run");
+    }
+
+    /// `POST /api/shutdown` stops the server only when asked from this
+    /// machine, not from a web page, and with its header.
+    #[tokio::test]
+    async fn shutdown_only_from_this_machine_not_a_web_page_and_with_the_header() {
+        let (app, _state, _dir) = scanned_app().await;
+        let call = |peer: &str, origin: Option<&str>, header: Option<&str>| {
+            let mut req = Request::builder().method("POST").uri("/api/shutdown");
+            if let Some(o) = origin {
+                req = req.header(header::ORIGIN, o);
+            }
+            if let Some(h) = header {
+                req = req.header(api::SHUTDOWN_HEADER, h);
+            }
+            let mut req = req.body(Body::empty()).unwrap();
+            req.extensions_mut().insert(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let app = app.clone();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        assert_eq!(
+            call("192.168.1.20:5000", None, Some("yes")).await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call("127.0.0.1:5000", Some("https://evil.example"), Some("yes")).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call("127.0.0.1:5000", None, None).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        let stopped = tokio::spawn(async { SHUTDOWN.notified().await });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            call("127.0.0.1:5000", None, Some("yes")).await,
+            StatusCode::ACCEPTED
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), stopped)
+            .await
+            .expect("the server was told to stop")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1657,6 +1750,64 @@ mod integration_tests {
             JobStatus::Cancelled
         );
         assert_eq!(state.config.read().unwrap().enrichment_min_confidence, 0.8);
+
+        // Lowering the threshold puts "not found" albums back in line (a
+        // looser match may now succeed); raising it doesn't; a matched album
+        // stays matched.
+        let count = |status: &'static str| {
+            let pool = state.pool.clone();
+            async move {
+                sqlx::query("SELECT COUNT(*) FROM albums WHERE enrich_status = ?")
+                    .bind(status)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    .get::<i64, _>(0)
+            }
+        };
+        sqlx::query("UPDATE albums SET enrich_status = 'no_match', enrich_attempts = 1")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE albums SET enrich_status = 'matched', mbid = 'x'
+             WHERE id = (SELECT MIN(id) FROM albums)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        api::set_enrichment(&state, false, 0.95).await.unwrap();
+        assert_eq!(count("no_match").await, 2, "stricter: nothing to retry");
+        api::set_enrichment(&state, false, 0.8).await.unwrap();
+        assert_eq!((count("pending").await, count("no_match").await), (2, 0));
+        assert_eq!(count("matched").await, 1);
+        let attempts: i64 =
+            sqlx::query("SELECT MAX(enrich_attempts) FROM albums WHERE enrich_status = 'pending'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(attempts, 0);
+    }
+
+    /// A taken port fails the start before anything else happens: no
+    /// catalog opened, no startup scan against a database another server
+    /// (say a development build) is using.
+    #[tokio::test]
+    async fn a_taken_port_fails_before_the_catalog_is_opened() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("music.db");
+        let config = ServerConfig {
+            bind: taken.local_addr().unwrap().to_string(),
+            db_path: db_path.clone(),
+            music_dirs: vec![dir.path().to_path_buf()],
+            scan_on_startup: true,
+            ..Default::default()
+        };
+        let err = run_server_with_ready(config, None).await.unwrap_err();
+        assert!(err.to_string().contains("could not listen on"), "{err}");
+        assert!(!db_path.exists(), "the catalog was never opened");
     }
 
     /// The desktop shell edits `AppState.config` in place (add a music

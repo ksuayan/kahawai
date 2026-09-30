@@ -102,6 +102,43 @@ pub struct Genre {
     pub track_count: u64,
 }
 
+/// `GET /api/identity`: proof that an address is a Kahawai server, and which
+/// one. `service` is always [`KAHAWAI_SERVICE`]; `build` names the exact
+/// binary; `catalog_id` the library database; `started_at` this run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerIdentity {
+    pub service: String,
+    /// "Kahawai Server".
+    pub name: String,
+    /// The server's version (Cargo package version).
+    pub version: String,
+    /// Bumped on breaking API changes, so a client can tell what it can use.
+    pub api_version: u32,
+    pub build: BuildInfo,
+    /// The library database's id (random per database; see the catalog).
+    pub catalog_id: String,
+    /// When this server process started, Unix ms.
+    pub started_at: i64,
+}
+
+/// The `service` value of every Kahawai server.
+pub const KAHAWAI_SERVICE: &str = "kahawai-server";
+
+/// How a server binary was built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildInfo {
+    /// Short git commit, or "unknown".
+    pub commit: String,
+    /// The source tree had uncommitted changes.
+    pub dirty: bool,
+    /// UTC, "2026-09-30T19:02:11Z".
+    pub built_at: String,
+    /// "release" or "debug".
+    pub profile: String,
+    /// Rust target triple, e.g. "aarch64-apple-darwin".
+    pub target: String,
+}
+
 /// Everything a player caches (`GET /api/catalog`): present tracks, every
 /// album and artist, and the genre list. `rev` is the catalog revision it
 /// reflects, `catalog_id` names the server database it came from.

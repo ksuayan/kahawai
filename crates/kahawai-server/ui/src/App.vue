@@ -20,12 +20,19 @@ onMounted(async () => {
     while (Date.now() < until) {
       await new Promise((r) => setTimeout(r, 300));
       const status = await setupServerStatus();
+      if (status?.error) {
+        setup.serverStatus = status; // it tried and failed: show why, don't wait
+        break;
+      }
       if (status?.running) {
         setup.serverStatus = status;
+        // init() read these before the server was up (empty): read them again.
+        await Promise.all([setup.loadRunningConfig(), setup.loadRecentScans()]);
         break;
       }
     }
   }
+  void setup.loadIdentity();
   await setupAppReady();
 });
 </script>

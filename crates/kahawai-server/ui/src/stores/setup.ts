@@ -11,12 +11,14 @@ import {
   setupRestartServer,
   setupRevealConfig,
   setupSaveConfig,
+  setupServerIdentity,
   setupServerStatus,
   setupStartServer,
+  setupStopOtherServer,
   setupStopServer,
   setupValidateDir,
 } from "../tauri";
-import type { LiveScanStats, MusicDirEntry, ScanJob, ServerStatus } from "../types";
+import type { LiveScanStats, MusicDirEntry, ScanJob, ServerIdentity, ServerStatus } from "../types";
 import { dirStatus, isJobActive } from "../types";
 
 /** A `host:port` shape good enough to gate the Continue button; the backend
@@ -39,6 +41,9 @@ export const useSetupStore = defineStore("setup", () => {
   const saveError = ref<string | null>(null);
   const startError = ref<string | null>(null);
   const serverStatus = ref<ServerStatus | null>(null);
+  /** This app's running server's identity (version, build). */
+  const identity = ref<ServerIdentity | null>(null);
+  const stoppingOther = ref(false);
   const dbDirValidation = ref<MusicDirEntry["validation"]>(undefined);
 
   // Status/Settings tabs: the running server's own config, edited and
@@ -196,14 +201,36 @@ export const useSetupStore = defineStore("setup", () => {
 
   /** Stops, then starts again from the on-disk config — e.g. after an
    *  Advanced settings change (bind/database) that needs a restart. */
+  async function loadIdentity(): Promise<void> {
+    identity.value = serverStatus.value?.running ? ((await setupServerIdentity()) ?? null) : null;
+  }
+
+  /** Another Kahawai Server holds the port: stop it, then start this one. */
+  async function stopOtherServer(): Promise<void> {
+    startError.value = null;
+    stoppingOther.value = true;
+    try {
+      serverStatus.value = await setupStopOtherServer();
+      await Promise.all([loadRunningConfig(), loadRecentScans(), loadIdentity()]);
+      if (isScanning.value) ensureScanPolling();
+    } catch (err) {
+      startError.value = String(err);
+      serverStatus.value = (await setupServerStatus()) ?? serverStatus.value;
+    } finally {
+      stoppingOther.value = false;
+    }
+  }
+
   async function restartServer(): Promise<void> {
     startError.value = null;
     try {
       serverStatus.value = await setupRestartServer();
-      await Promise.all([loadRunningConfig(), loadRecentScans()]);
+      await Promise.all([loadRunningConfig(), loadRecentScans(), loadIdentity()]);
       if (isScanning.value) ensureScanPolling();
     } catch (err) {
       startError.value = String(err);
+      // Why it couldn't start, and who holds the port if that's why.
+      serverStatus.value = (await setupServerStatus()) ?? serverStatus.value;
     }
   }
 
@@ -262,6 +289,7 @@ export const useSetupStore = defineStore("setup", () => {
     startError.value = null;
     try {
       serverStatus.value = await setupStartServer();
+      void loadIdentity();
       view.value = "status";
       // Without this, `runningDirs` stays empty (its initial value) until
       // something else happens to call `loadRunningConfig()` — and the
@@ -274,6 +302,7 @@ export const useSetupStore = defineStore("setup", () => {
       if (isScanning.value) ensureScanPolling();
     } catch (err) {
       startError.value = String(err);
+      serverStatus.value = (await setupServerStatus()) ?? serverStatus.value;
     }
   }
 
@@ -338,5 +367,9 @@ export const useSetupStore = defineStore("setup", () => {
     applyAndRescan,
     stopServer,
     restartServer,
+    identity,
+    stoppingOther,
+    loadIdentity,
+    stopOtherServer,
   };
 });
