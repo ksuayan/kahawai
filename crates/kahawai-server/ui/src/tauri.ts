@@ -5,6 +5,7 @@
 // UI can show the error instead of silently doing nothing.
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   ApplyConfigInput,
@@ -140,4 +141,15 @@ export async function setupServerIdentity(): Promise<ServerIdentity | undefined>
  *  Throws the backend's error string. */
 export async function setupStopOtherServer(): Promise<ServerStatus> {
   return invoke<ServerStatus>("setup_stop_other_server");
+}
+
+/** The native app menu's custom items (today "app.about") arrive as their id. */
+export async function onMenuAction(cb: (id: string) => void): Promise<UnlistenFn | null> {
+  if (!inTauri()) return null;
+  try {
+    return await listen<string>("menu-action", (event) => cb(event.payload));
+  } catch (err) {
+    console.error("[tauri] could not subscribe to menu-action:", err);
+    return null;
+  }
 }

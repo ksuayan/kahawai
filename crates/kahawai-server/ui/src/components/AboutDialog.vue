@@ -1,16 +1,17 @@
 <script setup lang="ts">
 /**
- * About Kahawai Player: renders the bundled Markdown (src/content/about.md and
- * the generated open-source notices), see src/lib/about.ts. Built on Reka UI's
+ * About Kahawai Server: the splash artwork, then the bundled Markdown
+ * (src/content/about.md and the generated open-source notices; see
+ * src/lib/about.ts). Same design as the player's About. Built on Reka UI's
  * Dialog (focus trap, Escape, aria-modal, focus return).
  */
 import { X } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { DialogClose, DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
 import { licenseText, renderAbout, type AboutPage } from "../lib/about";
-import { useOverlaysStore } from "../stores/overlays";
+import { useSetupStore } from "../stores/setup";
 
-const overlays = useOverlaysStore();
+const setup = useSetupStore();
 const page = ref<AboutPage>("about");
 // Injected by vite.config.ts; absent under some tooling.
 const version = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "dev";
@@ -24,7 +25,7 @@ const tabs: { id: AboutPage; label: string }[] = [
 
 // Always open on the About page, not wherever it was last left.
 watch(
-  () => overlays.aboutOpen,
+  () => setup.aboutOpen,
   (open) => {
     if (open) page.value = "about";
   },
@@ -32,7 +33,7 @@ watch(
 </script>
 
 <template>
-  <DialogRoot v-model:open="overlays.aboutOpen">
+  <DialogRoot v-model:open="setup.aboutOpen">
     <DialogPortal>
       <DialogOverlay class="fixed inset-0 z-50 bg-black/55" data-kw-fade />
       <DialogContent
@@ -40,7 +41,7 @@ watch(
         class="fixed left-1/2 top-1/2 z-50 flex max-h-[85vh] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border border-line bg-surface shadow-float outline-none"
         data-testid="about-dialog"
       >
-        <DialogTitle class="sr-only">About Kahawai Player</DialogTitle>
+        <DialogTitle class="sr-only">About Kahawai Server</DialogTitle>
         <DialogDescription class="sr-only">Version, credits, copyright, the open-source notices and the license.</DialogDescription>
         <div class="flex items-center gap-1 border-b border-line px-4 py-2" role="tablist" aria-label="About pages">
           <button
@@ -73,6 +74,10 @@ watch(
             class="mb-5 block aspect-[3/2] w-full rounded-md object-cover"
             data-testid="about-image"
           />
+          <p v-if="page === 'about' && setup.identity" class="m-0 mb-2 text-xs text-dim" data-testid="about-build">
+            Build {{ setup.identity.build.commit }}{{ setup.identity.build.dirty ? "+changes" : "" }} ·
+            {{ setup.identity.build.profile }} · {{ setup.identity.build.target }} · built {{ setup.identity.build.built_at }}
+          </p>
           <!-- The GNU AGPL, exactly as in the repository's LICENSE. -->
           <pre
             v-if="page === 'license'"

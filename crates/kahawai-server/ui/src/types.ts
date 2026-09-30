@@ -81,6 +81,9 @@ export interface ServerIdentity {
   build: { commit: string; dirty: boolean; built_at: string; profile: string; target: string };
   catalog_id: string;
   started_at: number;
+  /** Where the server's source code is (its AGPL source offer); empty from
+   *  older servers. */
+  source_url?: string;
 }
 
 /** "Kahawai Server 0.1.0 · build cd9b827 (release, aarch64-apple-darwin)". */

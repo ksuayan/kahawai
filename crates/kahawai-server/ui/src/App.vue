@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { onMounted, onUnmounted } from "vue";
+import AboutDialog from "./components/AboutDialog.vue";
 import StatusView from "./components/StatusView.vue";
 import WizardView from "./components/WizardView.vue";
 import { useSetupStore } from "./stores/setup";
-import { setupAppReady, setupServerStatus } from "./tauri";
+import { onMenuAction, setupAppReady, setupServerStatus } from "./tauri";
 
 const setup = useSetupStore();
+
+// The native app menu's "About Kahawai Server". Registered before any await,
+// so unsubscribing is reachable from onUnmounted.
+let stopMenu: (() => void) | null = null;
+void onMenuAction((id) => {
+  if (id === "app.about") setup.aboutOpen = true;
+}).then((stop) => (stopMenu = stop));
+onUnmounted(() => stopMenu?.());
 
 /** How long the splash waits for the server to come up at launch. */
 const SERVER_START_WAIT_MS = 6000;
@@ -42,5 +51,6 @@ onMounted(async () => {
     <div v-if="setup.loading" class="flex h-full items-center justify-center text-faint">Starting…</div>
     <WizardView v-else-if="setup.view === 'wizard'" />
     <StatusView v-else />
+    <AboutDialog />
   </div>
 </template>

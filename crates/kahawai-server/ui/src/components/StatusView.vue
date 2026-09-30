@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Info } from "lucide-vue-next";
 import { useSetupStore } from "../stores/setup";
 import StatusTab from "./StatusTab.vue";
 import SettingsTab from "./SettingsTab.vue";
@@ -23,6 +24,15 @@ const TABS = ["status", "settings"] as const;
         @click="setup.activeTab = tab"
       >
         {{ tab }}
+      </button>
+      <button
+        type="button"
+        class="-mb-px ml-auto flex items-center gap-1.5 px-3 py-2 text-[13px] text-dim hover:text-fg"
+        title="About Kahawai Server"
+        data-testid="about-button"
+        @click="setup.aboutOpen = true"
+      >
+        <Info class="size-4" /> About
       </button>
     </div>
     <div class="min-h-0 flex-1 overflow-y-auto">

@@ -391,6 +391,24 @@ describe("Settings: server URL", () => {
     expect(text.text()).toBe("Server reachable · Kahawai Server 0.1.0 · build cd9b827 (release, aarch64-apple-darwin)");
     expect(text.attributes("title")).toContain("2026-09-30T19:02:11Z");
     expect(w.get('[data-testid="server-light"]').attributes("data-state")).toBe("connected");
+    expect(w.find('[data-testid="server-source"]').exists()).toBe(false); // an older server: no source_url
+  });
+
+  it("shows where the server's source code is (its AGPL source offer)", async () => {
+    mockFetch({
+      "/api/identity": {
+        service: "kahawai-server",
+        name: "Kahawai Server",
+        version: "0.1.0",
+        api_version: 1,
+        build: { commit: "cd9b827", dirty: false, built_at: "2026-09-30T19:02:11Z", profile: "release", target: "aarch64-apple-darwin" },
+        catalog_id: "3f1c",
+        started_at: 1_790_794_931_000,
+        source_url: "https://github.com/ksuayan/kahawai",
+      },
+    });
+    const w = await mountSettings();
+    expect(w.get('[data-testid="server-source"]').text()).toContain("Source code: https://github.com/ksuayan/kahawai");
   });
 
   it("tells a Kahawai server from something else on the same address", async () => {

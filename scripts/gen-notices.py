@@ -1,85 +1,95 @@
 #!/usr/bin/env python3
-"""Generate player/ui/src/content/notices.md (shown in About -> Open-source notices).
+"""Generate each app's open-source notices (About -> Open-source notices):
+player/ui/src/content/notices.md (Kahawai Player) and
+crates/kahawai-server/ui/src/content/notices.md (Kahawai Server).
 
 Sources of truth, so nothing is retyped from memory:
   * the bundled fonts' own LICENSE files (node_modules/@fontsource/*)
   * license fields of the UI's direct npm dependencies
-  * license fields of the direct Rust dependencies of the player (the Tauri
-    shell and the player crates it uses), from `cargo metadata`
+  * license fields of the direct Rust dependencies of the app (its binary
+    crate and the workspace crates it uses), from `cargo metadata`
 
 Re-run after changing dependencies:  python3 scripts/gen-notices.py
 """
 import json, pathlib, subprocess
 
 root = pathlib.Path(__file__).resolve().parent.parent
-ui = root / "player" / "ui"
-out = ui / "src" / "content" / "notices.md"
 
-pkg = json.loads((ui / "package.json").read_text())
-npm_rows = []
-for name in sorted(pkg.get("dependencies", {})):  # what ships in the app; dev tools are not redistributed
-    meta = json.loads((ui / "node_modules" / name / "package.json").read_text())
-    npm_rows.append((name, meta.get("version", "?"), meta.get("license", "see package")))
+# app name, UI directory, Cargo manifest, binary crate
+APPS = [
+    ("Kahawai Player", root / "player" / "ui", root / "player" / "src-tauri" / "Cargo.toml", "kahawai-player"),
+    ("Kahawai Server", root / "crates" / "kahawai-server" / "ui", root / "crates" / "kahawai-server" / "Cargo.toml", "kahawai-server"),
+]
 
-cm = json.loads(subprocess.check_output(
-    ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(root / "player" / "src-tauri" / "Cargo.toml")],
-    text=True))
-by_id = {p["id"]: p for p in cm["packages"]}
-local = {p["name"] for p in cm["packages"] if p.get("source") is None}  # our own crates
-# Direct dependencies of every local crate reachable from the shell (workspace crates included).
-resolve = {n["id"]: n for n in cm["resolve"]["nodes"]}
-shell = next(p for p in cm["packages"] if p["name"] == "kahawai-player")
-seen, stack, direct = set(), [shell["id"]], set()
-while stack:
-    pid = stack.pop()
-    if pid in seen:
-        continue
-    seen.add(pid)
-    p = by_id[pid]
-    for d in p["dependencies"]:
-        if d.get("kind") not in (None, "normal"):
+
+def generate(app_name, ui, manifest, crate):
+    out = ui / "src" / "content" / "notices.md"
+
+    pkg = json.loads((ui / "package.json").read_text())
+    npm_rows = []
+    for name in sorted(pkg.get("dependencies", {})):  # what ships in the app; dev tools are not redistributed
+        meta = json.loads((ui / "node_modules" / name / "package.json").read_text())
+        npm_rows.append((name, meta.get("version", "?"), meta.get("license", "see package")))
+
+    cm = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(manifest)],
+        text=True))
+    by_id = {p["id"]: p for p in cm["packages"]}
+    local = {p["name"] for p in cm["packages"] if p.get("source") is None}  # our own crates
+    # Direct dependencies of every local crate reachable from the shell (workspace crates included).
+    resolve = {n["id"]: n for n in cm["resolve"]["nodes"]}
+    shell = next(p for p in cm["packages"] if p["name"] == crate)
+    seen, stack, direct = set(), [shell["id"]], set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
             continue
-        if d["name"] in local:
-            child = next((q["id"] for q in cm["packages"] if q["name"] == d["name"]), None)
-            if child:
-                stack.append(child)
-        else:
-            direct.add(d["name"])
-merged = {}
-for p in cm["packages"]:
-    if p["name"] in direct and p["name"] not in local:
-        merged.setdefault((p["name"], p.get("license") or "see crate"), []).append(p["version"])
-rust_rows = sorted((n, ", ".join(sorted(v)), lic) for (n, lic), v in merged.items())
+        seen.add(pid)
+        p = by_id[pid]
+        for d in p["dependencies"]:
+            if d.get("kind") not in (None, "normal"):
+                continue
+            if d["name"] in local:
+                child = next((q["id"] for q in cm["packages"] if q["name"] == d["name"]), None)
+                if child:
+                    stack.append(child)
+            else:
+                direct.add(d["name"])
+    merged = {}
+    for p in cm["packages"]:
+        if p["name"] in direct and p["name"] not in local:
+            merged.setdefault((p["name"], p.get("license") or "see crate"), []).append(p["version"])
+    rust_rows = sorted((n, ", ".join(sorted(v)), lic) for (n, lic), v in merged.items())
 
-fonts = []
-for fam in ("ibm-plex-sans", "ibm-plex-serif"):
-    d = ui / "node_modules" / "@fontsource" / fam
-    fonts.append((fam, json.loads((d / "package.json").read_text())["version"], (d / "LICENSE").read_text().strip()))
+    fonts = []
+    for fam in ("ibm-plex-sans", "ibm-plex-serif"):
+        d = ui / "node_modules" / "@fontsource" / fam
+        fonts.append((fam, json.loads((d / "package.json").read_text())["version"], (d / "LICENSE").read_text().strip()))
 
-def table(rows):
-    lines = ["| Component | Version | License |", "|---|---|---|"]
-    lines += [f"| {n} | {v} | {l} |" for n, v, l in rows]
-    return "\n".join(lines)
+    def table(rows):
+        lines = ["| Component | Version | License |", "|---|---|---|"]
+        lines += [f"| {n} | {v} | {l} |" for n, v, l in rows]
+        return "\n".join(lines)
 
-copyleft = [r for r in rust_rows + npm_rows if any(k in r[2].upper() for k in ("GPL", "MPL", "EPL", "CDDL"))]
-note = ""
-if copyleft:
-    note = ("\n## Components under weak-copyleft licenses\n\n"
-            + "\n".join(f"- **{n}** {v} - {l}" for n, v, l in copyleft)
-            + "\n\nThese licenses require that the component's own source remain available and that "
-              "it can be replaced by a modified version. See each project's repository for its source.\n")
+    copyleft = [r for r in rust_rows + npm_rows if any(k in r[2].upper() for k in ("GPL", "MPL", "EPL", "CDDL"))]
+    note = ""
+    if copyleft:
+        note = ("\n## Components under weak-copyleft licenses\n\n"
+                + "\n".join(f"- **{n}** {v} - {l}" for n, v, l in copyleft)
+                + "\n\nThese licenses require that the component's own source remain available and that "
+                  "it can be replaced by a modified version. See each project's repository for its source.\n")
 
-font_text = ""
-for fam, ver, lic in fonts:
-    label = "IBM Plex Sans" if fam.endswith("sans") else "IBM Plex Serif"
-    use = "all interface text" if fam.endswith("sans") else "long-form explanatory text"
-    font_text += (f"\n**{label}** (via the Fontsource package, version {ver}) is bundled with the "
-                  f"application and used for {use}. It is licensed under the SIL Open Font "
-                  f"License, Version 1.1, reproduced below as required by that license.\n\n```\n{lic}\n```\n")
+    font_text = ""
+    for fam, ver, lic in fonts:
+        label = "IBM Plex Sans" if fam.endswith("sans") else "IBM Plex Serif"
+        use = "all interface text" if fam.endswith("sans") else "long-form explanatory text"
+        font_text += (f"\n**{label}** (via the Fontsource package, version {ver}) is bundled with the "
+                      f"application and used for {use}. It is licensed under the SIL Open Font "
+                      f"License, Version 1.1, reproduced below as required by that license.\n\n```\n{lic}\n```\n")
 
-text = f"""# Open-source notices
+    text = f"""# Open-source notices
 
-Kahawai Player includes the following third-party software. This file is
+{app_name} includes the following third-party software. This file is
 generated by `scripts/gen-notices.py` from the projects' own metadata.
 
 ## Fonts
@@ -96,5 +106,9 @@ Indirect (transitive) dependencies are distributed under their own licenses; the
 names, versions and licenses are recorded in `package-lock.json` and `Cargo.lock`
 and in each project's repository.
 """
-out.write_text(text)
-print(f"wrote {out.relative_to(root)}: {len(npm_rows)} npm, {len(rust_rows)} rust direct deps, copyleft: {[c[0] for c in copyleft]}")
+    out.write_text(text)
+    print(f"wrote {out.relative_to(root)}: {len(npm_rows)} npm, {len(rust_rows)} rust direct deps, copyleft: {[c[0] for c in copyleft]}")
+
+
+for app in APPS:
+    generate(*app)

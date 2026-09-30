@@ -132,6 +132,7 @@ pub(crate) async fn identity_of(pool: &SqlitePool) -> Result<ServerIdentity, Mus
         },
         catalog_id: crate::catalog::catalog_id(pool).await?,
         started_at: *STARTED_AT.get_or_init(crate::jobs::now_ms),
+        source_url: kahawai_core::KAHAWAI_SOURCE_URL.to_string(),
     })
 }
 

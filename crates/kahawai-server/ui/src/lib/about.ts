@@ -3,16 +3,17 @@ import aboutSource from "../content/about.md?raw";
 import noticesSource from "../content/notices.md?raw";
 // The repository's DISCLAIMER.md, at the bottom of the About page (the README
 // carries the same text; a test keeps them identical).
-import disclaimerSource from "../../../../DISCLAIMER.md?raw";
+import disclaimerSource from "../../../../../DISCLAIMER.md?raw";
 // The repository's LICENSE (GNU AGPL v3), shown as-is in the License tab.
-import licenseSource from "../../../../LICENSE?raw";
+import licenseSource from "../../../../../LICENSE?raw";
 
 /**
- * Render the bundled Markdown for the About dialog.
+ * Render the bundled Markdown for the About dialog (same rules as the
+ * player's src/lib/about.ts).
  *
- * Links are shown as plain text with the address beside them: the window has no
- * permission to open external addresses (least-privilege capability), and a bare
- * anchor would navigate the app's own webview away from the player.
+ * Links are shown as plain text with the address beside them: the window has
+ * no permission to open external addresses, and a bare anchor would navigate
+ * the app's own webview away.
  */
 const md = new Marked({
   gfm: true,
@@ -37,20 +38,10 @@ export type AboutPage = "about" | "notices" | "license";
 /** The full license text (plain text, shown preformatted). */
 export const licenseText: string = licenseSource;
 
-/** Bundled source text for a page, with `{{version}}` filled in. */
-export function aboutSourceFor(page: AboutPage, version: string): string {
-  const source = page === "about" ? `${aboutSource}\n\n${disclaimerSource}` : noticesSource;
-  return source.replaceAll("{{version}}", version);
-}
-
-/** The disclaimers, as in DISCLAIMER.md. */
-export const disclaimerText: string = disclaimerSource;
-
-/** HTML for a Markdown string (links neutralized, raw HTML escaped). */
-export function renderMarkdown(source: string): string {
-  return md.parse(source, { async: false }) as string;
-}
-
 export function renderAbout(page: AboutPage, version: string): string {
-  return renderMarkdown(aboutSourceFor(page, version));
+  const source = (page === "about" ? `${aboutSource}\n\n${disclaimerSource}` : noticesSource).replaceAll(
+    "{{version}}",
+    version,
+  );
+  return md.parse(source, { async: false }) as string;
 }

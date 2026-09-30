@@ -14,6 +14,8 @@ mod genre;
 mod genre_aliases;
 mod hashing;
 mod jobs;
+#[cfg(target_os = "macos")]
+mod menu;
 mod musicbrainz;
 mod normalize;
 mod resample;
@@ -219,7 +221,10 @@ fn main() {
             desktop::setup_stop_other_server,
             desktop::setup_server_identity,
         ])
+        .on_menu_event(menu::on_menu_event)
         .setup(|app| {
+            // App menu with a custom About item (the UI shows about.md).
+            app.set_menu(menu::build_app_menu(app.handle())?)?;
             desktop::open_windows(app)?;
             desktop::autostart(app);
             Ok(())
@@ -452,6 +457,10 @@ mod integration_tests {
         assert_eq!(id.name, "Kahawai Server");
         assert_eq!(id.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(id.api_version, 1);
+        assert_eq!(
+            id.source_url, "https://github.com/ksuayan/kahawai",
+            "the AGPL source offer"
+        );
         assert!(!id.build.commit.is_empty());
         assert_eq!(id.build.profile, "debug");
         assert!(!id.build.target.is_empty());

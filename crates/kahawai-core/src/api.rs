@@ -119,7 +119,15 @@ pub struct ServerIdentity {
     pub catalog_id: String,
     /// When this server process started, Unix ms.
     pub started_at: i64,
+    /// Where this server's source code is. The server is licensed under the
+    /// GNU AGPL v3 or later, which gives everyone who uses it over a network
+    /// the right to its source. Empty from servers older than this field.
+    #[serde(default)]
+    pub source_url: String,
 }
+
+/// Where Kahawai's source code is (see [`ServerIdentity::source_url`]).
+pub const KAHAWAI_SOURCE_URL: &str = "https://github.com/ksuayan/kahawai";
 
 /// The `service` value of every Kahawai server.
 pub const KAHAWAI_SERVICE: &str = "kahawai-server";

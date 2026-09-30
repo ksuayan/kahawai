@@ -45,13 +45,27 @@ player says so where you would look for them.
 
 ## Copyright and trademarks
 
-Kahawai Player is Copyright (c) 2026 Kyo Suayan. All rights reserved.
+Kahawai Player is Copyright (c) 2026 Kyo Suayan, and licensed under the GNU Affero
+General Public License, version 3 or later (see License below).
 
 MQA is a trademark of MQA Limited. Apple, macOS and Core Audio are trademarks of Apple
 Inc. Tube and transistor type numbers (12AX7, 300B, EL34 and the like) are used only to
 describe which part a modelled stage is based on. Kahawai Player is an independent
 product and is not affiliated with or endorsed by any of these companies or by any
 maker of the equipment it emulates.
+
+## License
+
+Kahawai Player is free software: you can redistribute it and/or modify it under the terms of the
+GNU Affero General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version.
+
+It is distributed in the hope that it will be useful, but **without any warranty**; without
+even the implied warranty of merchantability or fitness for a particular purpose. The full
+text of the GNU Affero General Public License is in the License tab above, and in the
+`LICENSE` file with the source code.
+
+**Source code:** [github.com/ksuayan/kahawai](https://github.com/ksuayan/kahawai).
 
 ## Fonts
 

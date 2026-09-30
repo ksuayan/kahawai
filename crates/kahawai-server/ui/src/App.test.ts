@@ -54,6 +54,16 @@ describe("App", () => {
     expect(tauri.callsTo("setup_quit")).toHaveLength(1);
   });
 
+  it("opens About from the app menu", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    tauri.on("setup_get_state", { config_path: "/cfg/config.toml", config_exists: false });
+    mountApp(App);
+    await settle();
+    tauri.emit("menu-action", "app.about");
+    await settle();
+    expect(document.body.querySelector('[data-testid="about-dialog"]')).not.toBeNull();
+  });
+
   describe("the splash window", () => {
     const inApp = () => ((window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {});
     const config = {
