@@ -46,7 +46,7 @@ describe("global shortcuts", () => {
 
   it("navigates with 1-6 and F", () => {
     const a = actions();
-    for (const [k, v] of [["1", "albums"], ["2", "artists"], ["3", "playlists"], ["4", "search"], ["5", "queue"], ["6", "settings"], ["f", "search"], ["F", "search"]]) {
+    for (const [k, v] of [["1", "albums"], ["2", "artists"], ["3", "playlists"], ["4", "search"], ["5", "queue"], ["6", "settings"], ["f", "search"], ["F", "search"], ["g", "genres"]]) {
       handleShortcut(fire(k), a);
       expect(a.go).toHaveBeenLastCalledWith(v);
     }

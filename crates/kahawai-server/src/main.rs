@@ -9,6 +9,8 @@ mod dop;
 mod dsd;
 mod dsd_meta;
 mod enrich;
+mod genre;
+mod genre_aliases;
 mod hashing;
 mod jobs;
 mod musicbrainz;
@@ -97,6 +99,9 @@ pub fn app(state: AppState) -> Router {
         .route("/api/artists/{id}", get(api::get_artist))
         .route("/api/tracks/{id}", get(api::get_track))
         .route("/api/search", get(api::search))
+        .route("/api/genres", get(api::list_genres))
+        .route("/api/genres/report", get(api::genre_report))
+        .route("/api/genres/{name}/tracks", get(api::genre_tracks))
         .route("/api/enrichment/coverage", get(api::enrichment_coverage))
         .route(
             "/api/playlists",
@@ -268,6 +273,14 @@ pub async fn run_server_with_ready(
         }
     } else {
         info!("startup scan disabled (set scan_on_startup = true in config to enable)");
+        // Genres come from tags already in the catalog: map them now rather
+        // than wait for the next scan (which also does this, first thing).
+        let pool = state.pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = genre::refresh_genres(&pool).await {
+                warn!(error = %e, "could not refresh genres");
+            }
+        });
         // Resume content hashing left unfinished by the last run. With a
         // startup scan, the scan queues it when it completes.
         match api::queue_hash_job(&state, "Content hashing").await {
@@ -1188,6 +1201,81 @@ mod integration_tests {
         drop(guard);
         let res = app.clone().oneshot(post("/api/jobs", body)).await.unwrap();
         assert_eq!(res.status(), StatusCode::ACCEPTED);
+    }
+
+    /// A scan maps raw genre tags to canonical genres; the genre endpoints
+    /// count present tracks only, page them, and report what the alias table
+    /// didn't cover; text search matches the genre tag.
+    #[tokio::test]
+    async fn genres_browse_report_and_search() {
+        let (app, state, _dir) = scanned_app().await;
+        let (status, v) = get_json(&app, "/api/genres").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v, serde_json::json!([{ "name": "Jazz", "track_count": 8 }]));
+        let (_, hits) = get_json(&app, "/api/search?q=jazz").await;
+        assert_eq!(hits.as_array().unwrap().len(), 8, "genre is searchable");
+
+        let ids: Vec<i64> = sqlx::query("SELECT id FROM tracks ORDER BY id")
+            .fetch_all(&state.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        for (id, genre) in [
+            (ids[0], Some("Pop, Rock")),
+            (ids[1], Some("Pinoy Rock")),
+            (ids[2], Some("Unknown genre")),
+            (ids[3], None),
+        ] {
+            sqlx::query("UPDATE tracks SET genre = ? WHERE id = ?")
+                .bind(genre)
+                .bind(id)
+                .execute(&state.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE tracks SET missing = 1 WHERE id = ?")
+            .bind(ids[4])
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        genre::refresh_genres(&state.pool).await.unwrap();
+
+        let (_, v) = get_json(&app, "/api/genres").await;
+        assert_eq!(
+            v,
+            serde_json::json!([
+                { "name": "Jazz", "track_count": 3 },
+                { "name": "Rock", "track_count": 2 },
+                { "name": "Pop", "track_count": 1 },
+            ]),
+            "a missing track isn't counted"
+        );
+
+        let (status, v) = get_json(&app, "/api/genres/Rock/tracks?per_page=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (v["total"].as_u64(), v["items"].as_array().unwrap().len()),
+            (Some(2), 1)
+        );
+        let (status, v) = get_json(&app, "/api/genres/Rock/tracks?page=2&per_page=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["items"].as_array().unwrap().len(), 1);
+        let (status, _) = get_json(&app, "/api/genres/Polka/tracks").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (_, r) = get_json(&app, "/api/genres/report").await;
+        assert_eq!(r["distinct_raw"], 4);
+        assert_eq!(
+            r["by_keyword"],
+            serde_json::json!([{ "raw": "Pinoy Rock", "track_count": 1, "genres": ["Rock"] }])
+        );
+        assert_eq!(
+            r["ignored"],
+            serde_json::json!([{ "raw": "Unknown genre", "track_count": 1, "genres": [] }])
+        );
+        assert_eq!(r["unmapped"], serde_json::json!([]));
     }
 
     /// Online lookup is opt-in and runs one at a time; pause, resume and

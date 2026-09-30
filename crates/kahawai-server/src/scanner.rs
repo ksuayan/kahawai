@@ -249,6 +249,9 @@ async fn scan_with_workers(
     // Grouping keys must be current before any track is matched to an album
     // (rows from before the keys existed, or renamed by the last scan).
     refresh_keys(pool).await?;
+    // Genre browse works from the tags already cataloged while this scan
+    // runs (a first scan of a big library takes a while).
+    crate::genre::refresh_genres(pool).await?;
     // Rows whose tags were read before MQA detection or MusicBrainz IDs
     // existed: tags are read the next time the file is visited.
     let mut tags_unchecked: HashSet<String> =
@@ -366,6 +369,8 @@ async fn scan_with_workers(
     }
     // Merges and "Various Artists" promotions change album artists.
     refresh_keys(pool).await?;
+    // New and re-read files may carry new genre tags.
+    crate::genre::refresh_genres(pool).await?;
 
     report.elapsed_secs = start.elapsed().as_secs_f64();
     sqlx::query(
@@ -1330,14 +1335,17 @@ async fn upsert_track(
         .execute(&mut **tx)
         .await
         .map_err(db::cvt)?;
-    sqlx::query("INSERT INTO search_fts (rowid, title, album, artist) VALUES (?, ?, ?, ?)")
-        .bind(track_id)
-        .bind(a.title.as_deref().unwrap_or(""))
-        .bind(a.album.as_deref().unwrap_or(""))
-        .bind(a.artist.as_deref().unwrap_or(""))
-        .execute(&mut **tx)
-        .await
-        .map_err(db::cvt)?;
+    sqlx::query(
+        "INSERT INTO search_fts (rowid, title, album, artist, genre) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(track_id)
+    .bind(a.title.as_deref().unwrap_or(""))
+    .bind(a.album.as_deref().unwrap_or(""))
+    .bind(a.artist.as_deref().unwrap_or(""))
+    .bind(a.genre.as_deref().unwrap_or(""))
+    .execute(&mut **tx)
+    .await
+    .map_err(db::cvt)?;
 
     Ok(())
 }

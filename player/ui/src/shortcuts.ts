@@ -55,6 +55,7 @@ const VIEW_KEYS: Record<string, NavState["name"]> = {
   "5": "queue",
   "6": "settings",
   f: "search",
+  g: "genres",
 };
 
 export const SEEK_STEP_MS = 10_000;

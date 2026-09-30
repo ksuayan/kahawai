@@ -6,10 +6,11 @@ import {
   fetchAllAlbums,
   fetchArtistDetail,
   fetchArtists,
+  fetchGenres,
   fetchTrack,
   searchTracks,
 } from "../api";
-import type { Album, Artist, Track } from "../types";
+import type { Album, Artist, Genre, Track } from "../types";
 
 function sortTracks(tracks: Track[]): Track[] {
   return [...tracks].sort(
@@ -21,6 +22,8 @@ function sortTracks(tracks: Track[]): Track[] {
 export const useLibraryStore = defineStore("library", () => {
   const albums = ref<Album[]>([]);
   const artists = ref<Artist[]>([]);
+  /** Canonical genres, most tracks first (empty on servers without them). */
+  const genres = ref<Genre[]>([]);
   const trackCache = ref(new Map<number, Track>());
   const searchQuery = ref("");
   const searchResults = ref<Track[]>([]);
@@ -54,9 +57,15 @@ export const useLibraryStore = defineStore("library", () => {
       const online = await checkHealth();
       serverOnline.value = online;
       if (!online) throw new Error("Server not reachable");
-      const [a, ar] = await Promise.all([fetchAllAlbums(), fetchArtists()]);
+      // Genres are a nice-to-have: failing to load them doesn't fail the library.
+      const [a, ar, g] = await Promise.all([
+        fetchAllAlbums(),
+        fetchArtists(),
+        fetchGenres().catch(() => [] as Genre[]),
+      ]);
       albums.value = a;
       artists.value = ar;
+      genres.value = g;
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -124,6 +133,7 @@ export const useLibraryStore = defineStore("library", () => {
   return {
     albums,
     artists,
+    genres,
     trackCache,
     searchQuery,
     searchResults,
