@@ -13,6 +13,7 @@ import {
 } from "../types";
 import UiBadge from "../ui/UiBadge.vue";
 import Artwork from "./Artwork.vue";
+import ItemContextMenu from "./ItemContextMenu.vue";
 import TrackMenu from "./TrackMenu.vue";
 
 const props = withDefaults(
@@ -42,6 +43,7 @@ function onDblClick(): void {
 </script>
 
 <template>
+  <ItemContextMenu :track="track" @play="emit('play', track)">
   <div
     class="flex cursor-default items-center gap-3 rounded-md px-2.5 py-[7px]"
     :class="[current ? 'bg-accent/15' : 'hover:bg-hover', !playable && 'opacity-45']"
@@ -64,4 +66,5 @@ function onDblClick(): void {
     <TrackMenu v-if="showMenu" :track="track" />
     <slot />
   </div>
+  </ItemContextMenu>
 </template>

@@ -19,6 +19,7 @@ import { useJobsStore } from "./stores/jobs";
 import { useLibraryStore } from "./stores/library";
 import { useNavStore } from "./stores/nav";
 import AboutDialog from "./components/AboutDialog.vue";
+import InfoDialog from "./components/InfoDialog.vue";
 import { useAbxStore } from "./stores/abx";
 import { useAnalogStore } from "./stores/analog";
 import { useOverlaysStore } from "./stores/overlays";
@@ -187,6 +188,7 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
       <NowPlayingBar />
       <ToastHost />
       <AboutDialog />
+      <InfoDialog />
     </template>
   </div>
 </template>

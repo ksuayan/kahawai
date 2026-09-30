@@ -3,6 +3,8 @@ import { makeTrack, mockFetch } from "../test/fixtures";
 import { mountApp } from "../test/helpers";
 import TrackRow from "./TrackRow.vue";
 
+/** The row element (the component's root is its right-click menu). */
+const row = (w: ReturnType<typeof mountRow>) => w.get("[data-playable]");
 const mountRow = (props: Record<string, unknown>) => {
   mockFetch({ "/api/playlists": [] });
   return mountApp(TrackRow, props).wrapper;
@@ -29,8 +31,8 @@ describe("TrackRow", () => {
   });
 
   it("highlights the current track (and does not highlight others)", () => {
-    expect(mountRow({ track: makeTrack(), current: true }).attributes("data-current")).toBeDefined();
-    expect(mountRow({ track: makeTrack() }).attributes("data-current")).toBeUndefined();
+    expect(row(mountRow({ track: makeTrack(), current: true })).attributes("data-current")).toBeDefined();
+    expect(row(mountRow({ track: makeTrack() })).attributes("data-current")).toBeUndefined();
   });
 
   it("badges MQA tracks with the master rate, and only those", () => {
@@ -49,7 +51,7 @@ describe("TrackRow", () => {
   it("plays on double-click when playable", async () => {
     const track = makeTrack();
     const w = mountRow({ track });
-    await w.trigger("dblclick");
+    await row(w).trigger("dblclick");
     expect(w.emitted("play")).toEqual([[track]]);
   });
 
@@ -58,10 +60,10 @@ describe("TrackRow", () => {
     ["not decodable", { decodable: false }, /extraction/i],
   ])("a %s track is dimmed, explains why, and does not play", async (_n, over, reason) => {
     const w = mountRow({ track: makeTrack({ title: "T", ...over } as never) });
-    expect(w.attributes("data-playable")).toBe("false");
-    expect(w.classes()).toContain("opacity-45");
-    expect(w.attributes("title")).toMatch(reason);
-    await w.trigger("dblclick");
+    expect(row(w).attributes("data-playable")).toBe("false");
+    expect(row(w).classes()).toContain("opacity-45");
+    expect(row(w).attributes("title")).toMatch(reason);
+    await row(w).trigger("dblclick");
     expect(w.emitted("play")).toBeUndefined();
   });
 

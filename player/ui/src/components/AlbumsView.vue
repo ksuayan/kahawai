@@ -8,6 +8,7 @@ import StateMessage from "../ui/StateMessage.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import AlbumCard from "./AlbumCard.vue";
 import Artwork from "./Artwork.vue";
+import ItemContextMenu from "./ItemContextMenu.vue";
 import ListToolbar from "./ListToolbar.vue";
 import VirtualGrid from "./VirtualGrid.vue";
 import VirtualList from "./VirtualList.vue";
@@ -55,6 +56,7 @@ function subtitle(a: { artist?: string | null; year?: number | null; track_count
       :get-key="(a) => a.id"
     >
       <template #item="{ item }">
+        <ItemContextMenu :album="item">
         <button
           type="button"
           class="flex h-full w-full items-center gap-3 rounded-md px-2.5 text-left hover:bg-hover"
@@ -71,6 +73,7 @@ function subtitle(a: { artist?: string | null; year?: number | null; track_count
             {{ item.track_count }} track{{ item.track_count === 1 ? "" : "s" }}
           </span>
         </button>
+        </ItemContextMenu>
       </template>
     </VirtualList>
   </ViewShell>

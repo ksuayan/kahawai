@@ -62,7 +62,7 @@ describe("AlbumCard", () => {
     const { wrapper } = mountApp(AlbumCard, { album, subtitle: "Phoebe Bridgers · 2017 · 3 tracks" });
     expect(wrapper.text()).toContain("Stranger in the Alps");
     expect(wrapper.text()).toContain("Phoebe Bridgers · 2017 · 3 tracks");
-    await wrapper.trigger("click");
+    await wrapper.get("button").trigger("click");
     expect(wrapper.emitted("open")).toEqual([[12]]);
   });
 });

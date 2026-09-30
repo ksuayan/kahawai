@@ -108,7 +108,7 @@ describe("TrackMenu", () => {
     const { open } = await setup();
     expect(menuItems()).toHaveLength(0);
     await open();
-    expect(menuItems().map((e) => e.textContent?.replace(/[^\w ]/g, "").trim())).toEqual(["Play next", "Add to queue", "Add to playlist", "Stream as"]);
+    expect(menuItems().map((e) => e.textContent?.replace(/[^\w ]/g, "").trim())).toEqual(["Play next", "Add to queue", "Add to playlist", "Info", "Stream as"]);
   });
 
   it("Play next inserts after the current track and confirms with a toast", async () => {
@@ -181,14 +181,16 @@ describe("TrackMenu", () => {
     expect(bodyOf(put.init)).toMatchObject({ track_ids: [track.id], mode: "append" });
   });
 
-  it("adds a whole album to a playlist by album id", async () => {
+  it("adds a whole album to a playlist, only the tracks it doesn't have yet", async () => {
     const calls = mockFetch({ "/api/playlists/1/tracks": () => new Response(JSON.stringify({ id: 1, name: "Road trip", track_ids: [] }), { status: 200 }) });
-    const { open } = await setup({ tracks: [makeTrack()], albumId: 5 });
+    const tracks = [makeTrack(), makeTrack()];
+    const { open } = await setup({ tracks, albumId: 5 });
+    usePlaylistsStore().items[0].track_ids = [tracks[0].id];
     await open();
     await openSubmenu();
     item("Road trip").click();
     await settle();
-    expect(bodyOf(calls.find((c) => c.init?.method === "PUT")!.init)).toMatchObject({ album_ids: [5], mode: "append" });
+    expect(bodyOf(calls.find((c) => c.init?.method === "PUT")!.init)).toMatchObject({ track_ids: [tracks[1].id], mode: "append" });
   });
 
   it("creates a new playlist through a dialog (not window.prompt) and adds the track to it", async () => {

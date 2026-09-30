@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Check, ChevronRight, Disc3, Ellipsis, ListMusic, ListPlus, ListStart, Plus, Radio } from "lucide-vue-next";
+import { Check, ChevronRight, Disc3, Ellipsis, Info, ListMusic, ListPlus, ListStart, Plus, Radio } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import {
   DropdownMenuContent,
@@ -15,7 +15,9 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "reka-ui";
+import { useLibraryActions } from "../lib/libraryActions";
 import { useJobsStore } from "../stores/jobs";
+import { useOverlaysStore } from "../stores/overlays";
 import { usePlayerStore } from "../stores/player";
 import { usePlaylistsStore } from "../stores/playlists";
 import { useQueueStore } from "../stores/queue";
@@ -26,7 +28,8 @@ import UiButton from "../ui/UiButton.vue";
 
 /**
  * Reusable "⋯" action menu for a track or a track list (album).
- * Actions: play next, add to queue, add to playlist, extract SACD ISO.
+ * Actions: play next, add to queue, add to playlist (neither adds a track
+ * that's already there), extract SACD ISO, info.
  */
 const props = withDefaults(
   defineProps<{
@@ -46,6 +49,8 @@ const playlists = usePlaylistsStore();
 const jobs = useJobsStore();
 const player = usePlayerStore();
 const toasts = useToastsStore();
+const actions = useLibraryActions();
+const overlays = useOverlaysStore();
 
 const busy = ref(false);
 const naming = ref(false); // "New playlist…" dialog
@@ -74,24 +79,13 @@ async function playNext(): Promise<void> {
 }
 
 async function addToQueue(): Promise<void> {
-  try {
-    await queue.appendTracks(list.value);
-    toasts.push("success", `Added ${list.value.length} track${list.value.length === 1 ? "" : "s"} to queue`);
-  } catch (e) {
-    toasts.push("error", "Add to queue failed", { detail: e instanceof Error ? e.message : String(e) });
-  }
+  await actions.addToQueue(list.value);
 }
 
 async function addToPlaylist(id: number): Promise<void> {
   busy.value = true;
   try {
-    if (props.albumId != null && !props.track) {
-      await playlists.addAlbum(id, props.albumId);
-    } else {
-      await playlists.addTracks(id, list.value.map((t) => t.id));
-    }
-  } catch (e) {
-    toasts.push("error", "Add to playlist failed", { detail: e instanceof Error ? e.message : String(e) });
+    await actions.addToPlaylist(id, list.value);
   } finally {
     busy.value = false;
   }
@@ -100,13 +94,14 @@ async function addToPlaylist(id: number): Promise<void> {
 async function createAndAdd(name: string): Promise<void> {
   busy.value = true;
   try {
-    const pl = await playlists.create(name);
-    await addToPlaylist(pl.id);
-  } catch (e) {
-    toasts.push("error", "Could not create playlist", { detail: e instanceof Error ? e.message : String(e) });
+    await actions.newPlaylistWith(name, list.value);
   } finally {
     busy.value = false;
   }
+}
+
+function showInfo(): void {
+  if (props.track) overlays.showInfo({ kind: "track", track: props.track });
 }
 
 // --- "Stream as…": a one-track format override, an escape hatch ---------------
@@ -211,6 +206,9 @@ const menuLabel = computed(() => {
           </DropdownMenuSub>
           <DropdownMenuItem v-if="canExtractIso" :class="itemClass" :disabled="busy" @select="extractIso">
             <span class="flex items-center gap-2"><Disc3 class="size-4 text-dim" />Extract to DSF</span>
+          </DropdownMenuItem>
+          <DropdownMenuItem v-if="track" :class="itemClass" @select="showInfo">
+            <span class="flex items-center gap-2"><Info class="size-4 text-dim" />Info</span>
           </DropdownMenuItem>
           <DropdownMenuSub v-if="track">
             <DropdownMenuSubTrigger :class="itemClass" :disabled="!isPlayable(track)" data-testid="stream-as">

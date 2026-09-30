@@ -24,6 +24,7 @@ import StateMessage from "../ui/StateMessage.vue";
 import UiButton from "../ui/UiButton.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import Artwork from "./Artwork.vue";
+import ItemContextMenu from "./ItemContextMenu.vue";
 import ListToolbar from "./ListToolbar.vue";
 import TrackCollection from "./TrackCollection.vue";
 
@@ -173,6 +174,7 @@ async function saveAsPlaylist(name: string): Promise<void> {
       @play="(e) => playRow(e.i)"
     >
       <template #row="{ item: { t, i } }">
+        <ItemContextMenu :track="t" @play="playRow(i)">
         <div
           class="flex cursor-default items-center gap-3 rounded-md px-2.5 py-[7px] outline-none focus-visible:outline-2 focus-visible:outline-accent"
           :class="[
@@ -233,6 +235,7 @@ async function saveAsPlaylist(name: string): Promise<void> {
             </UiButton>
           </span>
         </div>
+        </ItemContextMenu>
       </template>
     </TrackCollection>
 
