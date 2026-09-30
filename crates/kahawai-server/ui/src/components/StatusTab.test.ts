@@ -119,3 +119,82 @@ describe("scan timing text", () => {
   });
 });
 
+describe("StatusTab: a server that couldn't start", () => {
+  it("says why (a port taken by another Kahawai Server)", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = {
+      running: false,
+      bind: "0.0.0.0:8080",
+      error: "Another program is already using 0.0.0.0:8080 (probably another Kahawai Server).",
+    };
+    await settle();
+    expect(wrapper.text()).toContain("Server not running");
+    expect(wrapper.get('[data-testid="server-error"]').text()).toContain("already using 0.0.0.0:8080");
+  });
+});
+
+describe("StatusTab: which server", () => {
+  const identity = {
+    service: "kahawai-server",
+    name: "Kahawai Server",
+    version: "0.1.0",
+    api_version: 1,
+    build: { commit: "cd9b827", dirty: false, built_at: "2026-09-30T19:02:11Z", profile: "debug", target: "x86_64-apple-darwin" },
+    catalog_id: "3f1c",
+    started_at: Date.UTC(2026, 8, 30, 18, 0, 0),
+  };
+
+  it("shows the running server's version and build", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    setup.identity = { ...identity, build: { ...identity.build, profile: "release" } };
+    await settle();
+    expect(wrapper.get('[data-testid="server-identity"]').text()).toBe(
+      "Kahawai Server 0.1.0 · build cd9b827 (release, x86_64-apple-darwin)",
+    );
+  });
+
+  it("describes another Kahawai Server holding the port, and stops it after a confirmation", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    tauri
+      .on("setup_stop_other_server", { running: true, bind: "0.0.0.0:8080", error: null, occupant: null })
+      .on("setup_recent_scans", [])
+      .on("setup_server_identity", identity);
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: false, bind: "0.0.0.0:8080", error: "Another program is already using 0.0.0.0:8080", occupant: identity };
+    await settle();
+    const panel = wrapper.get('[data-testid="other-server"]');
+    expect(panel.text()).toContain("Another Kahawai Server is running on 0.0.0.0:8080");
+    expect(panel.text()).toContain("Kahawai Server 0.1.0 · build cd9b827 (debug, x86_64-apple-darwin)");
+    expect(wrapper.find('[data-testid="server-error"]').exists()).toBe(false);
+
+    await panel.findAll("button").find((b) => b.text() === "Stop it and start this server")!.trigger("click");
+    expect(tauri.callsTo("setup_stop_other_server")).toHaveLength(0); // asks first
+    await wrapper.findAll("button").find((b) => b.text() === "Stop it")!.trigger("click");
+    await settle();
+    expect(tauri.callsTo("setup_stop_other_server")).toHaveLength(1);
+    expect(wrapper.text()).toContain("Server running");
+    expect(wrapper.find('[data-testid="other-server"]').exists()).toBe(false);
+  });
+
+  it("says so in the panel when the other server won't stop", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    tauri
+      .on("setup_stop_other_server", () => {
+        throw new Error("The other server is still running after 10 seconds.");
+      })
+      .on("setup_server_status", { running: false, bind: "0.0.0.0:8080", occupant: identity });
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: false, bind: "0.0.0.0:8080", occupant: identity };
+    await settle();
+    await wrapper.findAll("button").find((b) => b.text() === "Stop it and start this server")!.trigger("click");
+    await wrapper.findAll("button").find((b) => b.text() === "Stop it")!.trigger("click");
+    await settle();
+    expect(wrapper.get('[data-testid="other-server"] [role="alert"]').text()).toContain("still running after 10 seconds");
+  });
+});
+

@@ -3,7 +3,7 @@ import { onUnmounted, ref } from "vue";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import { useSetupStore } from "../stores/setup";
-import { scanTiming, type ScanJob } from "../types";
+import { describeServer, formatElapsed, formatWhen, scanTiming, type ScanJob } from "../types";
 
 const setup = useSetupStore();
 
@@ -11,6 +11,13 @@ const setup = useSetupStore();
 const now = ref(Date.now());
 const clock = window.setInterval(() => (now.value = Date.now()), 1000);
 onUnmounted(() => window.clearInterval(clock));
+
+/** The other Kahawai Server's panel: stop asks for a confirmation first. */
+const confirmStop = ref(false);
+async function stopOther(): Promise<void> {
+  confirmStop.value = false;
+  await setup.stopOtherServer();
+}
 
 function scanLabel(j: ScanJob): string {
   if (j.status === "failed") return "Failed";
@@ -28,8 +35,16 @@ function scanClass(j: ScanJob): string {
     <h2 class="heading-1 mb-2">
       {{ setup.serverStatus?.running ? "Server running" : "Server not running" }}
     </h2>
-    <p v-if="setup.serverStatus?.running" class="prose-text mb-4">
+    <p v-if="setup.serverStatus?.running" class="prose-text mb-1">
       Listening on {{ setup.serverStatus.bind }}.
+    </p>
+    <p
+      v-if="setup.serverStatus?.running && setup.identity"
+      class="mb-4 text-xs text-dim"
+      :title="`Built ${setup.identity.build.built_at} · library ${setup.identity.catalog_id}`"
+      data-testid="server-identity"
+    >
+      {{ describeServer(setup.identity) }}
     </p>
 
     <div class="mb-2 flex flex-wrap gap-2">
@@ -46,7 +61,56 @@ function scanClass(j: ScanJob): string {
       <UiButton @click="setup.restartServer()">Restart Server</UiButton>
       <UiButton variant="danger" @click="setup.quit()">Quit App</UiButton>
     </div>
-    <UiHint v-if="setup.startError" tone="warn">{{ setup.startError }}</UiHint>
+    <section
+      v-if="!setup.serverStatus?.running && setup.serverStatus?.occupant"
+      class="mb-3 rounded-md border border-line bg-raised p-4"
+      aria-labelledby="other-server-title"
+      data-testid="other-server"
+    >
+      <h4 id="other-server-title" class="m-0 mb-1 text-[13px] font-semibold">
+        Another Kahawai Server is running on {{ setup.serverStatus.bind }}
+      </h4>
+      <p class="m-0 mb-3 text-xs text-dim">
+        This one can't start while it holds the port. Players connected to it (on this address) are
+        using it now.
+      </p>
+      <dl class="m-0 mb-3 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-[13px]">
+        <dt class="text-dim">Server</dt>
+        <dd class="m-0">{{ describeServer(setup.serverStatus.occupant) }}</dd>
+        <dt class="text-dim">Running since</dt>
+        <dd class="m-0 tabular-nums">
+          {{ formatWhen(setup.serverStatus.occupant.started_at) }} ({{
+            formatElapsed(now - setup.serverStatus.occupant.started_at)
+          }})
+        </dd>
+        <dt class="text-dim">Built</dt>
+        <dd class="m-0 tabular-nums">{{ formatWhen(Date.parse(setup.serverStatus.occupant.build.built_at)) }}</dd>
+        <dt class="text-dim">Library</dt>
+        <dd class="m-0 break-all font-mono text-xs">{{ setup.serverStatus.occupant.catalog_id }}</dd>
+      </dl>
+      <div class="flex flex-wrap items-center gap-2">
+        <template v-if="!confirmStop">
+          <UiButton variant="primary" :disabled="setup.stoppingOther" @click="confirmStop = true">
+            {{ setup.stoppingOther ? "Stopping it…" : "Stop it and start this server" }}
+          </UiButton>
+        </template>
+        <template v-else>
+          <span class="text-xs text-dim">Stop the other server? Players using it will lose it until they reconnect here.</span>
+          <UiButton variant="danger" @click="stopOther">Stop it</UiButton>
+          <UiButton @click="confirmStop = false">Cancel</UiButton>
+        </template>
+      </div>
+      <p v-if="setup.startError" class="m-0 mt-2 text-xs text-danger-fg" role="alert">{{ setup.startError }}</p>
+    </section>
+    <!-- The panel above explains a port held by another Kahawai Server. -->
+    <UiHint v-else-if="setup.startError" tone="warn">{{ setup.startError }}</UiHint>
+    <UiHint
+      v-else-if="!setup.serverStatus?.running && setup.serverStatus?.error"
+      tone="warn"
+      data-testid="server-error"
+    >
+      {{ setup.serverStatus.error }}
+    </UiHint>
 
     <div v-if="setup.isScanning" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3">
       <h3 class="heading-3 mb-2">Scanning…</h3>

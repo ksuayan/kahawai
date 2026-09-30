@@ -10,9 +10,9 @@ use axum::{
     Json,
 };
 use kahawai_core::{
-    Album, Artist, AudioFormat, Genre, ImportPlaylistJson, ImportPlaylistResult, Job, JobKind,
-    JobStatus, MusicError, NewPlaylist, Page, Playlist, PlaylistTracksMode, SetPlaylistTracks,
-    StreamFormat, Track,
+    Album, Artist, AudioFormat, BuildInfo, Genre, ImportPlaylistJson, ImportPlaylistResult, Job,
+    JobKind, JobStatus, MusicError, NewPlaylist, Page, Playlist, PlaylistTracksMode,
+    ServerIdentity, SetPlaylistTracks, StreamFormat, Track, KAHAWAI_SERVICE,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -105,6 +105,77 @@ fn insert_gapless_next(res: &mut Response, next: Option<i64>) {
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
+
+/// When this server process started (Unix ms): set by `run_server`, or on
+/// first use (tests build the router directly).
+static STARTED_AT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
+pub(crate) fn mark_started() {
+    STARTED_AT.get_or_init(crate::jobs::now_ms);
+}
+
+/// This server's identity, as `GET /api/identity` reports it. `API_VERSION`
+/// goes up on breaking API changes.
+pub(crate) async fn identity_of(pool: &SqlitePool) -> Result<ServerIdentity, MusicError> {
+    const API_VERSION: u32 = 1;
+    Ok(ServerIdentity {
+        service: KAHAWAI_SERVICE.to_string(),
+        name: "Kahawai Server".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        api_version: API_VERSION,
+        build: BuildInfo {
+            commit: env!("KAHAWAI_GIT_COMMIT").to_string(),
+            dirty: env!("KAHAWAI_GIT_DIRTY") == "true",
+            built_at: env!("KAHAWAI_BUILT_AT").to_string(),
+            profile: env!("KAHAWAI_PROFILE").to_string(),
+            target: env!("KAHAWAI_TARGET").to_string(),
+        },
+        catalog_id: crate::catalog::catalog_id(pool).await?,
+        started_at: *STARTED_AT.get_or_init(crate::jobs::now_ms),
+    })
+}
+
+/// `GET /api/identity`: that this is a Kahawai server, and which one (version,
+/// build, library, run). Unauthenticated and cheap, like `/api/health`.
+pub async fn identity(State(s): State<AppState>) -> Result<Json<ServerIdentity>, ApiError> {
+    Ok(Json(identity_of(&s.pool).await?))
+}
+
+/// Header a client must send with `POST /api/shutdown`.
+pub const SHUTDOWN_HEADER: &str = "x-kahawai-shutdown";
+
+/// `POST /api/shutdown`: stop this server, gracefully (in-flight requests
+/// finish, connected Players are told). For the desktop app on the same
+/// machine, when another Kahawai Server holds the port it needs. The server
+/// has no login, so this is guarded instead:
+/// - only from this machine (a loopback connection);
+/// - never from a web page: a browser marks cross-site requests with
+///   `Origin`, native clients don't;
+/// - only with the `x-kahawai-shutdown: yes` header.
+pub async fn shutdown(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    if !peer.ip().is_loopback() {
+        return Err(MusicError::NotFound("not available from another machine".into()).into());
+    }
+    if headers.contains_key(header::ORIGIN) {
+        return Err(MusicError::BadRequest("not from a web page".into()).into());
+    }
+    if headers.get(SHUTDOWN_HEADER).and_then(|v| v.to_str().ok()) != Some("yes") {
+        return Err(MusicError::BadRequest(format!("send {SHUTDOWN_HEADER}: yes")).into());
+    }
+    tracing::warn!(%peer, "shutdown requested over the API");
+    // Answer first, then stop.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::SHUTDOWN.notify_waiters();
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "shutting down" })),
+    ))
+}
 
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -1307,7 +1378,8 @@ pub(crate) fn latest_enrich_job(s: &AppState) -> Option<Job> {
 }
 
 /// Turn online lookup on or off and set its confidence threshold, on the
-/// live config (the caller persists it). Off cancels a lookup in progress,
+/// live config (the caller persists it). Lowering the threshold puts the
+/// "not found" albums back in line. Off cancels a lookup in progress,
 /// since off means no album names leave the LAN; on queues one if any album
 /// is waiting.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // desktop shell only
@@ -1321,10 +1393,23 @@ pub(crate) async fn set_enrichment(
             "the confidence threshold must be between 0.5 and 1.0".to_string(),
         ));
     }
-    {
+    let looser = {
         let mut cfg = s.config.write().unwrap();
+        let looser = min_confidence < cfg.enrichment_min_confidence;
         cfg.enrichment_enabled = enabled;
         cfg.enrichment_min_confidence = min_confidence;
+        looser
+    };
+    // A looser threshold may match what a stricter one couldn't: try the
+    // "not found" albums again (from the cached replies: no new requests).
+    if looser {
+        let n = crate::enrich::retry_not_found(&s.pool).await?;
+        if n > 0 {
+            tracing::info!(
+                albums = n,
+                "threshold lowered; looking up not-found albums again"
+            );
+        }
     }
     if enabled {
         return maybe_queue_enrich(s).await;

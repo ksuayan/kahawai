@@ -72,9 +72,32 @@ export interface SetupInput {
   bind: string;
 }
 
+/** `GET /api/identity` (mirrors kahawai_core::ServerIdentity). */
+export interface ServerIdentity {
+  service: string;
+  name: string;
+  version: string;
+  api_version: number;
+  build: { commit: string; dirty: boolean; built_at: string; profile: string; target: string };
+  catalog_id: string;
+  started_at: number;
+}
+
+/** "Kahawai Server 0.1.0 · build cd9b827 (release, aarch64-apple-darwin)". */
+export function describeServer(id: ServerIdentity): string {
+  const dirty = id.build.dirty ? "+changes" : "";
+  return `${id.name} ${id.version} · build ${id.build.commit}${dirty} (${id.build.profile}, ${id.build.target})`;
+}
+
 export interface ServerStatus {
   running: boolean;
   bind: string;
+  /** The other Kahawai Server holding the port, when that's why this one
+   *  isn't running. */
+  occupant?: ServerIdentity | null;
+  /** Why it isn't running, when it tried to start and couldn't (a taken
+   *  port, usually). */
+  error?: string | null;
 }
 
 /** Deltas, not a full replacement list — see `setup_apply_config`. */
@@ -160,7 +183,8 @@ export interface EnrichmentStatus {
   job?: EnrichJob | null;
 }
 
-export type EnrichAction = "start" | "pause" | "resume" | "cancel";
+/** `retry`: look the "not found" albums up again, then start. */
+export type EnrichAction = "start" | "pause" | "resume" | "cancel" | "retry";
 
 /** How strict a MusicBrainz match must be before it's accepted. */
 export const CONFIDENCE_LEVELS: { value: number; label: string }[] = [

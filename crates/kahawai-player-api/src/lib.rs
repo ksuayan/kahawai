@@ -13,7 +13,7 @@ use kahawai_core::{
         Album, Artist, CatalogDelta, CatalogSnapshot, Genre, Job, NewPlaylist, Page, Playlist,
         SetPlaylistTracks, StreamFormat, Track,
     },
-    MusicError,
+    MusicError, ServerIdentity, KAHAWAI_SERVICE,
 };
 
 /// Options for [`Client::stream_url`]. Mirrors the server's `StreamQuery`.
@@ -61,6 +61,19 @@ impl Client {
 
     pub async fn health(&self) -> Result<serde_json::Value, MusicError> {
         self.get("/api/health").await
+    }
+
+    /// `GET /api/identity`: which Kahawai server this is. Errors when the
+    /// address answers but isn't a Kahawai server.
+    pub async fn identity(&self) -> Result<ServerIdentity, MusicError> {
+        let id: ServerIdentity = self.get("/api/identity").await?;
+        if id.service != KAHAWAI_SERVICE {
+            return Err(MusicError::Http(format!(
+                "{} is not a Kahawai server (it says it is \"{}\")",
+                self.base, id.service
+            )));
+        }
+        Ok(id)
     }
 
     // -- browse (S2) -----------------------------------------------------

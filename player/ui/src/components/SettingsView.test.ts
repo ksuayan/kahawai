@@ -365,11 +365,41 @@ describe("Settings: server URL", () => {
   });
 
   it("reports an unreachable server", async () => {
-    mockFetch({});
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("offline"); // nothing answers
+    });
     const w = await mountSettings();
     await button(w, "Save").trigger("click");
     await settle();
     expect(w.get('[data-testid="connection-status"]').text()).toContain("Server unreachable");
+  });
+
+  it("names the Kahawai server it reaches: version and build", async () => {
+    mockFetch({
+      "/api/identity": {
+        service: "kahawai-server",
+        name: "Kahawai Server",
+        version: "0.1.0",
+        api_version: 1,
+        build: { commit: "cd9b827", dirty: false, built_at: "2026-09-30T19:02:11Z", profile: "release", target: "aarch64-apple-darwin" },
+        catalog_id: "3f1c",
+        started_at: 1_790_794_931_000,
+      },
+    });
+    const w = await mountSettings();
+    const text = w.get('[data-testid="connection-text"]');
+    expect(text.text()).toBe("Server reachable · Kahawai Server 0.1.0 · build cd9b827 (release, aarch64-apple-darwin)");
+    expect(text.attributes("title")).toContain("2026-09-30T19:02:11Z");
+    expect(w.get('[data-testid="server-light"]').attributes("data-state")).toBe("connected");
+  });
+
+  it("tells a Kahawai server from something else on the same address", async () => {
+    mockFetch({ "/api/identity": { service: "some-other-app" } });
+    const w = await mountSettings();
+    expect(w.get('[data-testid="connection-text"]').text()).toBe(
+      "Something answers at this address, but it isn't a Kahawai server",
+    );
+    expect(w.get('[data-testid="server-light"]').attributes("data-state")).toBe("offline");
   });
 
   it("rejects an empty URL without saving", async () => {

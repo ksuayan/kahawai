@@ -10,7 +10,12 @@ import { CONFIDENCE_LEVELS, dirChipClass, dirChipText } from "../types";
 
 const setup = useSetupStore();
 const enrich = useEnrichmentStore();
-onMounted(() => void enrich.load());
+onMounted(() => {
+  void enrich.load();
+  // Opened before the running server's folders were read (it was still
+  // starting): read them now.
+  if (setup.runningDirs.length === 0 && setup.pendingRemoves.length === 0) void setup.loadRunningConfig();
+});
 
 const n = (v: number) => v.toLocaleString("en-US");
 
@@ -25,6 +30,12 @@ const levels = computed(() => {
 
 const levelOptions = computed<UiSelectOption[]>(() =>
   levels.value.map((l) => ({ value: String(l.value), label: l.label })),
+);
+
+/** Nothing waiting, but some albums weren't found: they can be tried
+ *  again (lowering the strictness does this by itself). */
+const retryable = computed(() =>
+  enrich.status && enrich.status.coverage.pending_lookup === 0 ? enrich.status.coverage.no_match : 0,
 );
 
 /** One line for the latest lookup; empty when there's none. */
@@ -128,6 +139,10 @@ const jobLine = computed(() => {
       />
     </div>
     <UiHint v-if="enrich.status" tone="faint">
+      Lowering it looks up the albums that weren't found again, from the saved MusicBrainz replies (no
+      new requests).
+    </UiHint>
+    <UiHint v-if="enrich.status" tone="faint">
       {{ n(enrich.status.coverage.total_albums) }} albums ·
       {{ n(enrich.status.coverage.with_embedded_mbid) }} identified by their tags ·
       {{ n(enrich.status.coverage.matched_online) }} found online ·
@@ -144,11 +159,19 @@ const jobLine = computed(() => {
     </p>
     <div v-if="enrich.status" class="flex flex-wrap gap-2">
       <UiButton
-        v-if="!enrich.running && !enrich.paused"
+        v-if="!enrich.running && !enrich.paused && retryable === 0"
         :disabled="!enrich.status.enabled || enrich.busy || enrich.status.coverage.pending_lookup === 0"
         @click="enrich.act('start')"
       >
         Look up now
+      </UiButton>
+      <UiButton
+        v-if="!enrich.running && !enrich.paused && retryable > 0"
+        :disabled="!enrich.status.enabled || enrich.busy"
+        title="Look up the albums that weren't found again, with the current match strictness"
+        @click="enrich.act('retry')"
+      >
+        Retry not found ({{ n(retryable) }})
       </UiButton>
       <UiButton v-if="enrich.running" :disabled="enrich.busy" @click="enrich.act('pause')">Pause</UiButton>
       <UiButton v-if="enrich.paused" variant="primary" :disabled="enrich.busy" @click="enrich.act('resume')">

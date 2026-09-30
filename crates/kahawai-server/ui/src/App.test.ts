@@ -90,6 +90,8 @@ describe("App", () => {
       await settle();
       expect(tauri.callsTo("setup_app_ready")).toHaveLength(1);
       expect(wrapper.text()).toContain("Server running");
+      // The folders, read again once the server was up.
+      expect(tauri.callsTo("setup_get_running_config").length).toBeGreaterThanOrEqual(2);
     });
   });
 });

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { RefreshCw } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
-import { checkHealth } from "../api";
+import { checkServer, describeServer, type ServerCheck } from "../api";
 import {
   artworkCacheStats,
   clearArtworkCache,
@@ -52,7 +52,31 @@ const jobs = useJobsStore();
 const urlInput = ref(settings.serverUrl);
 const urlError = ref<string | null>(null);
 const saving = ref(false);
-const online = ref<boolean | null>(null);
+const check = ref<ServerCheck | null>(null);
+/** A Kahawai server answers (the light and the status line). */
+const online = computed<boolean | null>(() =>
+  check.value === null ? null : check.value.kind === "kahawai" || check.value.kind === "older",
+);
+/** What answers at the URL, in words. */
+const connectionText = computed(() => {
+  const c = check.value;
+  if (c === null) return "Connection not checked";
+  switch (c.kind) {
+    case "kahawai":
+      return `Server reachable · ${describeServer(c.identity)}`;
+    case "older":
+      return "Server reachable (an older Kahawai Server, without version details)";
+    case "other":
+      return "Something answers at this address, but it isn't a Kahawai server";
+    default:
+      return "Server unreachable";
+  }
+});
+const connectionTitle = computed(() =>
+  check.value?.kind === "kahawai"
+    ? `Built ${check.value.identity.build.built_at} · library ${check.value.identity.catalog_id} · running since ${new Date(check.value.identity.started_at).toLocaleString()}`
+    : undefined,
+);
 
 watch(
   () => settings.serverUrl,
@@ -62,7 +86,7 @@ watch(
 );
 
 async function probe(): Promise<void> {
-  online.value = await checkHealth();
+  check.value = await checkServer();
 }
 
 // Check as soon as Settings opens, so the light is meaningful without a click.
@@ -287,7 +311,7 @@ const dopRates = computed(() =>
         data-testid="connection-status"
       >
         <UiButton variant="icon" title="Check connection" aria-label="Check connection" @click="probe"><RefreshCw /></UiButton>
-        {{ online === null ? "Connection not checked" : online ? "Server reachable" : "Server unreachable" }}
+        <span :title="connectionTitle" data-testid="connection-text">{{ connectionText }}</span>
       </p>
     </SettingsSection>
 

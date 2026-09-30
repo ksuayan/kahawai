@@ -435,4 +435,45 @@ export async function checkHealth(): Promise<boolean> {
   }
 }
 
+/** `GET /api/identity` (mirrors kahawai_core::ServerIdentity). */
+export interface ServerIdentity {
+  service: string;
+  name: string;
+  version: string;
+  api_version: number;
+  build: { commit: string; dirty: boolean; built_at: string; profile: string; target: string };
+  catalog_id: string;
+  started_at: number;
+}
+
+/** Every Kahawai server's `service`. */
+export const KAHAWAI_SERVICE = "kahawai-server";
+
+/** What answers at the server URL. */
+export type ServerCheck =
+  | { kind: "kahawai"; identity: ServerIdentity }
+  /** A Kahawai server from before /api/identity (it answers /api/health). */
+  | { kind: "older" }
+  /** Something answers, but it isn't a Kahawai server. */
+  | { kind: "other" }
+  | { kind: "offline" };
+
+/** Is the server URL a running Kahawai server, and which one? */
+export async function checkServer(): Promise<ServerCheck> {
+  try {
+    const id = await get<Partial<ServerIdentity>>(`/api/identity`);
+    return id?.service === KAHAWAI_SERVICE ? { kind: "kahawai", identity: id as ServerIdentity } : { kind: "other" };
+  } catch (e) {
+    if (!(e instanceof ApiError)) return { kind: "offline" }; // nothing answered
+  }
+  // It answered, but not /api/identity: an older Kahawai server, or not one.
+  return (await checkHealth()) ? { kind: "older" } : { kind: "other" };
+}
+
+/** "Kahawai Server 0.1.0 · build cd9b827 (release, aarch64-apple-darwin)". */
+export function describeServer(id: ServerIdentity): string {
+  const dirty = id.build.dirty ? "+changes" : "";
+  return `${id.name} ${id.version} · build ${id.build.commit}${dirty} (${id.build.profile}, ${id.build.target})`;
+}
+
 export { put };
