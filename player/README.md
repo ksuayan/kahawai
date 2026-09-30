@@ -368,8 +368,8 @@ scripts/build-client-universal.sh
 - **Buffer status is honest**: the engine exposes no true network-buffer
   metric, so the UI shows the playhead position only (progressive HTTP
   stream) and says so where a buffer readout would be expected.
-- **Artwork disk cache**: browser HTTP caching only; content-addressed
-  LRU disk cache is v2.
+- **Artwork disk cache**: built after v1. Covers are cached on disk by the
+  server's BLAKE3 content hash, LRU-capped (Settings: 512 MB / 1 GB / 2 GB).
 - **SACD ISO is not supported and never will be** — see `docs/v1/SACD-Extraction.md`.
 - **Offline mode**, **PCM exclusive-mode toggle**, **VST3/AU** are out of v1.
 

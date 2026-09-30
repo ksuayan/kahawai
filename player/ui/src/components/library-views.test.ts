@@ -337,3 +337,45 @@ describe("SearchView", () => {
     expect(useLibraryStore().searchResults).toEqual([]);
   });
 });
+
+describe("track views: list or grid, and sort", () => {
+  it("an album's tracks follow the chosen order, and Play plays them in it", async () => {
+    const album = makeAlbum({ id: 5, title: "Mix" });
+    const t1 = makeTrack({ id: 11, album_id: 5, track_no: 1, title: "One", artist: "Zed" });
+    const t2 = makeTrack({ id: 12, album_id: 5, track_no: 2, title: "Two", artist: "Abe" });
+    mockFetch({ "/api/albums/5": { album: { ...album, track_ids: [11, 12] }, tracks: [t1, t2] }, "/api/playlists": [] });
+    const { wrapper } = mountApp(AlbumDetail, { id: 5 }, {}, () => {
+      useViewPrefsStore().prefs.albumTracksSort = "artist-asc";
+    });
+    await settle();
+    const titles = wrapper.findAll("[data-playable]").map((r) => (r.text().includes("Two") ? "Two" : "One"));
+    expect(titles).toEqual(["Two", "One"]);
+    await wrapper.findAll("button").find((b) => b.text() === "Play")!.trigger("click");
+    await settle();
+    expect(useQueueStore().tracks.map((t) => t.id)).toEqual([12, 11]);
+  });
+
+  it("an album's tracks as a grid of cards", async () => {
+    const album = makeAlbum({ id: 6, title: "Grid" });
+    const t = makeTrack({ id: 21, album_id: 6, title: "Only" });
+    mockFetch({ "/api/albums/6": { album: { ...album, track_ids: [21] }, tracks: [t] }, "/api/playlists": [] });
+    const { wrapper } = mountApp(AlbumDetail, { id: 6 }, {}, () => {
+      useViewPrefsStore().prefs.albumTracksLayout = "grid";
+    });
+    await settle();
+    expect(wrapper.findAll('[data-testid="track-card"]').map((c) => c.text())).toEqual([expect.stringContaining("Only")]);
+  });
+
+  it("search results sort and switch to a grid", async () => {
+    const { wrapper } = mountApp(SearchView, {}, {}, () => {
+      const lib = useLibraryStore();
+      lib.searchQuery = "x";
+      lib.searchResults = [makeTrack({ title: "Late", year: 2020 }), makeTrack({ title: "Early", year: 1960 })];
+      useViewPrefsStore().prefs.searchSort = "year-asc";
+      useViewPrefsStore().prefs.searchLayout = "grid";
+    });
+    await settle();
+    const cards = wrapper.findAll('[data-testid="track-card"]');
+    expect(cards.map((c) => (c.text().includes("Early") ? "Early" : "Late"))).toEqual(["Early", "Late"]);
+  });
+});

@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS track_artists (
     PRIMARY KEY (track_id, artist_id)
 );
 
--- Artwork blobs, deduplicated by content hash (same scheme as Koa).
+-- Artwork blobs, deduplicated by content hash: BLAKE3 of the image bytes,
+-- as hex (same scheme as Koa).
 CREATE TABLE IF NOT EXISTS artwork (
     hash  TEXT PRIMARY KEY,
     mime  TEXT NOT NULL,

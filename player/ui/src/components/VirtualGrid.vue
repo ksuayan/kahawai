@@ -1,7 +1,7 @@
-<script setup lang="ts" generic="T extends { id: number }">
+<script setup lang="ts" generic="T">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
-import { computeGridLayout, rowItemIds } from "../lib/gridwindowing";
+import { computeGridLayout } from "../lib/gridwindowing";
 import { useOwnScrollMemory } from "../lib/ownScroll";
 import { useScrollMemoryStore } from "../stores/scrollMemory";
 
@@ -23,11 +23,14 @@ const props = withDefaults(
     /** Height of what a card shows below its square artwork. */
     textBlockHeight?: number;
     gap?: number;
+    /** A stable key per item (default: its `id`, else its position). Items
+     *  are laid out by position, so repeats (a track queued twice) are fine. */
+    getKey?: (item: T, index: number) => string | number;
   }>(),
-  { minCellWidth: 160, textBlockHeight: 44, gap: 16 },
+  { minCellWidth: 160, textBlockHeight: 44, gap: 16, getKey: undefined },
 );
 const emit = defineEmits<{ (e: "near-end"): void }>();
-defineSlots<{ item(props: { item: T }): unknown }>();
+defineSlots<{ item(props: { item: T; index: number }): unknown }>();
 
 const OVERSCAN_ROWS = 3;
 
@@ -38,11 +41,15 @@ const scrollEl = ref<HTMLElement | null>(null);
 const containerWidth = ref(1200);
 const scrollMemory = useScrollMemoryStore();
 
-const ids = computed(() => props.items.map((i) => i.id));
-const byId = computed(() => new Map(props.items.map((i) => [i.id, i])));
 const layout = computed(() =>
-  computeGridLayout(containerWidth.value, ids.value.length, props.minCellWidth, props.gap, props.textBlockHeight),
+  computeGridLayout(containerWidth.value, props.items.length, props.minCellWidth, props.gap, props.textBlockHeight),
 );
+
+function keyOf(item: T, index: number): string | number {
+  if (props.getKey) return props.getKey(item, index);
+  const id = (item as { id?: unknown }).id;
+  return typeof id === "number" || typeof id === "string" ? id : index;
+}
 
 const virtualizer = useVirtualizer(
   computed(() => ({
@@ -61,10 +68,12 @@ watch(
   () => virtualizer.value.measure(),
 );
 
-function rowItems(rowIndex: number): T[] {
-  return rowItemIds(rowIndex, layout.value.lanes, ids.value)
-    .map((id) => byId.value.get(id))
-    .filter((i): i is T => i !== undefined);
+/** The items (and their positions) in virtual row `rowIndex`. */
+function rowItems(rowIndex: number): { item: T; index: number }[] {
+  const start = rowIndex * layout.value.lanes;
+  return props.items
+    .slice(start, start + layout.value.lanes)
+    .map((item, i) => ({ item, index: start + i }));
 }
 
 // Lazy loading: say so when the rendered rows reach the end.
@@ -109,8 +118,8 @@ useOwnScrollMemory(scrollEl, () => props.scrollKey);
             marginBottom: `${gap}px`,
           }"
         >
-          <template v-for="item in rowItems(row.index)" :key="item.id">
-            <slot name="item" :item="item" />
+          <template v-for="cell in rowItems(row.index)" :key="keyOf(cell.item, cell.index)">
+            <slot name="item" :item="cell.item" :index="cell.index" />
           </template>
         </div>
       </div>

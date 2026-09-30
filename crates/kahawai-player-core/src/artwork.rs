@@ -1,6 +1,7 @@
 //! Album-art disk cache.
 //!
-//! The server names artwork by the SHA-256 of its bytes (`/api/artwork/{hash}`),
+//! The server names artwork by the BLAKE3 hash of its bytes, as 64 hex
+//! characters (`/api/artwork/{hash}`),
 //! so an entry can never go stale: the same hash is always the same image.
 //! That makes the cache trivially safe — no expiry, no revalidation, and it
 //! stays valid across server-URL changes and server restarts, and lets covers

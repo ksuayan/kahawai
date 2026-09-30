@@ -902,7 +902,7 @@ pub async fn import_playlist(
     }
 }
 
-/// Artwork is addressed by the hash of its bytes, so a URL never changes
+/// Artwork is addressed by the BLAKE3 hash of its bytes, so a URL never changes
 /// meaning: clients may cache it forever without revalidating.
 const ARTWORK_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 

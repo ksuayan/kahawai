@@ -21,6 +21,17 @@ describe("viewPrefs", () => {
     expect([again.prefs.albumsLayout, again.prefs.albumsSort]).toEqual(["list", "year-desc"]);
   });
 
+  it("remembers track views too, including their natural order", async () => {
+    const v = useViewPrefsStore();
+    expect([v.prefs.queueSort, v.prefs.queueLayout]).toEqual(["default", "list"]);
+    v.prefs.queueSort = "year-desc";
+    v.prefs.searchLayout = "grid";
+    await nextTick();
+    setActivePinia(createPinia());
+    const again = useViewPrefsStore();
+    expect([again.prefs.queueSort, again.prefs.searchLayout]).toEqual(["year-desc", "grid"]);
+  });
+
   it("ignores stored values it doesn't know", () => {
     localStorage.setItem("kahawai.viewPrefs", JSON.stringify({ albumsLayout: "carousel", albumsSort: "mood-asc" }));
     const v = useViewPrefsStore();
