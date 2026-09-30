@@ -364,6 +364,96 @@ pub fn setup_recent_scans(state: tauri::State<DesktopState>) -> Vec<kahawai_core
     jobs
 }
 
+/// Settings → Album info: whether online lookup is on, its threshold, how
+/// much of the library it covers, and the latest lookup job.
+#[derive(Serialize)]
+pub struct EnrichmentStatus {
+    enabled: bool,
+    min_confidence: f32,
+    coverage: crate::api::EnrichmentCoverage,
+    job: Option<kahawai_core::Job>,
+}
+
+/// A server error as the Settings tab shows it: the message alone for the
+/// ones written for the user.
+fn user_msg(e: kahawai_core::MusicError) -> String {
+    use kahawai_core::MusicError::*;
+    match e {
+        Conflict(m) | BadRequest(m) => m,
+        other => other.to_string(),
+    }
+}
+
+fn live_state(state: &DesktopState) -> Result<crate::AppState, String> {
+    state
+        .app_state
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "the server is not running".to_string())
+}
+
+#[tauri::command]
+pub async fn setup_enrichment_status(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<EnrichmentStatus, String> {
+    let app_state = live_state(&state)?;
+    let (enabled, min_confidence) = {
+        let cfg = app_state.config.read().unwrap();
+        (cfg.enrichment_enabled, cfg.enrichment_min_confidence)
+    };
+    let coverage = crate::api::coverage(&app_state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(EnrichmentStatus {
+        enabled,
+        min_confidence,
+        coverage,
+        job: crate::api::latest_enrich_job(&app_state),
+    })
+}
+
+/// Turn online lookup on or off and set its threshold: applied live (off
+/// cancels a lookup in progress, on queues one) and saved to the config file.
+#[tauri::command]
+pub async fn setup_set_enrichment(
+    enabled: bool,
+    min_confidence: f32,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let app_state = live_state(&state)?;
+    crate::api::set_enrichment(&app_state, enabled, min_confidence)
+        .await
+        .map_err(user_msg)?;
+    let path = ServerConfig::resolve_path(None).map_err(|e| e.to_string())?;
+    let mut on_disk = ServerConfig::load(&path).unwrap_or_default();
+    on_disk.enrichment_enabled = enabled;
+    on_disk.enrichment_min_confidence = min_confidence;
+    on_disk.save(&path).map_err(|e| e.to_string())
+}
+
+/// Start, pause, resume or cancel album info lookup. `job_id` is needed for
+/// all but start.
+#[tauri::command]
+pub async fn setup_enrichment_action(
+    action: String,
+    job_id: Option<String>,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let s = live_state(&state)?;
+    let id = || job_id.clone().ok_or_else(|| "no job".to_string());
+    let result = match action.as_str() {
+        "start" => crate::api::start_enrich_job(&s, "Album info lookup")
+            .await
+            .map(drop),
+        "pause" => crate::api::pause_enrich(&s, &id()?).await.map(drop),
+        "resume" => crate::api::resume_enrich(&s, &id()?).await.map(drop),
+        "cancel" => crate::api::cancel_enrich(&s, &id()?).await.map(drop),
+        other => return Err(format!("unknown action '{other}'")),
+    };
+    result.map_err(user_msg)
+}
+
 /// Spawns `run_server`, then waits briefly so an immediate bind failure has
 /// time to surface — `run_server` errors out fast on a bad bind address,
 /// well before the (long-running) `axum::serve` call.

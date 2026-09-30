@@ -8,6 +8,8 @@ export interface ServerConfigShape {
   preferred_ladder: string[];
   dsd_story: "pcm" | "native";
   scan_on_startup: boolean;
+  enrichment_enabled?: boolean;
+  enrichment_min_confidence?: number;
 }
 
 export interface SetupState {
@@ -89,8 +91,9 @@ export interface LiveScanStats {
   last_album_artist?: string | null;
 }
 
-/** Server job (`setup_recent_scans`, mirrors `kahawai_core::Job`). */
-export type JobStatus = "queued" | "running" | "done" | "failed";
+/** Server job (`setup_recent_scans`, mirrors `kahawai_core::Job`).
+ *  `paused` and `cancelled` only happen to album info lookups. */
+export type JobStatus = "queued" | "running" | "done" | "failed" | "paused" | "cancelled";
 
 export interface ScanJob {
   id: string;
@@ -101,6 +104,39 @@ export interface ScanJob {
   message?: string | null;
 }
 
-export function isJobActive(j: ScanJob): boolean {
+export function isJobActive(j: { status: JobStatus }): boolean {
   return j.status === "queued" || j.status === "running";
 }
+
+/** Online album info lookup job (`enrich_metadata`). */
+export interface EnrichJob {
+  id: string;
+  kind: "enrich_metadata";
+  label: string;
+  progress: number;
+  status: JobStatus;
+  message?: string | null;
+}
+
+/** `setup_enrichment_status`: Settings → Album info. */
+export interface EnrichmentStatus {
+  enabled: boolean;
+  min_confidence: number;
+  coverage: {
+    total_albums: number;
+    with_embedded_mbid: number;
+    matched_online: number;
+    no_match: number;
+    pending_lookup: number;
+  };
+  job?: EnrichJob | null;
+}
+
+export type EnrichAction = "start" | "pause" | "resume" | "cancel";
+
+/** How strict a MusicBrainz match must be before it's accepted. */
+export const CONFIDENCE_LEVELS: { value: number; label: string }[] = [
+  { value: 0.8, label: "Relaxed (80%)" },
+  { value: 0.9, label: "Balanced (90%)" },
+  { value: 0.95, label: "Strict (95%)" },
+];

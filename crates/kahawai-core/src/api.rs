@@ -195,6 +195,9 @@ pub enum JobKind {
     /// Content-hash the tracks a scan left pending (`hash IS NULL`). Queued
     /// after every scan; resumes where it left off after a restart.
     HashFiles,
+    /// Look up albums without a MusicBrainz ID (MusicBrainz, Cover Art
+    /// Archive). Opt-in; can be paused, resumed and cancelled.
+    EnrichMetadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +207,11 @@ pub enum JobStatus {
     Running,
     Done,
     Failed,
+    /// Stopped on request; `resume` carries on where it left off. Survives
+    /// a restart (only jobs whose work is resumable can be paused).
+    Paused,
+    /// Stopped on request for good. Terminal, like Done and Failed.
+    Cancelled,
 }
 
 /// Paginated list envelope for browse endpoints. (Spec §3.3, S2.)

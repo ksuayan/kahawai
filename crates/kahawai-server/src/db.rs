@@ -47,6 +47,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         (5, include_str!("../migrations/005_hash_pending.sql")),
         (6, include_str!("../migrations/006_albums_title_index.sql")),
         (7, include_str!("../migrations/007_metadata_local.sql")),
+        (8, include_str!("../migrations/008_enrichment.sql")),
     ];
     // One connection throughout: `PRAGMA foreign_keys` is per connection, and
     // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off
@@ -253,7 +254,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
         // Old row survived; new columns carry their defaults.
         let r = sqlx::query(
@@ -335,7 +336,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
             .await
@@ -403,7 +404,7 @@ mod tests {
         pool.close().await;
 
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let r =
             sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
                 .fetch_one(&pool)
@@ -535,9 +536,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("fresh.db");
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
-        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions(&pool).await, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }

@@ -15,7 +15,7 @@ use kahawai_core::{
     Track,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{Row, SqlitePool};
 
 use crate::{db, jobs, scanner, stream, transcode, AppState};
 
@@ -210,31 +210,40 @@ pub async fn get_album(
 }
 
 /// How much of the library already has a MusicBrainz release ID from its own
-/// tags, and how many albums a lookup would still have to find. Tells the
-/// real enrichment workload up front.
+/// tags, how many a lookup found or couldn't find, and how many it would
+/// still have to look up. Tells the real enrichment workload up front.
 #[derive(Debug, Serialize)]
 pub struct EnrichmentCoverage {
     pub total_albums: u64,
     pub with_embedded_mbid: u64,
+    pub matched_online: u64,
+    pub no_match: u64,
+    /// Waiting for a lookup, including failed ones that will be retried.
     pub pending_lookup: u64,
+}
+
+pub(crate) async fn coverage(pool: &SqlitePool) -> Result<EnrichmentCoverage, MusicError> {
+    let sql = format!(
+        "SELECT COUNT(*), SUM(enrich_source = 'embedded'), SUM(enrich_source = 'musicbrainz'),
+                SUM(enrich_status = 'no_match'), SUM({})
+         FROM albums a",
+        crate::enrich::pending_clause()
+    );
+    let r = sqlx::query(&sql).fetch_one(pool).await.map_err(db::cvt)?;
+    let count = |i: usize| r.get::<Option<i64>, _>(i).unwrap_or(0).max(0) as u64;
+    Ok(EnrichmentCoverage {
+        total_albums: count(0),
+        with_embedded_mbid: count(1),
+        matched_online: count(2),
+        no_match: count(3),
+        pending_lookup: count(4),
+    })
 }
 
 pub async fn enrichment_coverage(
     State(s): State<AppState>,
 ) -> Result<Json<EnrichmentCoverage>, ApiError> {
-    let r = sqlx::query(
-        "SELECT COUNT(*), SUM(enrich_source = 'embedded'), SUM(enrich_status = 'pending')
-         FROM albums",
-    )
-    .fetch_one(&s.pool)
-    .await
-    .map_err(db::cvt)?;
-    let count = |i: usize| r.get::<Option<i64>, _>(i).unwrap_or(0).max(0) as u64;
-    Ok(Json(EnrichmentCoverage {
-        total_albums: count(0),
-        with_embedded_mbid: count(1),
-        pending_lookup: count(2),
-    }))
+    Ok(Json(coverage(&s.pool).await?))
 }
 
 pub async fn list_artists(State(s): State<AppState>) -> Result<Json<Vec<Artist>>, ApiError> {
@@ -906,6 +915,10 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                 if let Err(e) = queue_hash_job(&s, "Content hashing").await {
                     tracing::warn!(error = %e, "could not queue content hashing");
                 }
+                // Phase C: look up new albums, when the user has turned it on.
+                if let Err(e) = maybe_queue_enrich(&s).await {
+                    tracing::warn!(error = %e, "could not queue album info lookup");
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, "background scan failed");
@@ -949,6 +962,249 @@ pub struct CreateJobBody {
     /// Server-local path, used by `extract_iso` jobs (the SACD ISO).
     #[serde(default)]
     pub path: Option<String>,
+}
+
+/// Start online metadata lookup: opt-in (Settings), one run at a time.
+pub(crate) async fn start_enrich_job(s: &AppState, label: &str) -> Result<Job, MusicError> {
+    if !s.config.read().unwrap().enrichment_enabled {
+        return Err(MusicError::Conflict(
+            "online album info lookup is off; turn it on in Settings".to_string(),
+        ));
+    }
+    let guard = s
+        .enrich_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| MusicError::Conflict("album info lookup already running".to_string()))?;
+    let job = s
+        .jobs
+        .create(JobKind::EnrichMetadata, label.to_string(), None)
+        .await;
+    spawn_enrich_job(s.clone(), job.id.clone(), guard);
+    Ok(job)
+}
+
+/// After a scan: queue a lookup when it's turned on, some album is waiting,
+/// and no lookup is already running or paused (a paused one is the user's
+/// to resume).
+pub(crate) async fn maybe_queue_enrich(s: &AppState) -> Result<(), MusicError> {
+    if !s.config.read().unwrap().enrichment_enabled {
+        return Ok(());
+    }
+    let active = s.jobs.list().into_iter().any(|j| {
+        j.kind == JobKind::EnrichMetadata
+            && matches!(
+                j.status,
+                JobStatus::Queued | JobStatus::Running | JobStatus::Paused
+            )
+    });
+    if active || crate::enrich::pending_count(&s.pool).await? == 0 {
+        return Ok(());
+    }
+    match start_enrich_job(s, "Album info lookup").await {
+        Ok(_) | Err(MusicError::Conflict(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Worker for an `enrich_metadata` job (new, or resumed after a restart).
+/// Holds `guard` so only one runs.
+pub(crate) fn spawn_enrich_job(
+    s: AppState,
+    job_id: String,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) {
+    tokio::spawn(async move {
+        let _guard = guard;
+        let jobs = s.jobs.clone();
+        jobs.transition(&job_id, &[JobStatus::Queued], JobStatus::Running)
+            .await;
+        let min_confidence = s
+            .config
+            .read()
+            .unwrap()
+            .enrichment_min_confidence
+            .clamp(0.5, 1.0);
+        let client = crate::musicbrainz::MbClient::new(s.pool.clone());
+
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+        let jobs2 = jobs.clone();
+        let job_id2 = job_id.clone();
+        let fwd = tokio::spawn(async move {
+            let mut last_written = -1.0f64;
+            while let Some((done, total)) = prx.recv().await {
+                if total == 0 {
+                    continue;
+                }
+                let p = (done as f64 / total as f64).clamp(0.0, 0.99);
+                if p - last_written >= 0.01 {
+                    last_written = p;
+                    jobs2.set_progress(&job_id2, p as f32).await;
+                }
+            }
+        });
+        let report = crate::enrich::enrich_pending(
+            &s.pool,
+            &client,
+            min_confidence,
+            &jobs,
+            &job_id,
+            |d, t| {
+                let _ = ptx.send((d, t));
+            },
+        )
+        .await;
+        drop(ptx);
+        let _ = fwd.await;
+
+        match report {
+            // Cancelled, or paused because MusicBrainz is unreachable: the
+            // job's status and message already say so.
+            Ok(r) if r.cancelled || r.paused_offline.is_some() => {}
+            Ok(r) => {
+                let msg = format!(
+                    "matched {} albums ({} new covers); {} not found; {} failed (will retry)",
+                    r.matched, r.covers, r.no_match, r.errors
+                );
+                jobs.finish(&job_id, true, Some(msg)).await;
+                if r.matched > 0 {
+                    let _ = s.catalog_events.send(crate::ServerEvent::CatalogUpdated);
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "album info lookup failed");
+                jobs.finish(&job_id, false, Some(e.to_string())).await;
+            }
+        }
+    });
+}
+
+/// Pause, resume and cancel apply to jobs that can stop and carry on.
+fn pausable(s: &AppState, id: &str) -> Result<(), MusicError> {
+    let job = s
+        .jobs
+        .get(id)
+        .ok_or_else(|| MusicError::NotFound(format!("job {id}")))?;
+    if job.kind != JobKind::EnrichMetadata {
+        return Err(MusicError::BadRequest(
+            "only album info lookup jobs can be paused, resumed or cancelled".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn pause_enrich(s: &AppState, id: &str) -> Result<Job, MusicError> {
+    pausable(s, id)?;
+    s.jobs
+        .transition(
+            id,
+            &[JobStatus::Queued, JobStatus::Running],
+            JobStatus::Paused,
+        )
+        .await
+        .ok_or_else(|| MusicError::Conflict("the job isn't running".to_string()))
+}
+
+pub(crate) async fn resume_enrich(s: &AppState, id: &str) -> Result<Job, MusicError> {
+    pausable(s, id)?;
+    if !s.config.read().unwrap().enrichment_enabled {
+        return Err(MusicError::Conflict(
+            "online album info lookup is off; turn it on in Settings".to_string(),
+        ));
+    }
+    let job = s
+        .jobs
+        .transition(id, &[JobStatus::Paused], JobStatus::Running)
+        .await
+        .ok_or_else(|| MusicError::Conflict("the job isn't paused".to_string()))?;
+    s.jobs.set_message(id, None).await;
+    // A worker paused in place picks the new status up by itself. After a
+    // restart, or a pause because MusicBrainz was unreachable, none is
+    // running: start one.
+    if let Ok(guard) = s.enrich_lock.clone().try_lock_owned() {
+        spawn_enrich_job(s.clone(), id.to_string(), guard);
+    }
+    Ok(Job {
+        message: None,
+        ..job
+    })
+}
+
+pub(crate) async fn cancel_enrich(s: &AppState, id: &str) -> Result<Job, MusicError> {
+    pausable(s, id)?;
+    s.jobs
+        .transition(
+            id,
+            &[JobStatus::Queued, JobStatus::Running, JobStatus::Paused],
+            JobStatus::Cancelled,
+        )
+        .await
+        .ok_or_else(|| MusicError::Conflict("the job has already finished".to_string()))
+}
+
+pub async fn pause_job(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Job>, ApiError> {
+    Ok(Json(pause_enrich(&s, &id).await?))
+}
+
+pub async fn resume_job(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Job>, ApiError> {
+    Ok(Json(resume_enrich(&s, &id).await?))
+}
+
+pub async fn cancel_job(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Job>, ApiError> {
+    Ok(Json(cancel_enrich(&s, &id).await?))
+}
+
+/// The latest album info lookup job, if any.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // desktop shell only
+pub(crate) fn latest_enrich_job(s: &AppState) -> Option<Job> {
+    s.jobs
+        .list()
+        .into_iter()
+        .filter(|j| j.kind == JobKind::EnrichMetadata)
+        .max_by(|a, b| a.id.cmp(&b.id))
+}
+
+/// Turn online lookup on or off and set its confidence threshold, on the
+/// live config (the caller persists it). Off cancels a lookup in progress,
+/// since off means no album names leave the LAN; on queues one if any album
+/// is waiting.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // desktop shell only
+pub(crate) async fn set_enrichment(
+    s: &AppState,
+    enabled: bool,
+    min_confidence: f32,
+) -> Result<(), MusicError> {
+    if !(0.5..=1.0).contains(&min_confidence) {
+        return Err(MusicError::BadRequest(
+            "the confidence threshold must be between 0.5 and 1.0".to_string(),
+        ));
+    }
+    {
+        let mut cfg = s.config.write().unwrap();
+        cfg.enrichment_enabled = enabled;
+        cfg.enrichment_min_confidence = min_confidence;
+    }
+    if enabled {
+        return maybe_queue_enrich(s).await;
+    }
+    if let Some(job) = latest_enrich_job(s) {
+        if matches!(
+            job.status,
+            JobStatus::Queued | JobStatus::Running | JobStatus::Paused
+        ) {
+            cancel_enrich(s, &job.id).await?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn list_jobs(State(s): State<AppState>) -> Json<Vec<Job>> {
@@ -1021,6 +1277,10 @@ pub async fn create_job(
                 })?;
             let job = s.jobs.create(JobKind::HashFiles, body.label, None).await;
             spawn_hash_job(s, job.clone(), guard);
+            Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+        }
+        JobKind::EnrichMetadata => {
+            let job = start_enrich_job(&s, &body.label).await?;
             Ok((StatusCode::ACCEPTED, Json(job)).into_response())
         }
         JobKind::Transcode => {

@@ -756,8 +756,9 @@ export function formatDuration(ms?: number | null): string {
 // --- C3: jobs, DSD preference, playlist import -------------------------------
 
 /** Server job (`GET /api/jobs`). Shapes mirror kahawai-core (snake_case). */
-export type JobKind = "extract_iso" | "transcode" | "scan" | "hash_files";
-export type JobStatus = "queued" | "running" | "done" | "failed";
+export type JobKind = "extract_iso" | "transcode" | "scan" | "hash_files" | "enrich_metadata";
+/** `paused` and `cancelled` only happen to album info lookups (`enrich_metadata`). */
+export type JobStatus = "queued" | "running" | "done" | "failed" | "paused" | "cancelled";
 
 export interface JobInfo {
   id: string;

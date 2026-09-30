@@ -2,10 +2,45 @@
 import { X } from "lucide-vue-next";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
+import { computed, onMounted } from "vue";
+import { useEnrichmentStore } from "../stores/enrichment";
 import { useSetupStore } from "../stores/setup";
-import { dirChipClass, dirChipText } from "../types";
+import { CONFIDENCE_LEVELS, dirChipClass, dirChipText } from "../types";
 
 const setup = useSetupStore();
+const enrich = useEnrichmentStore();
+onMounted(() => void enrich.load());
+
+const n = (v: number) => v.toLocaleString("en-US");
+
+/** The presets, plus a hand-edited threshold from the config file. */
+const levels = computed(() => {
+  const current = enrich.status?.min_confidence;
+  if (current === undefined || CONFIDENCE_LEVELS.some((l) => l.value === current)) {
+    return CONFIDENCE_LEVELS;
+  }
+  return [...CONFIDENCE_LEVELS, { value: current, label: `Custom (${Math.round(current * 100)}%)` }];
+});
+
+/** One line for the latest lookup; empty when there's none. */
+const jobLine = computed(() => {
+  const j = enrich.job;
+  if (!j) return "";
+  switch (j.status) {
+    case "queued":
+      return "Lookup queued…";
+    case "running":
+      return `Looking up… ${Math.round(j.progress * 100)}%`;
+    case "paused":
+      return j.message ?? "Lookup paused.";
+    case "cancelled":
+      return "Last lookup cancelled.";
+    case "failed":
+      return `Last lookup failed: ${j.message ?? "unknown error"}`;
+    default:
+      return j.message ? `Last lookup: ${j.message}` : "Last lookup finished.";
+  }
+});
 </script>
 
 <template>
@@ -61,6 +96,65 @@ const setup = useSetupStore();
       applied until you click Apply. A folder is only ever dropped if you explicitly remove it.
     </UiHint>
     <UiHint v-if="setup.applyError" tone="warn">{{ setup.applyError }}</UiHint>
+
+    <h3 class="heading-3 mb-2 mt-4">Album info</h3>
+    <label class="mb-1 flex items-center gap-2 text-[13px]">
+      <input
+        type="checkbox"
+        :checked="enrich.status?.enabled ?? false"
+        :disabled="!enrich.status || enrich.busy"
+        @change="enrich.setEnabled(($event.target as HTMLInputElement).checked)"
+      />
+      Look up missing album info online (MusicBrainz, Cover Art Archive)
+    </label>
+    <UiHint tone="faint">
+      Sends album and artist names to musicbrainz.org, one request a second at most. Only fills
+      in what's missing (release ID, year, cover); your tags are never changed.
+    </UiHint>
+    <div v-if="enrich.status" class="mt-2 flex flex-wrap items-center gap-2 text-[13px]">
+      <label for="enrich-threshold">Match strictness</label>
+      <select
+        id="enrich-threshold"
+        class="rounded-md border border-line bg-raised px-2 py-1"
+        :value="enrich.status.min_confidence"
+        :disabled="enrich.busy"
+        @change="enrich.setThreshold(Number(($event.target as HTMLSelectElement).value))"
+      >
+        <option v-for="l in levels" :key="l.value" :value="l.value">{{ l.label }}</option>
+      </select>
+    </div>
+    <UiHint v-if="enrich.status" tone="faint">
+      {{ n(enrich.status.coverage.total_albums) }} albums ·
+      {{ n(enrich.status.coverage.with_embedded_mbid) }} identified by their tags ·
+      {{ n(enrich.status.coverage.matched_online) }} found online ·
+      {{ n(enrich.status.coverage.no_match) }} not found ·
+      {{ n(enrich.status.coverage.pending_lookup) }} waiting
+    </UiHint>
+    <!-- Fixed height: the line changes as a lookup runs, the layout doesn't. -->
+    <p
+      class="mt-1 min-h-[2.5rem] text-xs"
+      :class="enrich.paused || enrich.job?.status === 'failed' ? 'text-warn-fg' : 'text-dim'"
+      aria-live="polite"
+    >
+      {{ jobLine }}
+    </p>
+    <div v-if="enrich.status" class="flex flex-wrap gap-2">
+      <UiButton
+        v-if="!enrich.running && !enrich.paused"
+        :disabled="!enrich.status.enabled || enrich.busy || enrich.status.coverage.pending_lookup === 0"
+        @click="enrich.act('start')"
+      >
+        Look up now
+      </UiButton>
+      <UiButton v-if="enrich.running" :disabled="enrich.busy" @click="enrich.act('pause')">Pause</UiButton>
+      <UiButton v-if="enrich.paused" variant="primary" :disabled="enrich.busy" @click="enrich.act('resume')">
+        Resume
+      </UiButton>
+      <UiButton v-if="enrich.running || enrich.paused" variant="danger" :disabled="enrich.busy" @click="enrich.act('cancel')">
+        Cancel
+      </UiButton>
+    </div>
+    <UiHint v-if="enrich.error" tone="warn">{{ enrich.error }}</UiHint>
 
     <h3 class="heading-3 mb-2 mt-4">Advanced</h3>
     <UiHint tone="faint">
