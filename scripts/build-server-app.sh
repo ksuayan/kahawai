@@ -42,12 +42,24 @@ command -v cargo-tauri >/dev/null 2>&1 || {
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SERVER_CRATE="${ROOT}/crates/kahawai-server"
 
-if [[ ! -d "${SERVER_CRATE}/ui/node_modules" ]]; then
-  echo "error: crates/kahawai-server/ui/node_modules missing. Run 'npm install' there first." >&2
-  echo "(build.rs will do this on its own during a plain 'cargo build', but 'cargo tauri build'" >&2
-  echo " needs the beforeBuildCommand's npm to already be resolvable, i.e. installed once.)" >&2
-  exit 1
-fi
+# Install a UI's npm dependencies when they're missing or out of date:
+# package.json or package-lock.json changed since the last install (a merge
+# that added a dependency, say). node_modules/.package-lock.json is npm's
+# record of the last install; it's touched afterwards so an install with
+# nothing to do doesn't repeat on every run.
+ensure_npm_deps() {
+  local ui="$1"
+  local stamp="${ui}/node_modules/.package-lock.json"
+  if [[ ! -f "${stamp}" || "${ui}/package.json" -nt "${stamp}" || "${ui}/package-lock.json" -nt "${stamp}" ]]; then
+    echo "==> npm install in ${ui#"${ROOT}"/} (dependencies missing or changed)…"
+    (cd "${ui}" && npm install --no-audit --no-fund)
+    touch "${stamp}"
+  fi
+}
+
+# 'cargo tauri build' runs the UI build (beforeBuildCommand), which needs its
+# npm dependencies installed and current.
+ensure_npm_deps "${SERVER_CRATE}/ui"
 
 APP_NAME="Kahawai Server"  # must match productName in crates/kahawai-server/tauri.conf.json
 EXE_NAME="kahawai-server"  # the Cargo bin name inside Contents/MacOS (not the product name)
