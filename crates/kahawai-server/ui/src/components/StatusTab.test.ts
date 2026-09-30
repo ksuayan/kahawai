@@ -3,6 +3,7 @@ import { tauri } from "@pw/test/tauri-mock";
 import { mountApp, settle } from "../test/helpers";
 import StatusTab from "./StatusTab.vue";
 import { useSetupStore } from "../stores/setup";
+import { formatElapsed, formatWhen, scanTiming } from "../types";
 
 function boot() {
   return mountApp(StatusTab);
@@ -85,4 +86,36 @@ describe("StatusTab", () => {
     expect(wrapper.text()).toContain("Failed");
     expect(wrapper.text()).toContain("no such file or directory");
   });
+
+  it("shows when each scan ran, in local time, and how long it took, failures included", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    const start = Date.UTC(2026, 8, 30, 4, 41, 0);
+    setup.recentScans = [
+      { id: "job-0002", kind: "scan", label: "Library scan", progress: 1, status: "done", started_at: start, finished_at: start + 12 * 60_000 + 4_000 },
+      { id: "job-0001", kind: "scan", label: "Library scan", progress: 0, status: "failed", message: "server restarted", started_at: start - 3_600_000, finished_at: start - 3_600_000 + 45_000 },
+    ];
+    await settle();
+    const timings = wrapper.findAll('[data-testid="scan-timing"]').map((t) => t.text());
+    expect(timings).toEqual([
+      `${formatWhen(start)} · took 12 min 4 s`,
+      `${formatWhen(start - 3_600_000)} · took 45 s`,
+    ]);
+    expect(wrapper.findAll('[data-testid="recent-scan"]')[1].text()).toContain("server restarted");
+  });
 });
+
+describe("scan timing text", () => {
+  it("formats durations", () => {
+    expect([formatElapsed(45_000), formatElapsed(724_000), formatElapsed(3_780_000)]).toEqual(["45 s", "12 min 4 s", "1 h 3 min"]);
+  });
+
+  it("counts up while running, waits while queued, and says nothing for an older server", () => {
+    const j = { id: "j", kind: "scan" as const, label: "", progress: 0.2 };
+    expect(scanTiming({ ...j, status: "running", started_at: 1_000 }, 61_000)).toMatch(/running for 1 min 0 s$/);
+    expect(scanTiming({ ...j, status: "queued" }, 0)).toBe("Waiting to start");
+    expect(scanTiming({ ...j, status: "done" }, 0)).toBe("");
+  });
+});
+

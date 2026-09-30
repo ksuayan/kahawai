@@ -98,6 +98,34 @@ pub struct JobStore {
     pool: Option<SqlitePool>,
 }
 
+/// Now, in Unix milliseconds.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Record when a job starts and ends, as its status changes: the first move
+/// to Running starts it (a resume keeps that start), an end (done, failed,
+/// cancelled) finishes it. A job that ends without ever running (failed
+/// while queued) starts and ends at once.
+fn stamp(job: &mut Job, to: JobStatus) {
+    let now = now_ms();
+    match to {
+        JobStatus::Running => {
+            job.started_at.get_or_insert(now);
+            job.finished_at = None;
+        }
+        JobStatus::Done | JobStatus::Failed | JobStatus::Cancelled => {
+            job.started_at.get_or_insert(now);
+            job.finished_at = Some(now);
+        }
+        JobStatus::Queued | JobStatus::Paused => {}
+    }
+    job.status = to;
+}
+
 impl JobStore {
     /// In-memory only: no durability. Used by tests and anywhere the
     /// database is unavailable.
@@ -117,15 +145,19 @@ impl JobStore {
     pub async fn persistent(pool: &SqlitePool) -> Result<Self, kahawai_core::MusicError> {
         sqlx::query(
             "UPDATE jobs SET status = 'failed', error = 'server restarted',
-             result = NULL, updated_at = datetime('now')
+             result = NULL, updated_at = datetime('now'),
+             started_at = COALESCE(started_at, ?), finished_at = ?
              WHERE status IN ('queued', 'running')",
         )
+        .bind(now_ms())
+        .bind(now_ms())
         .execute(pool)
         .await
         .map_err(db::cvt)?;
 
         let rows = sqlx::query(
-            "SELECT id, kind, status, progress, payload, result, error, label
+            "SELECT id, kind, status, progress, payload, result, error, label,
+                    started_at, finished_at
              FROM jobs ORDER BY id",
         )
         .fetch_all(pool)
@@ -162,6 +194,8 @@ impl JobStore {
                 progress: r.get::<f64, _>("progress") as f32,
                 status,
                 message,
+                started_at: r.get("started_at"),
+                finished_at: r.get("finished_at"),
             };
             jobs.insert(id, job);
         }
@@ -193,13 +227,15 @@ impl JobStore {
             _ => (None, None),
         };
         let res = sqlx::query(
-            "INSERT INTO jobs (id, kind, status, progress, payload, result, error, label, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            "INSERT INTO jobs (id, kind, status, progress, payload, result, error, label,
+                               started_at, finished_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
              ON CONFLICT(id) DO UPDATE SET
                kind = excluded.kind, status = excluded.status,
                progress = excluded.progress, payload = excluded.payload,
                result = excluded.result, error = excluded.error,
-               label = excluded.label, updated_at = datetime('now')",
+               label = excluded.label, started_at = excluded.started_at,
+               finished_at = excluded.finished_at, updated_at = datetime('now')",
         )
         .bind(&job.id)
         .bind(kind_to_str(job.kind))
@@ -209,6 +245,8 @@ impl JobStore {
         .bind(result)
         .bind(error)
         .bind(&job.label)
+        .bind(job.started_at)
+        .bind(job.finished_at)
         .execute(pool)
         .await;
         if let Err(e) = res {
@@ -228,6 +266,8 @@ impl JobStore {
             progress: 0.0,
             status: JobStatus::Queued,
             message: None,
+            started_at: None,
+            finished_at: None,
         };
         self.inner
             .write()
@@ -255,7 +295,7 @@ impl JobStore {
             match inner.get_mut(id) {
                 Some(job) if matches!(job.status, JobStatus::Queued | JobStatus::Running) => {
                     job.progress = (job.progress + step).min(1.0);
-                    job.status = JobStatus::Running;
+                    stamp(job, JobStatus::Running);
                     job.clone()
                 }
                 _ => return false,
@@ -274,7 +314,7 @@ impl JobStore {
             match inner.get_mut(id) {
                 Some(job) if matches!(job.status, JobStatus::Queued | JobStatus::Running) => {
                     job.progress = progress.clamp(0.0, 1.0);
-                    job.status = JobStatus::Running;
+                    stamp(job, JobStatus::Running);
                     job.clone()
                 }
                 _ => return false,
@@ -289,7 +329,7 @@ impl JobStore {
             let mut inner = self.inner.write().unwrap();
             match inner.get_mut(id) {
                 Some(job) => {
-                    job.status = status;
+                    stamp(job, status);
                     job.clone()
                 }
                 None => return false,
@@ -305,11 +345,14 @@ impl JobStore {
             let mut inner = self.inner.write().unwrap();
             match inner.get_mut(id) {
                 Some(job) => {
-                    job.status = if ok {
-                        JobStatus::Done
-                    } else {
-                        JobStatus::Failed
-                    };
+                    stamp(
+                        job,
+                        if ok {
+                            JobStatus::Done
+                        } else {
+                            JobStatus::Failed
+                        },
+                    );
                     if ok {
                         job.progress = 1.0;
                     }
@@ -346,7 +389,7 @@ impl JobStore {
             if !from.contains(&job.status) {
                 return None;
             }
-            job.status = to;
+            stamp(job, to);
             job.clone()
         };
         self.write_through(&job).await;
@@ -480,6 +523,64 @@ mod tests {
 
     /// S9: mutations are written through to the `jobs` table, honoring the
     /// payload/result/error column contract.
+    /// Start and end times: set when a job first runs and when it ends,
+    /// kept through a pause and resume and across a restart; a job cut
+    /// short by a restart ends then.
+    #[tokio::test]
+    async fn jobs_record_when_they_started_and_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::open(&dir.path().join("jobs.db")).await.unwrap();
+        let store = JobStore::persistent(&pool).await.unwrap();
+
+        let job = store.create(JobKind::Scan, "scan".into(), None).await;
+        assert_eq!((job.started_at, job.finished_at), (None, None), "queued");
+        store.set_progress(&job.id, 0.1).await;
+        let started = store.get(&job.id).unwrap().started_at.expect("running");
+        store.set_progress(&job.id, 0.6).await;
+        assert_eq!(
+            store.get(&job.id).unwrap().started_at,
+            Some(started),
+            "only the first run starts it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        store.finish(&job.id, false, Some("boom".into())).await;
+        let failed = store.get(&job.id).unwrap();
+        let ended = failed.finished_at.expect("ended");
+        assert!(ended >= started + 5, "{started} .. {ended}");
+
+        let paused = store
+            .create(JobKind::EnrichMetadata, "lookup".into(), None)
+            .await;
+        store.set_status(&paused.id, JobStatus::Running).await;
+        let p_start = store.get(&paused.id).unwrap().started_at;
+        store
+            .transition(&paused.id, &[JobStatus::Running], JobStatus::Paused)
+            .await;
+        store
+            .transition(&paused.id, &[JobStatus::Paused], JobStatus::Running)
+            .await;
+        let resumed = store.get(&paused.id).unwrap();
+        assert_eq!(
+            (resumed.started_at, resumed.finished_at),
+            (p_start, None),
+            "a resume keeps the start"
+        );
+
+        let cut = store.create(JobKind::Scan, "scan".into(), None).await;
+        store.set_progress(&cut.id, 0.3).await;
+        let cut_start = store.get(&cut.id).unwrap().started_at;
+
+        // Restart: the times come back from the table; the running scan
+        // failed then.
+        let again = JobStore::persistent(&pool).await.unwrap();
+        let f = again.get(&job.id).unwrap();
+        assert_eq!((f.started_at, f.finished_at), (Some(started), Some(ended)));
+        let c = again.get(&cut.id).unwrap();
+        assert_eq!(c.status, JobStatus::Failed);
+        assert_eq!(c.started_at, cut_start);
+        assert!(c.finished_at.unwrap() >= cut_start.unwrap());
+    }
+
     #[tokio::test]
     async fn persistent_store_writes_through_to_sqlite() {
         let dir = tempfile::tempdir().unwrap();

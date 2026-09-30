@@ -124,3 +124,8 @@ export async function setupRestartServer(): Promise<ServerStatus> {
 export async function setupQuit(): Promise<void> {
   await cmd("setup_quit");
 }
+
+/** The UI is up: the shell swaps its splash window for this one. */
+export async function setupAppReady(): Promise<void> {
+  if (inTauri()) await cmd("setup_app_ready");
+}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, provide, ref } from "vue";
+import { onMounted, onUnmounted, provide, ref, watch } from "vue";
 import AlbumsView from "./components/AlbumsView.vue";
 import AlbumDetail from "./components/AlbumDetail.vue";
 import ArtistsView from "./components/ArtistsView.vue";
@@ -33,7 +33,7 @@ import { useQueueStore } from "./stores/queue";
 import { useSettingsStore } from "./stores/settings";
 import { useServerHealthStore } from "./stores/serverHealth";
 import { handleShortcut } from "./shortcuts";
-import { onMenuAction } from "./tauri";
+import { appReady, onMenuAction } from "./tauri";
 import { onCatalogUpdated, onServerConnected } from "./api";
 
 const nav = useNavStore();
@@ -43,6 +43,19 @@ const mainEl = ref<HTMLElement | null>(null);
 provide(MAIN_SCROLL, mainEl);
 const settings = useSettingsStore();
 const lib = useLibraryStore();
+
+// The splash window closes (and this one appears) once the app is warmed
+// up: settings loaded, and the library showing something, from the cache
+// or the server, or having found out the server is unreachable.
+const stopSplashWatch = watch(
+  () => settings.loaded && (lib.albums.length > 0 || lib.serverOnline !== null || lib.error !== null),
+  (ready) => {
+    if (!ready) return;
+    void appReady();
+    queueMicrotask(() => stopSplashWatch());
+  },
+  { immediate: true },
+);
 const player = usePlayerStore();
 const queue = useQueueStore();
 const playlists = usePlaylistsStore();

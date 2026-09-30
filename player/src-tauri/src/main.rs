@@ -87,6 +87,63 @@ impl ArtworkCacheConfig {
     }
 }
 
+// --- Splash window ------------------------------------------------------------
+
+/// Shown at least this long, so it never just flashes.
+const SPLASH_MIN: Duration = Duration::from_millis(1200);
+/// Closed after this long even if the UI never says it's ready.
+const SPLASH_MAX: Duration = Duration::from_secs(20);
+
+struct SplashState {
+    shown_at: std::time::Instant,
+    done: std::sync::atomic::AtomicBool,
+}
+
+/// The splash page, with this build's name and version.
+fn splash_url(app: &tauri::App) -> tauri::WebviewUrl {
+    let info = app.package_info();
+    let enc = |s: &str| {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    };
+    let url = format!("splash.html?name={}&version={}", enc(&info.name), enc(&info.version.to_string()));
+    tauri::WebviewUrl::App(url.into())
+}
+
+/// Show the main window and close the splash, once: after SPLASH_MIN.
+fn finish_splash(app: &AppHandle) {
+    let Some(state) = app.try_state::<SplashState>() else { return };
+    if state.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let wait = SPLASH_MIN.saturating_sub(state.shown_at.elapsed());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(wait);
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(main) = app2.get_webview_window("main") {
+                let _ = main.show();
+                let _ = main.set_focus();
+            }
+            if let Some(splash) = app2.get_webview_window("splash") {
+                let _ = splash.close();
+            }
+        });
+    });
+}
+
+/// The UI is up (settings loaded, the library showing): swap the splash for
+/// the main window.
+#[tauri::command]
+fn app_ready(app: AppHandle) {
+    finish_splash(&app);
+}
+
 /// The UI's own preferences (view layouts and sorts, theme, EQ rows and
 /// presets, analog A/B, the last view, scroll positions, the last search),
 /// kept in `ui-state.json` next to the other settings: key → string, as the
@@ -1051,9 +1108,29 @@ fn main() {
                 .find(|w| w.label == "main")
                 .cloned()
                 .ok_or("tauri.conf.json has no \"main\" window")?;
+            // Splash first, then the main window, hidden until the UI says
+            // it's ready (app_ready), or SPLASH_MAX passes.
+            tauri::WebviewWindowBuilder::new(app, "splash", splash_url(app))
+                .title(&app.package_info().name)
+                .inner_size(720.0, 480.0)
+                .resizable(false)
+                .decorations(false)
+                .center()
+                .skip_taskbar(true)
+                .build()?;
+            app.manage(SplashState {
+                shown_at: std::time::Instant::now(),
+                done: std::sync::atomic::AtomicBool::new(false),
+            });
             tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
                 .devtools(inspector)
+                .visible(false)
                 .build()?;
+            let handle_for_splash = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(SPLASH_MAX);
+                finish_splash(&handle_for_splash);
+            });
             app.manage(DeveloperState {
                 config: Mutex::new(developer),
                 path: developer_path,
@@ -1154,6 +1231,7 @@ fn main() {
             get_state,
             get_developer_tools,
             set_developer_tools,
+            app_ready,
             get_ui_state,
             set_ui_state,
             catalog_cached,

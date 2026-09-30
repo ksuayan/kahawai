@@ -244,6 +244,14 @@ pub struct Job {
     pub progress: f32,
     pub status: JobStatus,
     pub message: Option<String>,
+    /// When the job started running, in Unix milliseconds (UTC). `None`
+    /// while queued, and on servers older than this field.
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    /// When it ended (done, failed, cancelled), in Unix milliseconds. `None`
+    /// while queued, running or paused.
+    #[serde(default)]
+    pub finished_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +425,8 @@ mod tests {
             progress: 0.5,
             status: JobStatus::Running,
             message: None,
+            started_at: Some(1_790_000_000_000),
+            finished_at: None,
         };
         assert_eq!(round_trip(&job), job);
         let json = serde_json::to_string(&job).unwrap();

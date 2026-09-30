@@ -363,3 +363,8 @@ export async function getUiState(): Promise<Record<string, unknown> | undefined>
 export async function setUiState(key: string, value: string | null): Promise<void> {
   await cmd("set_ui_state", { key, value });
 }
+
+/** The UI is warmed up: the shell swaps its splash window for this one. */
+export async function appReady(): Promise<void> {
+  if (inTauri()) await cmd("app_ready");
+}

@@ -25,6 +25,13 @@ export default defineConfig({
   },
   build: {
     target: "esnext",
+    // Two pages: the app, and the splash window shown while it starts.
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        splash: fileURLToPath(new URL("./splash.html", import.meta.url)),
+      },
+    },
   },
   test: {
     environment: "happy-dom",

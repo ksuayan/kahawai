@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kahawai Player</title>
+    <!--
+      Splash window, shown while the app starts. The shell opens it first
+      (splash.html?name=…&version=…), and closes it once the main window
+      says it's ready. The image is 1440×960: the 720×480 window at 2x.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #1c140e;
+      }
+      .splash {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        background: url("/splash.webp") center / cover no-repeat;
+        cursor: default;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .brand {
+        position: absolute;
+        right: 32pt;
+        bottom: 26pt;
+        text-align: right;
+        color: #fff;
+        font-family: "IBM Plex Serif", Georgia, serif;
+        /* Legible over the bright floor and table at the lower right. */
+        text-shadow:
+          0 1px 3px rgb(0 0 0 / 0.55),
+          0 0 18px rgb(0 0 0 / 0.35);
+      }
+      .name {
+        margin: 0;
+        font-size: 36pt;
+        font-weight: 400;
+        line-height: 1.1;
+      }
+      .version {
+        margin: 4pt 0 0;
+        font-size: 10pt;
+        letter-spacing: 0.02em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="splash" data-tauri-drag-region>
+      <div class="brand">
+        <p class="name" id="name">Kahawai Player</p>
+        <p class="version" id="version"></p>
+      </div>
+    </div>
+    <script type="module" src="/src/splash.ts"></script>
+  </body>
+</html>
