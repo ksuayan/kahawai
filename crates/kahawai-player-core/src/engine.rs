@@ -42,6 +42,7 @@ use crate::quality::{
     BLOCKER_VOLUME,
 };
 use crate::queue::{Queue, RepeatMode};
+use crate::rangesource::SeekableControl;
 use crate::resample::CubicResampler;
 use crate::sink::{AudioSink, OutputPath, PcmChunk};
 use crate::transport::{HttpTransport, StreamInfo, StreamOptions, StreamProgress, Transport};
@@ -338,7 +339,26 @@ struct PcmStream {
     /// packed 24-bit, bypassing EQ, loudness, volume and resampling.
     bit_perfect: bool,
     /// Bytes received from the network (see `ActiveStream::buffered_ms`).
-    progress: Option<StreamProgress>,
+    progress: Option<ProgressFeed>,
+}
+
+/// Where the connection gauge and buffered fill read network progress.
+enum ProgressFeed {
+    /// One response's counters, for as long as it plays.
+    Response(StreamProgress),
+    /// A seekable Range source. It drops its download and starts another
+    /// whenever the demuxer jumps, so the counters are asked for afresh
+    /// each time rather than kept from the first download.
+    Seekable(Arc<dyn SeekableControl>),
+}
+
+impl ProgressFeed {
+    fn current(&self) -> Option<StreamProgress> {
+        match self {
+            ProgressFeed::Response(p) => Some(p.clone()),
+            ProgressFeed::Seekable(c) => c.progress(),
+        }
+    }
 }
 
 /// One open `?format=dop` response. DoP bytes flow to the sink untouched —
@@ -355,7 +375,7 @@ struct DopPlayback {
     pumped_frames: u64,
     /// Position offset in DoP frames (`?seek_ms=`).
     base_frames: u64,
-    progress: Option<StreamProgress>,
+    progress: Option<ProgressFeed>,
 }
 
 /// The engine's active response: PCM (decoded, DSP'd) or DoP (byte pipe).
@@ -414,12 +434,12 @@ impl ActiveStream {
     fn buffered_ms(&self, position_ms: u64) -> Option<u64> {
         let (progress, segments, base_ms) = match self {
             ActiveStream::Pcm(a) => (
-                a.progress.as_ref()?,
+                a.progress.as_ref()?.current()?,
                 &a.segments,
                 a.base_frames * 1000 / a.sink_rate as u64,
             ),
             ActiveStream::Dop(a) => (
-                a.progress.as_ref()?,
+                a.progress.as_ref()?.current()?,
                 &a.segments,
                 a.base_frames * 1000 / a.spec.dop_rate_hz as u64,
             ),
@@ -443,12 +463,12 @@ impl ActiveStream {
     fn network(&self, position_ms: u64) -> (Option<u64>, Option<u64>, bool) {
         let (progress, segments, base_ms) = match self {
             ActiveStream::Pcm(a) => (
-                a.progress.as_ref(),
+                a.progress.as_ref().and_then(ProgressFeed::current),
                 &a.segments,
                 a.base_frames * 1000 / a.sink_rate.max(1) as u64,
             ),
             ActiveStream::Dop(a) => (
-                a.progress.as_ref(),
+                a.progress.as_ref().and_then(ProgressFeed::current),
                 &a.segments,
                 a.base_frames * 1000 / a.spec.dop_rate_hz.max(1) as u64,
             ),
@@ -1372,7 +1392,7 @@ impl Player {
         track: &Track,
         opts: &StreamOptions,
         ms: u64,
-    ) -> Option<(StreamInfo, StreamDecoder, u64)> {
+    ) -> Option<(StreamInfo, StreamDecoder, u64, Option<ProgressFeed>)> {
         let sk = match self.transport.open_seekable(track.id, opts) {
             Ok(Some(sk)) => sk,
             Ok(None) => return None,
@@ -1391,16 +1411,16 @@ impl Player {
         if let Some(control) = &sk.control {
             control.warm();
         }
-        let progress = sk.control.as_ref().and_then(|c| c.progress());
+        let feed = sk.control.map(ProgressFeed::Seekable);
         let info = StreamInfo {
             reader: Box::new(std::io::empty()),
             content_type: sk.content_type,
             chain: sk.chain,
             gapless_next: None,
             gapless_mode: None,
-            progress,
+            progress: None,
         };
-        Some((info, decoder, skip))
+        Some((info, decoder, skip, feed))
     }
 
     /// Start DoP for `track`, or say why it cannot. On `Err` the sink has
@@ -1460,7 +1480,7 @@ impl Player {
             }
         };
         let gapless_mode = info.gapless_mode.clone();
-        let progress = info.progress.clone();
+        let progress = info.progress.clone().map(ProgressFeed::Response);
         let chained = gapless_mode.as_deref() == Some("chained");
         let established = self.dop_spec;
         let stream = match DopStream::new(info.reader, dop_rate, established, chained) {
@@ -1567,8 +1587,8 @@ impl Player {
             (true, Some(ms)) => self.open_seeked_passthrough(track, &opts, ms),
             _ => None,
         };
-        let (info, decoder, seek_skip_frames) = match seeked {
-            Some((info, decoder, skip)) => (info, decoder, Some(skip)),
+        let (info, decoder, seek_skip_frames, feed) = match seeked {
+            Some((info, decoder, skip, feed)) => (info, decoder, Some(skip), feed),
             None => {
                 let mut info = match self.transport.open_stream(track.id, &opts) {
                     Ok(i) => i,
@@ -1588,11 +1608,11 @@ impl Player {
                         return;
                     }
                 };
-                (info, decoder, None)
+                let feed = info.progress.clone().map(ProgressFeed::Response);
+                (info, decoder, None, feed)
             }
         };
         let gapless_mode = info.gapless_mode.clone();
-        let progress = info.progress.clone();
         let spec = decoder.spec();
 
         // Segments: the server chained the next track's audio into this
@@ -1755,7 +1775,7 @@ impl Player {
             base_frames,
             skip_frames,
             bit_perfect,
-            progress,
+            progress: feed,
         }));
         self.status = PlayerStatus::Playing;
     }

@@ -3274,7 +3274,8 @@ fn seeking_while_paused_stays_paused_even_when_the_seek_fails() {
 // Passthrough seeks use a seekable source instead of streaming from byte 0
 // ---------------------------------------------------------------------------
 
-use kahawai_player_core::SeekableStream;
+use kahawai_player_core::transport::StreamProgress;
+use kahawai_player_core::{SeekableControl, SeekableStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -3316,6 +3317,8 @@ struct SeekStub {
     offer: Mutex<SeekOffer>,
     seekable_opens: AtomicUsize,
     bytes_read: Arc<AtomicU64>,
+    /// Handed out with the seekable source, when set.
+    control: Mutex<Option<Arc<dyn SeekableControl>>>,
 }
 
 struct SeekStubTransport(Arc<SeekStub>);
@@ -3351,7 +3354,7 @@ impl Transport for SeekStubTransport {
             }),
             content_type: "audio/wav".into(),
             chain: Some("wav->passthrough".into()),
-            control: None,
+            control: me.control.lock().unwrap().clone(),
         }))
     }
 }
@@ -3373,6 +3376,7 @@ impl SeekHarness {
             offer: Mutex::new(offer),
             seekable_opens: AtomicUsize::new(0),
             bytes_read: Arc::new(AtomicU64::new(0)),
+            control: Mutex::new(None),
         });
         let sink = SharedSink(Arc::new(Mutex::new(VecSink::new())));
         let mut player = Player::new(
@@ -3674,4 +3678,63 @@ fn the_ui_is_told_when_only_the_blockers_change() {
     let without = h.player.snapshot();
     assert_ne!(with.exclusive_blockers, without.exclusive_blockers);
     assert!(kahawai_player_core::snapshot_key_differs(&with, &without));
+}
+
+/// A seekable source's control whose current download the test swaps, as
+/// the Range source does when the demuxer jumps and it re-requests.
+struct SwappableDownload(Mutex<Option<StreamProgress>>);
+
+impl SeekableControl for SwappableDownload {
+    fn warm(&self) {}
+    fn progress(&self) -> Option<StreamProgress> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// One Range download's counters: `len` bytes from `offset`, `got` in.
+fn download(offset: u64, len: u64, got: u64) -> StreamProgress {
+    StreamProgress {
+        received: Arc::new(AtomicU64::new(got)),
+        content_length: Some(len),
+        offset,
+        stats: None,
+    }
+}
+
+#[test]
+fn the_buffered_fill_follows_the_seekable_sources_current_download() {
+    let mut h = SeekHarness::new(SeekOffer::Seekable);
+    let file = h.me.file.len() as u64;
+    // First download after the seek: from 20% of the file, 10% of it in.
+    let first = download(file / 5, file - file / 5, file / 10);
+    let control = Arc::new(SwappableDownload(Mutex::new(Some(first.clone()))));
+    *h.me.control.lock().unwrap() = Some(control.clone());
+    h.player.seek_ms(2000);
+    let at_first = h.player.snapshot().buffered_ms.expect("known");
+    assert!(
+        (2900..3100).contains(&at_first),
+        "{at_first} ms ≈ 30% of 10 s"
+    );
+
+    // The download moves on: the fill follows it.
+    first.received.store(file / 2, Ordering::SeqCst);
+    let later = h.player.snapshot().buffered_ms.expect("known");
+    assert!((6900..7100).contains(&later), "{later} ms ≈ 70% of 10 s");
+
+    // The demuxer jumps; the source drops that download and starts another
+    // from 50%. The fill must follow the new one, not freeze on the old.
+    let second = download(file / 2, file - file / 2, file / 10);
+    *control.0.lock().unwrap() = Some(second.clone());
+    first.received.store(0, Ordering::SeqCst); // the dropped one is dead
+    let after_jump = h.player.snapshot().buffered_ms.expect("known");
+    assert!(
+        (5900..6100).contains(&after_jump),
+        "{after_jump} ms ≈ 60% of 10 s, from the new download"
+    );
+    second.received.store(file / 2, Ordering::SeqCst);
+    let done = h.player.snapshot().buffered_ms.expect("known");
+    assert!(
+        done >= 9900,
+        "{done} ms: the new download finished the file"
+    );
 }
