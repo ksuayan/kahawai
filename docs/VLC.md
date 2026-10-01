@@ -13,6 +13,8 @@ http://<server>:8080/api/albums/<id>/export?format=m3u
 
 Copy the link. In VLC choose **Media → Open Network Stream…** (on a Mac, **File → Open Network…**), paste it, and press **Play**. The whole playlist loads and plays in order.
 
+You can also skip the browser: give VLC the server's address itself, `http://<server>:8080/`. VLC gets the whole library as a playlist: every playlist, then every album by artist. Play one and VLC opens its tracks beneath it.
+
 Use the server's network address, such as `http://10.0.0.233:8080/`, not `0.0.0.0`. In the server's settings, `0.0.0.0` means "listen on every network": nothing can connect to it, and the playlist links refuse it. If you open the page as `localhost` or `127.0.0.1` on the server's own computer, its links switch to the network address so that they work from other devices too.
 
 Two other formats are available by changing the end of the address: `format=xspf` adds cover art to VLC's playlist, and `format=pls` suits older players. Plain M3U is the safest choice for VLC.
@@ -27,7 +29,7 @@ You can also save the playlist file and open it later. It holds full addresses, 
 
 ## What VLC can't do here
 
-VLC can't browse the library itself: the server's page is for a web browser, and VLC opens one playlist or album at a time. VLC can't see the Player's queue either, which lives in the Player. To take a queue to VLC, save it as a playlist in the Player first, then open that playlist.
+VLC's view of the library is one flat list, not folders by artist or genre, and with a big library it's long: use VLC's search box in the playlist. VLC can't see the Player's queue either, which lives in the Player. To take a queue to VLC, save it as a playlist in the Player first, then open that playlist.
 
 ## Another route: the music share itself
 

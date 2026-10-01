@@ -1241,4 +1241,84 @@ mod tests {
         let (_, _, by_artist) = get(&lib.app, "/?q=miles", "nas:8080").await;
         assert!(by_artist.contains("Kind of Blue") && !by_artist.contains("Comp 0"));
     }
+
+    async fn get_as(
+        app: &Router,
+        uri: &str,
+        host: &str,
+        ua: &str,
+    ) -> (StatusCode, HeaderMap, String) {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, host)
+                    .header(header::USER_AGENT, ua)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status, headers) = (res.status(), res.headers().clone());
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        (status, headers, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    const VLC_UA: &str = "VLC/3.0.21 LibVLC/3.0.21";
+
+    #[tokio::test]
+    async fn vlc_opening_the_server_address_gets_the_library_as_a_playlist() {
+        let lib = bound_library().await;
+        let (status, h, m3u) = get_as(&lib.app, "/", "10.0.0.233:8080", VLC_UA).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(h[header::CONTENT_TYPE], "audio/x-mpegurl; charset=utf-8");
+        assert_eq!(
+            m3u,
+            "#EXTM3U\n\
+             #EXTINF:-1,Playlist: Late Night: Blue\n\
+             http://10.0.0.233:8080/api/playlists/1/export?format=m3u\n\
+             #EXTINF:-1,Album: Miles Davis - Kind of Blue\n\
+             http://10.0.0.233:8080/api/albums/1/export?format=m3u\n"
+        );
+        // Every entry opens as a playlist of its own.
+        for url in m3u.lines().filter(|l| l.starts_with("http")) {
+            let path = url.strip_prefix("http://10.0.0.233:8080").unwrap();
+            let (status, h, body) = get_as(&lib.app, path, "10.0.0.233:8080", VLC_UA).await;
+            assert_eq!(status, StatusCode::OK, "{url}");
+            assert_eq!(h[header::CONTENT_TYPE], "audio/x-mpegurl; charset=utf-8");
+            assert!(body.starts_with("#EXTM3U\n#EXTINF:"), "{url}: {body}");
+        }
+        // Any client can ask for it; a browser still gets the page.
+        let (_, _, asked) = get_as(&lib.app, "/?format=m3u", "10.0.0.233:8080", "curl/8").await;
+        assert_eq!(asked, m3u);
+        let (_, h, _) = get_as(&lib.app, "/", "10.0.0.233:8080", "Mozilla/5.0").await;
+        assert_eq!(h[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        let (_, h, _) = get_as(&lib.app, "/?format=html", "10.0.0.233:8080", VLC_UA).await;
+        assert_eq!(
+            h[header::CONTENT_TYPE],
+            "text/html; charset=utf-8",
+            "explicit wins"
+        );
+    }
+
+    /// What started this: VLC on the server's own Mac, opening 0.0.0.0.
+    #[tokio::test]
+    async fn vlc_opening_0_0_0_0_gets_entries_that_work_from_anywhere() {
+        let lib = bound_library().await;
+        let (status, _, m3u) = get_as(&lib.app, "/", "0.0.0.0:8080", VLC_UA).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(m3u.contains("http://192.168.1.20:8080/api/playlists/1/export?format=m3u"));
+        assert!(!m3u.contains("0.0.0.0"), "{m3u}");
+        // And the export those entries name serves entries on the same address.
+        let (status, _, list) = get_as(
+            &lib.app,
+            "/api/playlists/1/export",
+            "192.168.1.20:8080",
+            VLC_UA,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(list.contains("http://192.168.1.20:8080/stream/"), "{list}");
+    }
 }

@@ -3,6 +3,10 @@
 //! address used to be a 404 — the first thing someone tries in a browser,
 //! or in VLC's Open Network.
 //!
+//! VLC itself gets the library as a playlist instead (by its `User-Agent`,
+//! or `?format=m3u` from anything): one entry per playlist and album, each
+//! pointing at that one's export, which VLC opens as a nested playlist.
+//!
 //! Links are built from the address the page was opened with. When that
 //! address only works on the server's own machine (`0.0.0.0`, `localhost`,
 //! loopback), the links use the server's network address instead, and the
@@ -31,13 +35,29 @@ pub struct HomeQuery {
     pub q: String,
     #[serde(default)]
     pub page: Option<i64>,
+    /// `m3u`: the library index as a playlist (what VLC gets by default).
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 struct Item {
     id: i64,
     name: String,
-    detail: String,
+    artist: Option<String>,
+    year: Option<i64>,
     tracks: i64,
+}
+
+impl Item {
+    /// `Artist · 1959`, either part alone, or empty.
+    fn detail(&self) -> String {
+        match (&self.artist, self.year) {
+            (Some(a), Some(y)) => format!("{a} · {y}"),
+            (Some(a), None) => a.clone(),
+            (None, Some(y)) => y.to_string(),
+            (None, None) => String::new(),
+        }
+    }
 }
 
 /// `LIKE` pattern for "contains `q`", with `%`, `_` and `\` escaped.
@@ -53,42 +73,46 @@ fn contains_pattern(q: &str) -> String {
     p
 }
 
-pub async fn home(
-    State(s): State<AppState>,
-    Query(q): Query<HomeQuery>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> Result<Response, ApiError> {
-    let host = request_host(&headers, &uri)?;
-    let (name, port) = split_host(&host);
-    // Where the links point, and a note when that isn't where the page was
-    // opened.
-    let (base, note) = if is_local_only_host(name) {
-        match lan_base(&s, port) {
-            Some(lan) => (
-                lan.clone(),
-                Some(format!(
-                    "You opened this page as <code>{}</code>, which only works on the \
-                     server's own computer. The links below use its network address, \
-                     <a href=\"{lan}/\">{lan}</a>, so they work from other devices too.",
-                    esc(&host)
-                )),
-            ),
-            None => (
-                format!("http://{host}"),
-                Some(format!(
-                    "You opened this page as <code>{}</code>, which only works on the \
-                     server's own computer, and its network address couldn't be found. \
-                     Open the page with that address instead.",
-                    esc(&host)
-                )),
-            ),
-        }
-    } else {
-        (format!("http://{host}"), None)
-    };
+/// VLC identifies itself as `VLC/3.0.x LibVLC/3.0.x`.
+fn is_vlc(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ua| ua.starts_with("VLC/") || ua.contains("LibVLC/"))
+}
 
-    let playlists: Vec<Item> = sqlx::query(
+/// Where links point: the address the client used, or — when that only
+/// works on the server's own machine — the server's network address, with
+/// an HTML note saying why.
+fn link_base(s: &AppState, host: &str) -> (String, Option<String>) {
+    let (name, port) = split_host(host);
+    if !is_local_only_host(name) {
+        return (format!("http://{host}"), None);
+    }
+    match lan_base(s, port) {
+        Some(lan) => (
+            lan.clone(),
+            Some(format!(
+                "You opened this page as <code>{}</code>, which only works on the \
+                 server's own computer. The links below use its network address, \
+                 <a href=\"{lan}/\">{lan}</a>, so they work from other devices too.",
+                esc(host)
+            )),
+        ),
+        None => (
+            format!("http://{host}"),
+            Some(format!(
+                "You opened this page as <code>{}</code>, which only works on the \
+                 server's own computer, and its network address couldn't be found. \
+                 Open the page with that address instead.",
+                esc(host)
+            )),
+        ),
+    }
+}
+
+async fn playlists(s: &AppState) -> Result<Vec<Item>, MusicError> {
+    Ok(sqlx::query(
         "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_tracks pt \
          WHERE pt.playlist_id = p.id) AS n FROM playlists p ORDER BY p.name COLLATE NOCASE, p.id",
     )
@@ -99,63 +123,96 @@ pub async fn home(
     .map(|r| Item {
         id: r.get("id"),
         name: r.get("name"),
-        detail: String::new(),
+        artist: None,
+        year: None,
         tracks: r.get("n"),
     })
-    .collect();
+    .collect())
+}
 
-    // Albums with at least one playable track, like the album list.
-    let filter = q.q.trim();
-    let pattern = contains_pattern(filter);
-    let present = "a.id IN (SELECT album_id FROM tracks WHERE missing = 0 \
-                   AND duplicate_of IS NULL AND album_id IS NOT NULL)";
-    let matches = "(?1 = '' OR a.title LIKE ?2 ESCAPE '\\' OR a.artist LIKE ?2 ESCAPE '\\')";
-    let total: i64 = sqlx::query(&format!(
-        "SELECT COUNT(*) FROM albums a WHERE {present} AND {matches}"
+/// Albums with at least one playable track, like the album list.
+const PRESENT: &str = "a.id IN (SELECT album_id FROM tracks WHERE missing = 0 \
+                       AND duplicate_of IS NULL AND album_id IS NOT NULL)";
+const MATCHES: &str = "(?1 = '' OR a.title LIKE ?2 ESCAPE '\\' OR a.artist LIKE ?2 ESCAPE '\\')";
+
+async fn count_albums(s: &AppState, filter: &str) -> Result<i64, MusicError> {
+    Ok(sqlx::query(&format!(
+        "SELECT COUNT(*) FROM albums a WHERE {PRESENT} AND {MATCHES}"
     ))
     .bind(filter)
-    .bind(&pattern)
+    .bind(contains_pattern(filter))
     .fetch_one(&s.pool)
     .await
     .map_err(db::cvt)?
-    .get(0);
-    let pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
-    let page = q.page.unwrap_or(1).clamp(1, pages);
-    let albums: Vec<Item> = sqlx::query(&format!(
+    .get(0))
+}
+
+/// Albums by artist, then title. `limit` -1 = all.
+async fn albums(
+    s: &AppState,
+    filter: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Item>, MusicError> {
+    Ok(sqlx::query(&format!(
         "SELECT a.id, a.title, a.artist, a.year, \
          (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.missing = 0 \
           AND t.duplicate_of IS NULL) AS n \
-         FROM albums a WHERE {present} AND {matches} \
+         FROM albums a WHERE {PRESENT} AND {MATCHES} \
          ORDER BY COALESCE(a.sort_artist, a.artist) COLLATE NOCASE, \
                   COALESCE(a.sort_title, a.title) COLLATE NOCASE, a.id \
          LIMIT ?3 OFFSET ?4"
     ))
     .bind(filter)
-    .bind(&pattern)
-    .bind(PER_PAGE)
-    .bind((page - 1) * PER_PAGE)
+    .bind(contains_pattern(filter))
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&s.pool)
     .await
     .map_err(db::cvt)?
     .iter()
-    .map(|r| {
-        let artist: Option<String> = r.get("artist");
-        let year: Option<i64> = r.get("year");
-        let detail = match (artist.filter(|a| !a.trim().is_empty()), year) {
-            (Some(a), Some(y)) => format!("{a} · {y}"),
-            (Some(a), None) => a,
-            (None, Some(y)) => y.to_string(),
-            (None, None) => String::new(),
-        };
-        Item {
-            id: r.get("id"),
-            name: r.get("title"),
-            detail,
-            tracks: r.get("n"),
-        }
+    .map(|r| Item {
+        id: r.get("id"),
+        name: r.get("title"),
+        artist: r
+            .get::<Option<String>, _>("artist")
+            .filter(|a| !a.trim().is_empty()),
+        year: r.get("year"),
+        tracks: r.get("n"),
     })
-    .collect();
+    .collect())
+}
 
+pub async fn home(
+    State(s): State<AppState>,
+    Query(q): Query<HomeQuery>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, ApiError> {
+    let host = request_host(&headers, &uri)?;
+    let (base, note) = link_base(&s, &host);
+    let playlists = playlists(&s).await?;
+
+    if q.format.as_deref() == Some("m3u") || (q.format.is_none() && is_vlc(&headers)) {
+        let albums = albums(&s, "", -1, 0).await?;
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "audio/x-mpegurl; charset=utf-8")
+            .header(
+                header::CONTENT_DISPOSITION,
+                "inline; filename=\"Kahawai library.m3u\"",
+            )
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(axum::body::Body::from(render_index(
+                &base, &playlists, &albums,
+            )))
+            .map_err(|e| ApiError::from(MusicError::Http(e.to_string())));
+    }
+
+    let filter = q.q.trim();
+    let total = count_albums(&s, filter).await?;
+    let pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
+    let page = q.page.unwrap_or(1).clamp(1, pages);
+    let albums = albums(&s, filter, PER_PAGE, (page - 1) * PER_PAGE).await?;
     let body = render(
         &base,
         note.as_deref(),
@@ -171,6 +228,34 @@ pub async fn home(
         .header(header::CACHE_CONTROL, "no-store")
         .body(axum::body::Body::from(body))
         .map_err(|e| ApiError::from(MusicError::Http(e.to_string())))
+}
+
+/// The library as one M3U for VLC: each playlist, then each album, as an
+/// entry pointing at its own M3U export. VLC opens an entry as a nested
+/// playlist when it's played. Durations are unknown here (`-1`).
+fn render_index(base: &str, playlists: &[Item], albums: &[Item]) -> String {
+    let line = |s: &str| {
+        s.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+    };
+    let mut out = String::with_capacity(64 + (playlists.len() + albums.len()) * 120);
+    out.push_str("#EXTM3U\n");
+    for p in playlists {
+        let _ = writeln!(out, "#EXTINF:-1,Playlist: {}", line(&p.name));
+        let _ = writeln!(out, "{base}/api/playlists/{}/export?format=m3u", p.id);
+    }
+    for a in albums {
+        let title = match (&a.artist, a.year) {
+            (Some(ar), Some(y)) => format!("{ar} - {} ({y})", a.name),
+            (Some(ar), None) => format!("{ar} - {}", a.name),
+            (None, Some(y)) => format!("{} ({y})", a.name),
+            (None, None) => a.name.clone(),
+        };
+        let _ = writeln!(out, "#EXTINF:-1,Album: {}", line(&title));
+        let _ = writeln!(out, "{base}/api/albums/{}/export?format=m3u", a.id);
+    }
+    out
 }
 
 /// `?q=…&page=…` for an album-list link.
@@ -201,10 +286,9 @@ fn rows(out: &mut String, base: &str, kind: &str, items: &[Item]) {
         } else {
             format!("{} tracks", it.tracks)
         };
-        let detail = if it.detail.is_empty() {
-            tracks
-        } else {
-            format!("{} · {tracks}", it.detail)
+        let detail = match it.detail() {
+            d if d.is_empty() => tracks,
+            d => format!("{d} · {tracks}"),
         };
         let _ = writeln!(
             out,
