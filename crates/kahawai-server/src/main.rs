@@ -92,6 +92,12 @@ impl AppState {
 pub(crate) static SHUTDOWN: std::sync::LazyLock<tokio::sync::Notify> =
     std::sync::LazyLock::new(tokio::sync::Notify::new);
 
+/// The last shutdown came from the operating system (SIGINT, SIGTERM), not
+/// from the app or the API. The desktop app then exits too: a terminate
+/// means the whole program, not just the server inside it.
+pub(crate) static SHUTDOWN_BY_SIGNAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Request bodies larger than this are rejected with 413 (S10).
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// API request timeout (S10): 60s covers even large playlist imports.
@@ -260,13 +266,17 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building the Kahawai Server desktop shell")
-        .run(|app, event| {
-            if let tauri::RunEvent::Reopen { .. } = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::Reopen { .. } => {
                 if let Some(main) = tauri::Manager::get_webview_window(app, "main") {
                     let _ = main.show();
                     let _ = main.set_focus();
                 }
             }
+            // Quitting (⌘Q, Quit App): stop the server gracefully first, so
+            // connected players are told and the database closes cleanly.
+            tauri::RunEvent::Exit => desktop::stop_server_for_exit(app),
+            _ => {}
         });
 }
 
@@ -343,6 +353,9 @@ pub async fn run_server_with_ready(
         // than wait for the next scan (which also does this, first thing).
         let pool = state.pool.clone();
         tokio::spawn(async move {
+            if let Err(e) = db::refresh_duplicates(&pool).await {
+                warn!(error = %e, "could not refresh duplicate tracks");
+            }
             if let Err(e) = genre::refresh_genres(&pool).await {
                 warn!(error = %e, "could not refresh genres");
             }
@@ -393,8 +406,8 @@ async fn shutdown_signal(events: tokio::sync::broadcast::Sender<ServerEvent>) {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        _ = ctrl_c => SHUTDOWN_BY_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst),
+        _ = terminate => SHUTDOWN_BY_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst),
         _ = SHUTDOWN.notified() => {},
     }
     info!("shutdown signal received; draining in-flight requests");
@@ -1459,6 +1472,128 @@ mod integration_tests {
             t.elapsed(),
             d.is_empty()
         );
+    }
+
+    /// The same album in two folders (a folder and a backup copy of it):
+    /// once hashed, each copy of a track points at the kept one and drops
+    /// out of the album, its count, genres, search and the players'
+    /// catalog. Removing the kept folder promotes the copies.
+    #[tokio::test]
+    async fn duplicate_copies_collapse_within_an_album() {
+        let (app, state, dir) = scanned_app().await;
+        let lib = dir.path().join("lib");
+        let album_tracks = |app: Router| async move {
+            let (_, albums) = get_json(&app, "/api/albums").await;
+            let a = albums["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["title"] == "Blue Train")
+                .unwrap()
+                .clone();
+            let (_, detail) = get_json(&app, &format!("/api/albums/{}", a["id"])).await;
+            (
+                a["track_count"].as_i64().unwrap(),
+                detail["tracks"].as_array().unwrap().len(),
+            )
+        };
+        assert_eq!(album_tracks(app.clone()).await, (3, 3));
+
+        let copy = dir.path().join("lib/Backup/Blue Train");
+        std::fs::create_dir_all(&copy).unwrap();
+        for f in ["01.flac", "02.flac", "03.wav"] {
+            std::fs::copy(lib.join("Blue Train").join(f), copy.join(f)).unwrap();
+        }
+        crate::scanner::run_scan_with_progress(&state.pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        // Before hashing, nothing says the copies are the same music.
+        assert_eq!(album_tracks(app.clone()).await, (6, 6));
+        let (_, snap) = get_json(&app, "/api/catalog").await;
+        let (id, rev) = (
+            snap["catalog_id"].as_str().unwrap().to_string(),
+            snap["rev"].as_i64().unwrap(),
+        );
+        assert_eq!(snap["tracks"].as_array().unwrap().len(), 11);
+        crate::hashing::hash_pending(&state.pool, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            db::refresh_duplicates(&state.pool).await.unwrap(),
+            3,
+            "changed"
+        );
+        genre::refresh_genres(&state.pool).await.unwrap();
+        assert_eq!(album_tracks(app.clone()).await, (3, 3));
+        // A second refresh changes nothing.
+        let rev_now: i64 = sqlx::query("SELECT value FROM meta WHERE key = 'catalog_rev'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(db::refresh_duplicates(&state.pool).await.unwrap(), 0);
+        let (_, snap) = get_json(&app, "/api/catalog").await;
+        assert_eq!(snap["rev"].as_i64().unwrap(), rev_now);
+        assert_eq!(snap["tracks"].as_array().unwrap().len(), 8);
+        assert!(snap["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| !t["path"].as_str().unwrap().contains("Backup")));
+        let (_, genres) = get_json(&app, "/api/genres").await;
+        let (_, found) = get_json(&app, "/api/search?q=Locomotion").await;
+        assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
+        let jazz = genres
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == "Jazz")
+            .unwrap()
+            .clone();
+        let (_, before) = get_json(&app, "/api/catalog").await;
+        assert_eq!(before["genres"], genres);
+
+        // A player that cached the copies before they were known to be
+        // copies: they come back as removed, not as changed tracks.
+        let dup_ids: Vec<i64> =
+            sqlx::query("SELECT id FROM tracks WHERE duplicate_of IS NOT NULL ORDER BY id")
+                .fetch_all(&state.pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+        assert!(dup_ids.iter().all(|&i| i > 8), "the first copies are kept");
+        let (_, d) = get_json(
+            &app,
+            &format!("/api/catalog/delta?since={rev}&catalog_id={id}"),
+        )
+        .await;
+        let d: kahawai_core::CatalogDelta = serde_json::from_value(d).unwrap();
+        assert!(!d.full_resync);
+        assert!(d.tracks.is_empty(), "{:?}", d.tracks);
+        assert_eq!(d.removed_tracks, dup_ids);
+
+        // The kept folder goes: the copies take its place.
+        std::fs::remove_dir_all(lib.join("Blue Train")).unwrap();
+        crate::scanner::run_scan_with_progress(&state.pool, std::slice::from_ref(&lib), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(album_tracks(app.clone()).await, (3, 3));
+        let (_, found) = get_json(&app, "/api/search?q=Locomotion").await;
+        assert!(
+            found[0]["path"].as_str().unwrap().contains("Backup"),
+            "{found}"
+        );
+        let (_, genres) = get_json(&app, "/api/genres").await;
+        let jazz_after = genres
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == "Jazz")
+            .unwrap()
+            .clone();
+        assert_eq!(jazz_after["track_count"], jazz["track_count"]);
     }
 
     /// The player's catalog: a snapshot with its revision, then deltas that

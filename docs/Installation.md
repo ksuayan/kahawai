@@ -68,7 +68,7 @@ macOS may ask:
 **Keep the server running while you listen.** Closing its window keeps the server running
 (click its Dock icon to bring the window back). **Quit** (⌘Q, or **Quit App** on the Status
 tab) stops it. To start it automatically, add it in **System Settings → General → Login
-Items**.
+Items**. Quitting the server also lets connected players know it's gone.
 
 ### 4. Connect the player
 
@@ -158,9 +158,13 @@ says so), but it needs the server to play.
 
 ### Some tracks appear twice
 
-The same music is in two of your folders (a folder and a copy of it, say). Remove one of
-them from **Settings → Music folders**. To tell copies apart, right-click a track or album
-in the Player and choose **Info**: it shows where each file lives.
+The same music is in two of your folders (a folder and a copy of it, say). Identical copies
+of an album's tracks are combined automatically once the server has fingerprinted them,
+which happens in the background after a scan, so they may show twice for a while after you
+add a folder. Copies that differ (another format, or re-tagged files) stay separate; remove
+one of the folders from **Settings → Music folders** if you don't want both. To tell copies
+apart, right-click a track or album in the Player and choose **Info**: it shows where each
+file lives.
 
 ### The first scan is slow
 

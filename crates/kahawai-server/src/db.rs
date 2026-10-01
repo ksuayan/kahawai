@@ -75,6 +75,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         (10, include_str!("../migrations/010_catalog_rev.sql")),
         (11, include_str!("../migrations/011_indexes.sql")),
         (12, include_str!("../migrations/012_job_times.sql")),
+        (13, include_str!("../migrations/013_duplicates.sql")),
     ];
     // One connection throughout: `PRAGMA foreign_keys` is per connection, and
     // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off
@@ -243,7 +244,7 @@ pub async fn tracks_where(
 pub async fn tracks_for_album(pool: &SqlitePool, album_id: i64) -> Result<Vec<Track>, MusicError> {
     let rows = sqlx::query(&format!(
         "SELECT {TRACK_COLS} FROM tracks \
-         WHERE album_id = ? AND missing = 0 \
+         WHERE album_id = ? AND missing = 0 AND duplicate_of IS NULL \
          ORDER BY disc_no, track_no, id"
     ))
     .bind(album_id)
@@ -251,6 +252,73 @@ pub async fn tracks_for_album(pool: &SqlitePool, album_id: i64) -> Result<Vec<Tr
     .await
     .map_err(cvt)?;
     Ok(rows.iter().map(track_from_row).collect())
+}
+
+/// A duplicate copy of another track (migration 013)?
+pub async fn is_duplicate(pool: &SqlitePool, id: i64) -> Result<bool, MusicError> {
+    Ok(
+        sqlx::query("SELECT duplicate_of IS NOT NULL FROM tracks WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(cvt)?
+            .is_some_and(|r| r.get::<bool, _>(0)),
+    )
+}
+
+/// Mark duplicate copies (migration 013): among the present, hashed tracks
+/// of an album, those with the same content hash keep the lowest id and the
+/// rest point at it. Only rows whose value changes are written, so an
+/// unchanged library costs one read and bumps no revisions. Run after every
+/// scan, after hashing, and at startup. Returns how many tracks changed
+/// (became, or stopped being, a duplicate).
+pub async fn refresh_duplicates(pool: &SqlitePool) -> Result<u64, MusicError> {
+    let rows = sqlx::query(
+        "SELECT t.id, t.duplicate_of,
+           CASE WHEN t.missing = 0 THEN
+             (SELECT MIN(k.id) FROM tracks k
+              WHERE k.album_id = t.album_id AND k.hash = t.hash AND k.missing = 0)
+           END AS keep
+         FROM tracks t
+         WHERE t.missing = 0 OR t.duplicate_of IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(cvt)?;
+    let mut changes = Vec::new();
+    let mut duplicates = 0u64;
+    for r in &rows {
+        let id: i64 = r.get(0);
+        let current: Option<i64> = r.get(1);
+        let keep: Option<i64> = r.get(2);
+        // keep is NULL for a missing track, or one without an album or a
+        // hash yet: none of them is a duplicate.
+        let want = keep.filter(|&k| k != id);
+        if want.is_some() {
+            duplicates += 1;
+        }
+        if want != current {
+            changes.push((id, want));
+        }
+    }
+    if !changes.is_empty() {
+        let mut tx = pool.begin().await.map_err(cvt)?;
+        for (id, want) in &changes {
+            sqlx::query("UPDATE tracks SET duplicate_of = ? WHERE id = ?")
+                .bind(want)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(cvt)?;
+        }
+        tx.commit().await.map_err(cvt)?;
+        tracing::info!(
+            changed = changes.len(),
+            duplicates,
+            "duplicate tracks refreshed"
+        );
+    }
+    Ok(changes.len() as u64)
 }
 
 /// Sort orders for a genre's tracks: by artist, album title or year, either
@@ -298,7 +366,7 @@ pub async fn tracks_for_genre(
 ) -> Result<(Vec<Track>, u64), MusicError> {
     let total: i64 = sqlx::query(
         "SELECT COUNT(*) FROM track_genres g JOIN tracks t ON t.id = g.track_id
-         WHERE g.genre = ? AND t.missing = 0",
+         WHERE g.genre = ? AND t.missing = 0 AND t.duplicate_of IS NULL",
     )
     .bind(genre)
     .fetch_one(pool)
@@ -312,7 +380,7 @@ pub async fn tracks_for_genre(
         .join(", ");
     let rows = sqlx::query(&format!(
         "SELECT {cols} FROM track_genres g JOIN tracks t ON t.id = g.track_id
-         WHERE g.genre = ? AND t.missing = 0
+         WHERE g.genre = ? AND t.missing = 0 AND t.duplicate_of IS NULL
          ORDER BY {}
          LIMIT ? OFFSET ?",
         order.sql()
@@ -386,7 +454,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
 
         // Old row survived; new columns carry their defaults.
@@ -471,7 +539,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
@@ -542,7 +610,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
         let r =
             sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
@@ -732,13 +800,13 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
     }
 }

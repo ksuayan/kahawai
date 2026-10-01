@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useAnalogStore, type Slot } from "./analog";
 
 /** Which of the three listening choices is playing: the two references, or the hidden X. */
@@ -13,6 +13,10 @@ export interface Trial {
 
 /** The two levels may differ by this much (dB) before a blind test is considered unfair. */
 export const MATCH_TOLERANCE_DB = 0.5;
+/** Once matched, the levels count as matched until they differ by more than
+ *  this. The measured difference keeps moving during playback; a single
+ *  cutoff made "matched" (and the UI around it) flicker near 0.5 dB. */
+export const UNMATCH_TOLERANCE_DB = 0.7;
 
 /** One-sided binomial probability of getting at least `k` of `n` right by guessing (p = 0.5). */
 export function guessingChance(n: number, k: number): number {
@@ -56,7 +60,19 @@ export const useAbxStore = defineStore("abx", () => {
     const { a, b } = analog.measured;
     return a === null || b === null ? null : Math.abs(a - b);
   });
-  const levelMatched = computed(() => levelDifference.value !== null && levelDifference.value <= MATCH_TOLERANCE_DB);
+  /** Level-matched, with hysteresis: matched at ≤ MATCH_TOLERANCE_DB,
+   *  unmatched again only above UNMATCH_TOLERANCE_DB. */
+  const matchedState = ref(false);
+  watch(
+    levelDifference,
+    (d) => {
+      if (d === null) matchedState.value = false;
+      else if (d <= MATCH_TOLERANCE_DB) matchedState.value = true;
+      else if (d > UNMATCH_TOLERANCE_DB) matchedState.value = false;
+    },
+    { immediate: true, flush: "sync" },
+  );
+  const levelMatched = computed(() => matchedState.value);
   /** Identical settings make the test meaningless. */
   const slotsDiffer = computed(() => JSON.stringify(analog.a) !== JSON.stringify(analog.b));
 

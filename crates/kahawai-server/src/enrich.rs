@@ -109,7 +109,8 @@ pub async fn enrich_pending(
     loop {
         let rows = sqlx::query(&format!(
             "SELECT a.id, a.title, a.artist, a.year, a.artwork_hash,
-               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.missing = 0) AS n
+               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.missing = 0
+                  AND t.duplicate_of IS NULL) AS n
              FROM albums a WHERE a.id > ? AND {} ORDER BY a.id LIMIT ?",
             pending_clause()
         ))

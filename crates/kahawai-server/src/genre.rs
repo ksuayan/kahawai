@@ -183,8 +183,9 @@ pub fn normalize_genre(raw: &str) -> Vec<String> {
 }
 
 /// Rebuild `genre_map` and `track_genres` from the raw tags in `tracks`.
-/// `track_genres` links present tracks only (tracks go missing only in a
-/// scan, which ends with this), so genre counts need no join.
+/// `track_genres` links present tracks only, leaving out duplicate copies
+/// (tracks go missing only in a scan, which ends with this, after
+/// `db::refresh_duplicates`), so genre counts need no join.
 /// Every distinct raw value is mapped (a few hundred strings even for a big
 /// library), so this is cheap enough to run after every scan.
 pub async fn refresh_genres(pool: &SqlitePool) -> Result<(), MusicError> {
@@ -230,7 +231,7 @@ pub async fn refresh_genres(pool: &SqlitePool) -> Result<(), MusicError> {
     let linked = sqlx::query(
         "INSERT OR IGNORE INTO track_genres (track_id, genre)
          SELECT t.id, m.genre FROM tracks t JOIN genre_map m ON m.raw = t.genre
-         WHERE m.genre IS NOT NULL AND t.missing = 0",
+         WHERE m.genre IS NOT NULL AND t.missing = 0 AND t.duplicate_of IS NULL",
     )
     .execute(&mut *tx)
     .await

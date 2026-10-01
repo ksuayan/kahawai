@@ -327,6 +327,18 @@ describe("Analog warmth: blind test", () => {
     expect(wrapper.get('[data-testid="blind-check"]').text()).toContain("Levels are matched");
   });
 
+  it("keeps the 'Start anyway' checkbox in place (dimmed and disabled) instead of making it come and go", async () => {
+    const { wrapper, store } = await boot();
+    const box = () => wrapper.get('[data-testid="blind-anyway"]');
+    store.measured.b = 2.0; // unmatched: needed
+    await settle();
+    expect(box().attributes("disabled")).toBeUndefined();
+    store.measured.b = 0.1; // matched: not needed, but still there
+    await settle();
+    expect(box().attributes("disabled")).toBeDefined();
+    expect(box().element.closest("label")!.className).toContain("opacity-40");
+  });
+
   it("hides everything that would give X away while it runs", async () => {
     const { wrapper } = await ready();
     expect(wrapper.find('[data-testid="slots"]').exists()).toBe(true);

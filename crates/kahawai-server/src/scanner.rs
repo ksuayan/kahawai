@@ -369,6 +369,8 @@ async fn scan_with_workers(
     }
     // Merges and "Various Artists" promotions change album artists.
     refresh_keys(pool).await?;
+    // Copies of the same file on one album: files came and went.
+    db::refresh_duplicates(pool).await?;
     // New and re-read files may carry new genre tags.
     crate::genre::refresh_genres(pool).await?;
     // A scan can change table sizes a lot (a first scan most of all): keep

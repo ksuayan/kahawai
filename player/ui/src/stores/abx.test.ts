@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
 import { tauri } from "../test/tauri-mock";
-import { guessingChance, MATCH_TOLERANCE_DB, useAbxStore } from "./abx";
+import { guessingChance, MATCH_TOLERANCE_DB, UNMATCH_TOLERANCE_DB, useAbxStore } from "./abx";
 import { useAnalogStore } from "./analog";
 
 const sent = () => tauri.callsTo("set_analog").map((c) => (c as { settings: { flavour: string; enabled: boolean } }).settings);
@@ -46,13 +46,25 @@ describe("ABX blind test", () => {
     expect(abx.slotsDiffer).toBe(true);
     expect(abx.levelMatched).toBe(true);
     expect(abx.levelDifference).toBeCloseTo(0.2, 5);
-    analog.measured.b = 1.0 + MATCH_TOLERANCE_DB + 0.1;
+    analog.measured.b = 1.0 + UNMATCH_TOLERANCE_DB + 0.1;
     expect(abx.levelMatched).toBe(false);
     analog.measured.b = null;
     expect(abx.levelDifference).toBeNull();
     expect(abx.levelMatched).toBe(false);
     analog.copy("a", "b");
     expect(abx.slotsDiffer).toBe(false);
+  });
+
+  it("doesn't flicker near the tolerance: matched at 0.5 dB, unmatched only above 0.7 dB", () => {
+    const { analog, abx } = ready(); // 0.2 dB apart: matched
+    const at = (diff: number) => {
+      analog.measured.b = (analog.measured.a ?? 0) + diff;
+      return abx.levelMatched;
+    };
+    expect([at(0.45), at(0.6), at(0.55), at(0.69)]).toEqual([true, true, true, true]); // stays matched
+    expect(at(0.75)).toBe(false);
+    expect([at(0.6), at(0.55), at(0.69)]).toEqual([false, false, false]); // stays unmatched
+    expect(at(0.5)).toBe(true);
   });
 
   it("hearing X plays the hidden slot, while the UI only ever sees 'x'", () => {
