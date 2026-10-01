@@ -927,4 +927,94 @@ mod tests {
         assert_eq!(body.matches("#EXTINF").count(), 504);
         assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
     }
+
+    // ------------------------------------------------------------------
+    // D2: Content-Disposition on /stream
+    // ------------------------------------------------------------------
+
+    async fn disposition_of(app: &Router, method: &str, uri: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            res.status().is_success(),
+            "{method} {uri}: {}",
+            res.status()
+        );
+        res.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .expect("visible ASCII")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn streams_name_the_track_with_the_rendition_extension() {
+        let lib = library().await;
+        for method in ["GET", "HEAD"] {
+            assert_eq!(
+                disposition_of(&lib.app, method, "/stream/1").await,
+                "inline; filename=\"Miles Davis - So What.mp3\""
+            );
+            assert_eq!(
+                disposition_of(&lib.app, method, "/stream/1?format=passthrough").await,
+                "inline; filename=\"Miles Davis - So What.mp3\""
+            );
+            // A transcode is named for what it is, not for its source.
+            assert_eq!(
+                disposition_of(&lib.app, method, "/stream/3?format=flac").await,
+                "inline; filename=\"Miles Davis - Blue in Green.flac\""
+            );
+            assert_eq!(
+                disposition_of(&lib.app, method, "/stream/3?format=dop").await,
+                "inline; filename=\"Miles Davis - Blue in Green.wav\""
+            );
+            // No tags: the fallback, with the source's own extension.
+            assert_eq!(
+                disposition_of(&lib.app, method, "/stream/6").await,
+                "inline; filename=\"track-6.wav\""
+            );
+            // CJK: ASCII fallback plus the RFC 5987 form.
+            assert_eq!(
+                disposition_of(&lib.app, method, "/stream/7").await,
+                "inline; filename=\"track-7.flac\"; filename*=UTF-8''\
+                 %E5%9D%82%E6%9C%AC%E9%BE%8D%E4%B8%80%20-%20\
+                 %E6%88%A6%E5%A0%B4%E3%81%AE%E3%83%A1%E3%83%AA%E3%83%BC\
+                 %E3%82%AF%E3%83%AA%E3%82%B9%E3%83%9E%E3%82%B9.flac"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ranged_and_untitled_by_artist_streams_are_named_too() {
+        let lib = library().await;
+        sqlx::query("UPDATE tracks SET artist = NULL WHERE id = 2")
+            .execute(&lib.state.pool)
+            .await
+            .unwrap();
+        let res = lib
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/stream/2")
+                    .header(header::RANGE, "bytes=1-2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            res.headers()[header::CONTENT_DISPOSITION],
+            "inline; filename=\"Freddie Freeloader.flac\""
+        );
+    }
 }

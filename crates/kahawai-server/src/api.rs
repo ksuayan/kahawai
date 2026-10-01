@@ -1681,13 +1681,51 @@ pub async fn stream_track(
         q.seek_ms,
     )?;
 
-    match plan {
+    let disposition = stream_disposition(&track, &path, plan.as_ref().map(|p| p.target));
+    let mut res = match plan {
         // `path` was canonicalized + root-checked above; the passthrough
         // open reuses it rather than re-reading the DB string.
         None => stream_passthrough(&track, fmt, &path, headers, next_track.map(|t| t.id)).await,
         Some(plan) if plan.target == StreamFormat::Dop => stream_dop(&s, plan, next_track).await,
         Some(plan) => stream_transcode(&s, plan, next_track).await,
-    }
+    }?;
+    res.headers_mut()
+        .insert(header::CONTENT_DISPOSITION, disposition);
+    Ok(res)
+}
+
+/// `Content-Disposition: inline; filename="Artist - Title.ext"` for a
+/// stream, so players that show the URL's filename (VLC) show the track
+/// instead of `/stream/123`. The extension is the rendition's: the source
+/// file's own for passthrough (`target` = `None`), the encoder's for a
+/// transcode, `.wav` for DoP. Falls back to `track-{id}.{ext}` without a
+/// title.
+fn stream_disposition(
+    track: &Track,
+    path: &std::path::Path,
+    target: Option<StreamFormat>,
+) -> header::HeaderValue {
+    let ext = match target {
+        None | Some(StreamFormat::Passthrough) => path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_else(|| track.format.wire_name().to_string()),
+        Some(StreamFormat::Flac) => "flac".into(),
+        Some(StreamFormat::Opus) => "opus".into(),
+        Some(StreamFormat::Mp3) => "mp3".into(),
+        Some(StreamFormat::Dop) => "wav".into(),
+    };
+    let name = match (present(&track.artist), present(&track.title)) {
+        (Some(artist), Some(title)) => format!("{artist} - {title}.{ext}"),
+        (None, Some(title)) => format!("{title}.{ext}"),
+        (_, None) => String::new(),
+    };
+    stream::content_disposition("inline", &name, &format!("track-{}.{ext}", track.id))
+}
+
+/// A tag value with content, trimmed.
+fn present(s: &Option<String>) -> Option<&str> {
+    s.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
 /// Byte-for-byte passthrough with full HTTP Range support (S3, S4).
@@ -1962,7 +2000,8 @@ pub async fn stream_head(
         q.seek_ms,
     )?;
 
-    match plan {
+    let disposition = stream_disposition(&track, &path, plan.as_ref().map(|p| p.target));
+    let mut res = match plan {
         None => {
             let total = tokio::fs::metadata(&path)
                 .await
@@ -1981,7 +2020,7 @@ pub async fn stream_head(
                 .body(axum::body::Body::empty())
                 .map_err(|e| ApiError(MusicError::Http(e.to_string())))?;
             insert_chain(&mut res, &transcode::passthrough_chain(fmt));
-            Ok(res)
+            res
         }
         Some(plan) => {
             // Mirror GET's metadata minus the body: target MIME, no
@@ -2003,7 +2042,10 @@ pub async fn stream_head(
                 .body(axum::body::Body::empty())
                 .map_err(|e| ApiError(MusicError::Http(e.to_string())))?;
             insert_chain(&mut res, &chain);
-            Ok(res)
+            res
         }
-    }
+    };
+    res.headers_mut()
+        .insert(header::CONTENT_DISPOSITION, disposition);
+    Ok(res)
 }
