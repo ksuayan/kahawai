@@ -11,6 +11,14 @@ use std::sync::{Arc, RwLock};
 
 use kahawai_core::{api::StreamFormat, MusicError};
 
+use crate::readahead::ReadAhead;
+
+/// How far ahead of the playhead an HTTP stream is buffered, in bytes. About
+/// 28 s of the heaviest PCM we stream (24-bit / 192 kHz stereo, ~1.15 MB/s) and
+/// much longer for everything lighter, which is enough to ride out a Wi-Fi
+/// dropout without holding a whole album in memory. 0 turns read-ahead off.
+pub const DEFAULT_READ_AHEAD_BYTES: usize = 32 * 1024 * 1024;
+
 /// How to open one stream. Mirrors the server's `StreamQuery` (§3.4).
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
@@ -93,6 +101,8 @@ pub trait Transport: Send {
 pub struct HttpTransport {
     base_url: Arc<RwLock<String>>,
     agent: ureq::Agent,
+    /// Read-ahead buffer size per stream; 0 reads the body directly.
+    read_ahead_bytes: usize,
 }
 
 impl HttpTransport {
@@ -100,7 +110,14 @@ impl HttpTransport {
         Self {
             base_url: Arc::new(RwLock::new(base_url.into())),
             agent: ureq::Agent::new_with_defaults(),
+            read_ahead_bytes: DEFAULT_READ_AHEAD_BYTES,
         }
+    }
+
+    /// Set the per-stream read-ahead buffer (bytes; 0 = none).
+    pub fn with_read_ahead(mut self, bytes: usize) -> Self {
+        self.read_ahead_bytes = bytes;
+        self
     }
 
     /// Share ownership of the base URL with the engine, so a settings
@@ -109,6 +126,7 @@ impl HttpTransport {
         Self {
             base_url,
             agent: ureq::Agent::new_with_defaults(),
+            read_ahead_bytes: DEFAULT_READ_AHEAD_BYTES,
         }
     }
 
@@ -170,12 +188,20 @@ impl Transport for HttpTransport {
         let gapless_mode = header("x-gapless-mode");
         let content_length = header("content-length").and_then(|v| v.parse::<u64>().ok());
         let received = Arc::new(AtomicU64::new(0));
-        let reader = CountingReader {
+        // The counter sits on the network side, so with read-ahead `received`
+        // is what has been fetched (ahead of the playhead), which is exactly
+        // what the seek bar's buffered fill should show.
+        let counting = CountingReader {
             inner: resp.into_body().into_reader(),
             count: received.clone(),
         };
+        let reader: Box<dyn Read + Send> = if self.read_ahead_bytes > 0 {
+            Box::new(ReadAhead::new(counting, self.read_ahead_bytes))
+        } else {
+            Box::new(counting)
+        };
         Ok(StreamInfo {
-            reader: Box::new(reader),
+            reader,
             progress: Some(StreamProgress {
                 received,
                 content_length,
@@ -290,12 +316,13 @@ mod tests {
         );
     }
 
+    const TEN_BYTES: &str = "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789";
+
     #[test]
     fn progress_counts_bytes_read_against_content_length() {
-        let stub = Stub::serve_once(
-            "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
-        );
-        let t = HttpTransport::new(format!("http://{}", stub.addr));
+        // Without read-ahead the counter follows the consumer byte for byte.
+        let stub = Stub::serve_once(TEN_BYTES);
+        let t = HttpTransport::new(format!("http://{}", stub.addr)).with_read_ahead(0);
         let mut info = t.open_stream(1, &StreamOptions::default()).expect("open");
         let p = info
             .progress
@@ -309,6 +336,25 @@ mod tests {
         let mut rest = Vec::new();
         info.reader.read_to_end(&mut rest).unwrap();
         assert_eq!(p.fraction(), Some(1.0));
+    }
+
+    #[test]
+    fn with_read_ahead_progress_is_what_was_fetched_not_what_was_played() {
+        // The buffer pulls the body off the network on its own, so the seek
+        // bar's fill runs ahead of the reader: here it is full before a byte
+        // has been consumed, and the bytes still arrive intact.
+        let stub = Stub::serve_once(TEN_BYTES);
+        let t = HttpTransport::new(format!("http://{}", stub.addr));
+        let mut info = t.open_stream(1, &StreamOptions::default()).expect("open");
+        let p = info.progress.clone().expect("progress");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while p.fraction() != Some(1.0) && std::time::Instant::now() < end {
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(p.fraction(), Some(1.0), "fetched ahead of the reader");
+        let mut body = Vec::new();
+        info.reader.read_to_end(&mut body).unwrap();
+        assert_eq!(body, b"0123456789");
     }
 
     #[test]
