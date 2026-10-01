@@ -735,6 +735,7 @@ mod tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: crate::transcode_cache::TranscodeCache::disabled(),
         };
         Lib {
             app: crate::app(state.clone()),

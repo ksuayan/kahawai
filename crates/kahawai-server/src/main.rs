@@ -25,6 +25,7 @@ mod resample;
 mod scanner;
 mod stream;
 mod transcode;
+mod transcode_cache;
 
 use std::sync::Arc;
 
@@ -73,6 +74,8 @@ pub struct AppState {
     /// polling for either. No receivers is not an error — `send` on an
     /// empty broadcast channel just means nobody's listening.
     pub catalog_events: tokio::sync::broadcast::Sender<ServerEvent>,
+    /// Rendered single-track transcodes, served with byte ranges (D3).
+    pub transcode_cache: transcode_cache::TranscodeCache,
 }
 
 impl AppState {
@@ -326,6 +329,14 @@ pub async fn run_server_with_ready(
         hash_lock: Arc::new(tokio::sync::Mutex::new(())),
         enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
         catalog_events,
+        transcode_cache: transcode_cache::TranscodeCache::open(
+            config
+                .db_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("transcode-cache"),
+            config.transcode_cache_mb << 20,
+        ),
     };
     if let Some(tx) = ready {
         let _ = tx.send(state.clone());
@@ -462,6 +473,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         (app(state.clone()), state, dir, fixture)
     }
@@ -487,6 +499,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         (app(state.clone()), state, dir)
     }
@@ -1383,6 +1396,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         let app = app(state);
 
@@ -2199,6 +2213,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         (app(state), dir)
     }
@@ -2451,6 +2466,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         (app(state.clone()), state, dir, bits)
     }
@@ -2728,6 +2744,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         let app = app(state);
         let res = app
@@ -2768,6 +2785,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         let app = app(state);
         let res = app
@@ -2819,6 +2837,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         let app = app(state);
         let res = app
@@ -2879,6 +2898,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         let app = app(state);
         let res = app
@@ -2938,6 +2958,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         let app = app(state);
         // Track 2's file is outside the roots → 404 (indistinguishable
@@ -2993,6 +3014,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         let app = app(state);
         let res = app
@@ -3091,6 +3113,7 @@ mod integration_tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            transcode_cache: transcode_cache::TranscodeCache::disabled(),
         };
         (app(state), dir)
     }
