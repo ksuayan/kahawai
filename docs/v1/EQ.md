@@ -150,7 +150,7 @@ flowchart LR
     vol --> sink["sink"]
 ```
 
-That trait now exists in [dsp/mod.rs](../../crates/kahawai-player-core/src/dsp/mod.rs) and is implemented by both the EQ and the analog stage (`AnalogStage`, [dsp/analog.rs](../../crates/kahawai-player-core/src/dsp/analog.rs)):
+That trait now exists in [dsp/mod.rs](../../crates/kahawai-player-core/src/dsp/mod.rs) and is implemented by both the EQ and the analog stage (`AnalogStage`, [dsp/analog/stage.rs](../../crates/kahawai-player-core/src/dsp/analog/stage.rs)):
 
 ```rust
 // kahawai-player-core: platform-free

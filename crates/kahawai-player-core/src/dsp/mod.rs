@@ -2,7 +2,7 @@
 //!
 //! - [`crossfeed`]: headphone crossfeed (bs2b).
 //! - [`eq`]: the parametric EQ, built on the [`biquad`] filters.
-//! - [`analog`]: analog character (tape, tube and the rest).
+//! - [`analog`]: analog character: tube and solid-state warmth.
 //! - [`loudness`]: loudness metering, normalization and the track pre-scan.
 //! - [`gain_ramp`]: click-free gain changes on track boundaries.
 //! - [`limiter`]: the look-ahead limiter and headroom guard at the end of the chain.

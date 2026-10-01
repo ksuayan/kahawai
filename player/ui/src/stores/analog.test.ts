@@ -115,7 +115,7 @@ describe("flavour list stays in step with the Rust core", () => {
   it("has exactly the flavours the core's round-trip test names", async () => {
     const { readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const rust = readFileSync(join(__dirname, "../../../../crates/kahawai-player-core/src/dsp/analog.rs"), "utf8");
+    const rust = readFileSync(join(__dirname, "../../../../crates/kahawai-player-core/src/dsp/analog/tests.rs"), "utf8");
     const names = [...rust.matchAll(/\(AnalogFlavour::\w+, "([a-z0-9_]+)"\)/g)].map((m) => m[1]);
     expect(names.length).toBeGreaterThan(0);
     expect([...ANALOG_FLAVOURS].sort()).toEqual([...names].sort());

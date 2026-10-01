@@ -91,7 +91,7 @@ Cost: ~10 multiply-adds per sample per channel plus a delay line of dozens of sa
 
 - New field `crossfeed: CrossfeedStage` on the engine struct, with `set_crossfeed()` mirroring `set_analog()` (`engine.rs:1131`): no-op when settings are unchanged, live-applied otherwise.
 - Chain position: **first, before EQ**. Rationale: crossfeed simulates the speaker acoustics; EQ corrects the headphone's own response, so it should correct the signal as the ear will actually receive it. This amends the fixed-order comment at `engine.rs:1670`.
-- Never invoked on the DoP / bit-perfect path — same exclusion the analog stage documents (`dsp/analog.rs` module docs: "the DoP and bit-perfect paths never call it").
+- Never invoked on the DoP / bit-perfect path — same exclusion the analog stage documents (`dsp/analog/mod.rs` module docs: "the DoP and bit-perfect paths never call it").
 - `signalPath.ts` gains the crossfeed entry so the signal-path display stays truthful.
 
 ## 6. Tauri API and frontend
