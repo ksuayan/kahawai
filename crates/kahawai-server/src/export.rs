@@ -149,7 +149,7 @@ pub fn render_pls(entries: &[Entry]) -> String {
 }
 
 /// XML text escaping; characters XML 1.0 cannot carry at all are dropped.
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -199,12 +199,11 @@ pub fn render_xspf(title: &str, entries: &[Entry]) -> String {
     out
 }
 
-/// `http://{host}` for the request, from its `Host` header (or the URI
-/// authority, as HTTP/2 sends it). The port comes with it, so the URLs
-/// point wherever the client reached this server. Validated before it is
-/// written into a playlist: a host name, IPv4 or bracketed IPv6 address
+/// The host (and port) the client addressed, from the `Host` header (or
+/// the URI authority, as HTTP/2 sends it). Validated before it is written
+/// into a playlist or page: a host name, IPv4 or bracketed IPv6 address
 /// and an optional port, nothing else.
-pub fn base_url(headers: &HeaderMap, uri: &Uri) -> Result<String, MusicError> {
+pub(crate) fn request_host(headers: &HeaderMap, uri: &Uri) -> Result<String, MusicError> {
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -217,6 +216,83 @@ pub fn base_url(headers: &HeaderMap, uri: &Uri) -> Result<String, MusicError> {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'));
     if !valid {
         return Err(MusicError::BadRequest("invalid Host header".into()));
+    }
+    Ok(host)
+}
+
+/// `host[:port]` split into the name and the port, if any. IPv6 keeps its
+/// brackets (`[::1]:8080` → `[::1]`, `8080`).
+pub(crate) fn split_host(host: &str) -> (&str, Option<&str>) {
+    if let Some(end) = host.find(']') {
+        let (name, rest) = host.split_at(end + 1);
+        return (name, rest.strip_prefix(':'));
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host, None),
+    }
+}
+
+/// `0.0.0.0` / `[::]`: the server's "listen on every network" setting,
+/// which no other device can connect to.
+pub(crate) fn is_unspecified_host(name: &str) -> bool {
+    matches!(name, "0.0.0.0" | "[::]" | "[0:0:0:0:0:0:0:0]")
+}
+
+/// An address that reaches the server only from the server's own machine.
+pub(crate) fn is_local_only_host(name: &str) -> bool {
+    is_unspecified_host(name)
+        || name.eq_ignore_ascii_case("localhost")
+        || name.starts_with("127.")
+        || name == "[::1]"
+}
+
+/// `http://{lan address}:{port}`: where other devices on the network reach
+/// this server. The configured `bind` address when it names one; otherwise
+/// the local address the OS would route LAN traffic from (a UDP `connect`
+/// to a documentation address: nothing is sent). `None` when neither is
+/// known.
+pub(crate) fn lan_base(s: &AppState, port: Option<&str>) -> Option<String> {
+    let bind: Option<std::net::SocketAddr> = s.config.read().unwrap().bind.parse().ok();
+    let port = port
+        .map(str::to_string)
+        .or_else(|| bind.map(|b| b.port().to_string()))?;
+    let ip = match bind {
+        Some(b) if !b.ip().is_unspecified() && !b.ip().is_loopback() => b.ip(),
+        _ => {
+            let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+            sock.connect("192.0.2.1:9").ok()?;
+            let ip = sock.local_addr().ok()?.ip();
+            if ip.is_unspecified() || ip.is_loopback() {
+                return None;
+            }
+            ip
+        }
+    };
+    Some(match ip {
+        std::net::IpAddr::V4(v4) => format!("http://{v4}:{port}"),
+        std::net::IpAddr::V6(v6) => format!("http://[{v6}]:{port}"),
+    })
+}
+
+/// `http://{host}` for an export's entries: the address the client used,
+/// port included, so the URLs point wherever it reached this server.
+/// `0.0.0.0` is refused, with the address to use instead: entries built
+/// from it would fail on every other device.
+pub fn base_url(s: &AppState, headers: &HeaderMap, uri: &Uri) -> Result<String, MusicError> {
+    let host = request_host(headers, uri)?;
+    let (name, port) = split_host(&host);
+    if is_unspecified_host(name) {
+        let instead = match lan_base(s, port) {
+            Some(lan) => format!(
+                " Use the server's network address, such as {lan}{}.",
+                uri.path()
+            ),
+            None => " Use the server's network address.".to_string(),
+        };
+        return Err(MusicError::BadRequest(format!(
+            "{name} means \"listen on every network\"; no other device can reach it.{instead}"
+        )));
     }
     Ok(format!("http://{host}"))
 }
@@ -326,7 +402,7 @@ pub async fn export_playlist(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    let base = base_url(&headers, &uri)?;
+    let base = base_url(&s, &headers, &uri)?;
     let name: String = sqlx::query("SELECT name FROM playlists WHERE id = ?")
         .bind(id)
         .fetch_optional(&s.pool)
@@ -387,7 +463,7 @@ pub async fn export_album(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    let base = base_url(&headers, &uri)?;
+    let base = base_url(&s, &headers, &uri)?;
     let row = sqlx::query("SELECT title, artist FROM albums WHERE id = ?")
         .bind(id)
         .fetch_optional(&s.pool)
@@ -534,7 +610,22 @@ mod tests {
     }
 
     #[test]
-    fn base_url_uses_the_host_header_and_validates_it() {
+    fn hosts_split_into_name_and_port() {
+        assert_eq!(split_host("10.0.0.5:8080"), ("10.0.0.5", Some("8080")));
+        assert_eq!(split_host("music"), ("music", None));
+        assert_eq!(split_host("[fe80::1]:8080"), ("[fe80::1]", Some("8080")));
+        assert_eq!(split_host("[::]"), ("[::]", None));
+        for local in ["0.0.0.0", "[::]", "localhost", "127.0.0.1", "[::1]"] {
+            assert!(is_local_only_host(local), "{local}");
+        }
+        assert!(!is_local_only_host("10.0.0.233"));
+        assert!(is_unspecified_host("0.0.0.0") && !is_unspecified_host("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn base_url_uses_the_host_header_and_validates_it() {
+        let lib = library().await;
+        let s = &lib.state;
         let uri: Uri = "/api/playlists/1/export".parse().unwrap();
         let mut h = HeaderMap::new();
         for ok in [
@@ -542,21 +633,22 @@ mod tests {
             "nas.local:8080",
             "[fe80::1]:8080",
             "music",
+            "127.0.0.1:8080",
         ] {
             h.insert(header::HOST, ok.parse().unwrap());
-            assert_eq!(base_url(&h, &uri).unwrap(), format!("http://{ok}"));
+            assert_eq!(base_url(s, &h, &uri).unwrap(), format!("http://{ok}"));
         }
         for bad in ["evil.com/x", "a b", "h\"x", "h<x>"] {
             h.insert(header::HOST, bad.parse().unwrap());
-            assert!(base_url(&h, &uri).is_err(), "{bad}");
+            assert!(base_url(s, &h, &uri).is_err(), "{bad}");
         }
         // HTTP/2: no Host header, the authority is in the URI.
         let uri: Uri = "http://10.0.0.5:8080/api/albums/1/export".parse().unwrap();
         assert_eq!(
-            base_url(&HeaderMap::new(), &uri).unwrap(),
+            base_url(s, &HeaderMap::new(), &uri).unwrap(),
             "http://10.0.0.5:8080"
         );
-        assert!(base_url(&HeaderMap::new(), &"/x".parse().unwrap()).is_err());
+        assert!(base_url(s, &HeaderMap::new(), &"/x".parse().unwrap()).is_err());
     }
 
     // ------------------------------------------------------------------
@@ -1017,5 +1109,136 @@ mod tests {
             res.headers()[header::CONTENT_DISPOSITION],
             "inline; filename=\"Freddie Freeloader.flac\""
         );
+    }
+
+    // ------------------------------------------------------------------
+    // 0.0.0.0 and the page at /
+    // ------------------------------------------------------------------
+
+    /// The library with `bind` naming a LAN address, so the address the
+    /// server suggests doesn't depend on the test machine's network.
+    async fn bound_library() -> Lib {
+        let lib = library().await;
+        lib.state.config.write().unwrap().bind = "192.168.1.20:8080".into();
+        lib
+    }
+
+    #[tokio::test]
+    async fn exports_refuse_the_listen_everywhere_address() {
+        let lib = bound_library().await;
+        for host in ["0.0.0.0:8080", "[::]:8080"] {
+            let (status, _, body) = get(&lib.app, "/api/playlists/1/export", host).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{host}");
+            let msg = serde_json::from_str::<serde_json::Value>(&body).unwrap()["error"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(msg.contains("no other device can reach it"), "{msg}");
+            assert!(
+                msg.contains("http://192.168.1.20:8080/api/playlists/1/export"),
+                "names the address to use: {msg}"
+            );
+        }
+        // Loopback still works, for players on the server's own machine.
+        let (status, _, _) = get(&lib.app, "/api/playlists/1/export", "127.0.0.1:8080").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_home_page_links_every_playlist_and_album() {
+        let lib = bound_library().await;
+        let (status, h, page) = get(&lib.app, "/", "10.0.0.233:8080").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(h[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert!(page.contains("<title>Kahawai Server</title>"));
+        assert!(page.contains("Late Night: Blue"), "playlist listed");
+        assert!(page.contains(
+            "<code class=\"link\">http://10.0.0.233:8080/api/playlists/1/export?format=m3u</code>"
+        ));
+        assert!(page.contains("http://10.0.0.233:8080/api/playlists/1/export?format=xspf"));
+        assert!(page.contains("Kind of Blue"), "album listed");
+        assert!(page.contains("Miles Davis"), "with its artist");
+        assert!(page.contains("http://10.0.0.233:8080/api/albums/1/export?format=m3u"));
+        assert!(
+            !page.contains("class=\"note\""),
+            "no note on a network address"
+        );
+        // Untouched by the page: a stray path is still a 404.
+        let (status, _, _) = get(&lib.app, "/nope", "10.0.0.233:8080").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn opened_as_a_local_address_the_page_links_the_network_address() {
+        let lib = bound_library().await;
+        for host in ["0.0.0.0:8080", "localhost:8080", "127.0.0.1:8080"] {
+            let (status, _, page) = get(&lib.app, "/", host).await;
+            assert_eq!(status, StatusCode::OK, "{host}");
+            assert!(page.contains("class=\"note\""), "{host}: says why");
+            assert!(
+                page.contains("http://192.168.1.20:8080/api/playlists/1/export?format=m3u"),
+                "{host}: links use the network address"
+            );
+            assert!(
+                !page.contains(&format!("http://{host}/api/")),
+                "{host}: no links to the local-only address"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_home_page_escapes_names_searches_and_pages_albums() {
+        let lib = bound_library().await;
+        sqlx::query("UPDATE playlists SET name = '<b>Mix</b> & \"more\"' WHERE id = 1")
+            .execute(&lib.state.pool)
+            .await
+            .unwrap();
+        for i in 0..120 {
+            let id: i64 = sqlx::query(
+                "INSERT INTO albums (title, artist) VALUES (?, 'Various') RETURNING id",
+            )
+            .bind(format!("Comp {i:03}"))
+            .fetch_one(&lib.state.pool)
+            .await
+            .unwrap()
+            .get("id");
+            sqlx::query("UPDATE tracks SET album_id = ? WHERE id = 1")
+                .bind(id)
+                .execute(&lib.state.pool)
+                .await
+                .unwrap();
+            // Each album needs a present track to be listed: give it a row.
+            sqlx::query(
+                "INSERT INTO tracks (path, hash, format, album_id) VALUES (?, 'h', 'mp3', ?)",
+            )
+            .bind(format!("/x/comp{i}.mp3"))
+            .bind(id)
+            .execute(&lib.state.pool)
+            .await
+            .unwrap();
+        }
+        let (_, _, page) = get(&lib.app, "/", "nas:8080").await;
+        assert!(
+            page.contains("&lt;b&gt;Mix&lt;/b&gt; &amp; &quot;more&quot;"),
+            "escaped"
+        );
+        assert!(!page.contains("<b>Mix</b>"));
+        assert!(page.contains("Page 1 of 2"), "121 albums, 100 a page");
+        assert!(page.contains("href=\"/?page=2\""));
+
+        let (_, _, p2) = get(&lib.app, "/?page=2", "nas:8080").await;
+        assert!(p2.contains("Page 2 of 2") && p2.contains("href=\"/?page=1\""));
+
+        let (_, _, found) = get(&lib.app, "/?q=comp+11", "nas:8080").await;
+        assert_eq!(
+            found.matches("/api/albums/").count(),
+            3 * 10,
+            "Comp 110–119: the link shown, M3U and XSPF"
+        );
+        assert!(!found.contains("Page "), "one page");
+        let (_, _, none) = get(&lib.app, "/?q=%25", "nas:8080").await;
+        assert!(none.contains("No album or artist matches"), "% is literal");
+        let (_, _, by_artist) = get(&lib.app, "/?q=miles", "nas:8080").await;
+        assert!(by_artist.contains("Kind of Blue") && !by_artist.contains("Comp 0"));
     }
 }

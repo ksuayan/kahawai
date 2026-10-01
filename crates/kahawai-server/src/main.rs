@@ -14,6 +14,7 @@ mod export;
 mod genre;
 mod genre_aliases;
 mod hashing;
+mod home;
 mod jobs;
 #[cfg(target_os = "macos")]
 mod logfile;
@@ -113,6 +114,7 @@ pub fn app(state: AppState) -> Router {
     // S10: the JSON API gets a body cap and a request timeout. Streams are
     // routed separately so neither applies to long-lived audio responses.
     let api = Router::new()
+        .route("/", get(home::home))
         .route("/api/health", get(api::health))
         .route("/api/identity", get(api::identity))
         .route("/api/shutdown", post(api::shutdown))

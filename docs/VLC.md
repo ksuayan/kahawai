@@ -4,19 +4,16 @@ Kahawai Player is the best way to hear your library, but it isn't the only one. 
 
 ## Open a playlist or album
 
-Each playlist and album has an address that hands VLC a ready-made playlist:
+Open the server's address in a web browser: `http://<server>:8080/`, where `<server>` is the address the Player connects to (**Settings → Server** in the Player shows it). The page lists every playlist and album, and albums can be searched by title or artist. Each one has its VLC link, which looks like this:
 
 ```
 http://<server>:8080/api/playlists/<id>/export?format=m3u
 http://<server>:8080/api/albums/<id>/export?format=m3u
 ```
 
-`<server>` is the address the Player connects to (**Settings → Server** in the Player shows it). In VLC choose **Media → Open Network Stream…** (on a Mac, **File → Open Network…**), paste the address, and press **Play**. The whole playlist loads and plays in order.
+Copy the link. In VLC choose **Media → Open Network Stream…** (on a Mac, **File → Open Network…**), paste it, and press **Play**. The whole playlist loads and plays in order.
 
-To find an `<id>`, open these in a web browser on the same network:
-
-- **Playlists:** `http://<server>:8080/api/playlists` lists every playlist with its `id` and `name`.
-- **Albums:** search for a track on it, as in `http://<server>:8080/api/search?q=waltz for debby`. Each result carries its album's `album_id`.
+Use the server's network address, such as `http://10.0.0.233:8080/`, not `0.0.0.0`. In the server's settings, `0.0.0.0` means "listen on every network": nothing can connect to it, and the playlist links refuse it. If you open the page as `localhost` or `127.0.0.1` on the server's own computer, its links switch to the network address so that they work from other devices too.
 
 Two other formats are available by changing the end of the address: `format=xspf` adds cover art to VLC's playlist, and `format=pls` suits older players. Plain M3U is the safest choice for VLC.
 
@@ -30,7 +27,7 @@ You can also save the playlist file and open it later. It holds full addresses, 
 
 ## What VLC can't do here
 
-VLC can't browse the library itself. Opening the server's plain address shows nothing useful; you open one playlist or album at a time. VLC can't see the Player's queue either, which lives in the Player. To take a queue to VLC, save it as a playlist in the Player first, then open that playlist.
+VLC can't browse the library itself: the server's page is for a web browser, and VLC opens one playlist or album at a time. VLC can't see the Player's queue either, which lives in the Player. To take a queue to VLC, save it as a playlist in the Player first, then open that playlist.
 
 ## Another route: the music share itself
 
