@@ -243,6 +243,11 @@ export async function setEqEnabled(enabled: boolean): Promise<void> {
   await cmd("set_eq_enabled", { enabled });
 }
 
+/** The EQ's preamp in dB (headroom for its boosts); in effect only while the EQ is on. */
+export async function setEqPreamp(db: number): Promise<void> {
+  await cmd("set_eq_preamp", { db });
+}
+
 export async function setAnalog(settings: AnalogSettings): Promise<void> {
   await cmd("set_analog", { settings });
 }

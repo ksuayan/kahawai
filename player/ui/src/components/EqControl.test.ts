@@ -48,7 +48,7 @@ describe("EqControl", () => {
     expect(body().querySelector('[aria-label="EQ preset"]')!.textContent).toContain("Custom");
     (body().querySelector('[data-testid="save-preset"]') as HTMLElement).click();
     await settle();
-    const input = body().querySelector('[role="dialog"] input') as HTMLInputElement;
+    const input = body().querySelector('[aria-label="Preset name"], [role="dialog"] [placeholder="My tuning"]') as HTMLInputElement;
     input.value = "Bassy";
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await settle();

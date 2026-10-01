@@ -57,7 +57,7 @@ The webview never holds the server token and never streams audio itself — play
 
 ## 5. Built-in DSP (v1)
 
-- **Parametric EQ:** up to 8 bands (peaking, low/high shelf, low/high pass), presets (Flat, plus user-saved), per-output-device preset memory.
+- **Parametric EQ:** up to 12 bands (peaking, low/high shelf, low/high pass), presets (Flat, plus user-saved), per-output-device preset memory.
 - **Loudness normalization:** EBU R128-style gain, target configurable (default −14 LUFS), applied as metadata-driven gain — never rewrites files.
 - Both sit in the `dsp` module behind a chain API so a future plugin-host can insert VST3/AU nodes at the same point (v2 spike, per server spec §5.1).
 

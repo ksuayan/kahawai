@@ -573,6 +573,8 @@ export function clampAnalog(s: AnalogSettings): AnalogSettings {
 export interface DspSettings {
   eq_bands: EqBand[];
   eq_enabled: boolean;
+  /** Gain applied with the EQ, dB; absent in settings files from before the preamp. */
+  eq_preamp_db?: number;
   loudness_enabled: boolean;
   loudness_target: number;
   /** Absent in settings files from before the analog stage. */
@@ -635,6 +637,7 @@ export function clampCrossfeed(s: CrossfeedSettings): CrossfeedSettings {
 export const DEFAULT_DSP_SETTINGS: DspSettings = {
   eq_bands: [],
   eq_enabled: true,
+  eq_preamp_db: 0,
   loudness_enabled: false,
   loudness_target: -14,
   analog: DEFAULT_ANALOG_SETTINGS,
@@ -642,7 +645,11 @@ export const DEFAULT_DSP_SETTINGS: DspSettings = {
   crossfeed: DEFAULT_CROSSFEED_SETTINGS,
 };
 
-export const MAX_EQ_BANDS = 8;
+/** Room for an AutoEq profile (usually 10 filters) plus a couple of your own. Mirrors `MAX_EQ_BANDS` in dsp.rs. */
+export const MAX_EQ_BANDS = 12;
+
+/** Range of the EQ preamp in dB. Mirrors `EQ_PREAMP_RANGE_DB` in dsp.rs. */
+export const EQ_PREAMP_RANGE_DB = [-24, 12] as const;
 
 export interface OutputDevice {
   name: string;
