@@ -96,6 +96,9 @@ export const usePlayerStore = defineStore("player", () => {
   const isLoading = computed(() => status.value === "loading");
   const durationMs = computed(() => raw.value?.duration_ms ?? null);
   const bufferedMs = computed(() => raw.value?.buffered_ms ?? null);
+  const downloadBps = computed(() => raw.value?.download_bps ?? null);
+  const bufferAheadMs = computed(() => raw.value?.buffer_ahead_ms ?? null);
+  const bufferComplete = computed(() => raw.value?.buffer_complete ?? false);
   const outputRateHz = computed(() => raw.value?.output_rate_hz ?? null);
   const analogPlan = computed(() => raw.value?.analog_plan ?? null);
   const analogLevel = computed(() => raw.value?.analog_level ?? null);
@@ -196,6 +199,9 @@ export const usePlayerStore = defineStore("player", () => {
     positionMs,
     durationMs,
     bufferedMs,
+    downloadBps,
+    bufferAheadMs,
+    bufferComplete,
     outputRateHz,
     analogPlan,
     analogLevel,

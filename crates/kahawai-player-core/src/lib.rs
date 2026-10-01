@@ -46,7 +46,7 @@ pub use engine::{
 };
 pub use quality::QualityMode;
 pub use queue::{Queue, RepeatMode};
-pub use readahead::ReadAhead;
+pub use readahead::{ReadAhead, ReadAheadStats};
 pub use resample::CubicResampler;
 pub use sink::{AudioSink, NullSink, OutputPath, PcmChunk, SinkRouter, SinkState, VecSink};
 pub use transport::{

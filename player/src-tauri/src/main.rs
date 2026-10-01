@@ -446,6 +446,12 @@ struct PlayerStateDto {
     duration_ms: Option<u64>,
     /// How far the data received from the server reaches into the track.
     buffered_ms: Option<u64>,
+    /// Network speed of the stream in bytes/s, once measured.
+    download_bps: Option<u64>,
+    /// Audio held in the read-ahead buffer beyond the playhead (ms).
+    buffer_ahead_ms: Option<u64>,
+    /// The whole stream is already fetched (a short buffer is just the track's end).
+    buffer_complete: bool,
     /// Rate of the audio reaching the output; the rate the EQ is designed at.
     output_rate_hz: Option<u32>,
     /// What the analog stage is doing right now (plan and latency), if on.
@@ -514,6 +520,9 @@ impl From<PlayerSnapshot> for PlayerStateDto {
             position_ms: s.position_ms,
             duration_ms: s.duration_ms,
             buffered_ms: s.buffered_ms,
+            download_bps: s.download_bps,
+            buffer_ahead_ms: s.buffer_ahead_ms,
+            buffer_complete: s.buffer_complete,
             output_rate_hz: s.output_rate_hz,
             analog_plan: s.analog_plan,
             analog_level: s.analog_level.map(|l| AnalogLevelDto {

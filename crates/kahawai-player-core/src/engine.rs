@@ -176,6 +176,19 @@ pub struct PlayerSnapshot {
     /// (transcoded/chunked) or several tracks share one response.
     #[serde(default)]
     pub buffered_ms: Option<u64>,
+    /// How fast the network is delivering this stream, in bytes per second
+    /// (measured while fetching). `None` until enough has arrived to say, or
+    /// when the stream is not read ahead.
+    #[serde(default)]
+    pub download_bps: Option<u64>,
+    /// How many seconds of audio the read-ahead buffer holds beyond the
+    /// playhead (ms). `None` when unknowable yet.
+    #[serde(default)]
+    pub buffer_ahead_ms: Option<u64>,
+    /// The whole stream has been fetched, so a short buffer is just the end
+    /// of the track, not a slow connection.
+    #[serde(default)]
+    pub buffer_complete: bool,
     /// Sample rate of the audio reaching the output (after any resampling);
     /// the rate the EQ is designed at. `None` when idle.
     #[serde(default)]
@@ -225,6 +238,9 @@ impl Default for PlayerSnapshot {
             position_ms: 0,
             duration_ms: None,
             buffered_ms: None,
+            download_bps: None,
+            buffer_ahead_ms: None,
+            buffer_complete: false,
             output_rate_hz: None,
             analog_plan: None,
             analog_level: None,
@@ -419,6 +435,47 @@ impl ActiveStream {
             base_ms + ((duration.saturating_sub(base_ms)) as f64 * frac) as u64
         };
         Some(ms.clamp(position_ms.min(duration), duration))
+    }
+
+    /// Network speed (bytes/s), how much audio the read-ahead holds past the
+    /// playhead (ms) and whether the whole stream is already in, for the
+    /// connection gauge. The first two are `None` when unknown.
+    fn network(&self, position_ms: u64) -> (Option<u64>, Option<u64>, bool) {
+        let (progress, segments, base_ms) = match self {
+            ActiveStream::Pcm(a) => (
+                a.progress.as_ref(),
+                &a.segments,
+                a.base_frames * 1000 / a.sink_rate.max(1) as u64,
+            ),
+            ActiveStream::Dop(a) => (
+                a.progress.as_ref(),
+                &a.segments,
+                a.base_frames * 1000 / a.spec.dop_rate_hz.max(1) as u64,
+            ),
+        };
+        let Some(progress) = progress else {
+            return (None, None, false);
+        };
+        let Some(stats) = progress.stats.as_ref() else {
+            return (None, None, false);
+        };
+        let queued = stats.queued_bytes() as u64;
+        let received = progress.received.load(std::sync::atomic::Ordering::Relaxed);
+        // The whole file is the response plus whatever a Range resume skipped.
+        let whole = progress.content_length.map(|l| l + progress.offset);
+        let duration = if segments.len() == 1 {
+            segments[0].duration_ms
+        } else {
+            None
+        };
+        let ahead = estimate_ahead_ms(
+            queued,
+            whole,
+            duration,
+            received.saturating_sub(queued),
+            position_ms.saturating_sub(base_ms),
+        );
+        (stats.rate_bps(), ahead, stats.finished())
     }
 
     /// Sample rate of the audio the sink is receiving.
@@ -1961,7 +2018,7 @@ impl Player {
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
-        let (track, position_ms, duration_ms, buffered_ms, output_rate_hz, format, chain) =
+        let (track, position_ms, duration_ms, buffered_ms, net, output_rate_hz, format, chain) =
             match &self.active {
                 Some(a) => {
                     let t = a.display_track().clone();
@@ -1971,6 +2028,7 @@ impl Player {
                         pos,
                         t.duration_ms,
                         a.buffered_ms(pos),
+                        a.network(pos),
                         Some(a.output_rate_hz()),
                         Some(a.format_used()),
                         a.chain().clone(),
@@ -1981,7 +2039,7 @@ impl Player {
                     let t = self.queue.current().cloned();
                     let at = self.resume_at_ms.unwrap_or(0);
                     let dur = t.as_ref().and_then(|t| t.duration_ms).filter(|_| at > 0);
-                    (t, at, dur, None, None, None, None)
+                    (t, at, dur, None, (None, None, false), None, None, None)
                 }
             };
         PlayerSnapshot {
@@ -1993,6 +2051,9 @@ impl Player {
             position_ms,
             duration_ms,
             buffered_ms,
+            download_bps: net.0,
+            buffer_ahead_ms: net.1,
+            buffer_complete: net.2,
             output_rate_hz,
             analog_plan: if self.active.is_some() && self.output_path == OutputPath::Pcm {
                 self.analog.status().map(|s| s.describe())
@@ -2766,6 +2827,25 @@ pub fn snapshot_key_differs(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
     snapshot_key(a) != snapshot_key(b)
 }
 
+/// Milliseconds of audio that `queued` buffered bytes represent. The byte rate
+/// of the stream comes from the file size and duration when both are known
+/// (exact for passthrough); otherwise from how many bytes have been consumed
+/// over how long they played, once there is enough of that (2 s) to trust.
+fn estimate_ahead_ms(
+    queued: u64,
+    whole_len: Option<u64>,
+    duration_ms: Option<u64>,
+    consumed: u64,
+    played_ms: u64,
+) -> Option<u64> {
+    let bytes_per_ms = match (whole_len, duration_ms) {
+        (Some(len), Some(d)) if len > 0 && d > 0 => len as f64 / d as f64,
+        _ if played_ms >= 2000 && consumed > 0 => consumed as f64 / played_ms as f64,
+        _ => return None,
+    };
+    Some((queued as f64 / bytes_per_ms) as u64)
+}
+
 /// How far inside the end a seek onto the end lands, in ms.
 const SEEK_END_MARGIN_MS: u64 = 500;
 
@@ -3102,5 +3182,44 @@ mod coalesce_tests {
         ]);
         assert_eq!(out.len(), 3);
         assert!(coalesce_seeks(Vec::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ahead_tests {
+    use super::*;
+
+    #[test]
+    fn a_known_file_size_and_duration_give_an_exact_byte_rate() {
+        // 1 MB/s over 100 s: 3 MB queued is 3 s ahead, whatever has been played.
+        assert_eq!(
+            estimate_ahead_ms(3_000_000, Some(100_000_000), Some(100_000), 0, 0),
+            Some(3000)
+        );
+    }
+
+    #[test]
+    fn a_chunked_stream_estimates_from_what_has_played_but_only_once_there_is_enough() {
+        // 500 B/ms consumed over 4 s => 2 MB queued is 4 s ahead.
+        assert_eq!(
+            estimate_ahead_ms(2_000_000, None, None, 2_000_000, 4000),
+            Some(4000)
+        );
+        assert_eq!(
+            estimate_ahead_ms(2_000_000, None, None, 400_000, 800),
+            None,
+            "under 2 s: not trusted yet"
+        );
+        assert_eq!(
+            estimate_ahead_ms(2_000_000, None, None, 0, 5000),
+            None,
+            "nothing consumed"
+        );
+    }
+
+    #[test]
+    fn degenerate_sizes_do_not_divide_by_zero() {
+        assert_eq!(estimate_ahead_ms(10, Some(0), Some(0), 0, 0), None);
+        assert_eq!(estimate_ahead_ms(0, Some(1000), Some(1000), 0, 0), Some(0));
     }
 }

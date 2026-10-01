@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use kahawai_core::{api::StreamFormat, MusicError};
 
-use crate::readahead::ReadAhead;
+use crate::readahead::{ReadAhead, ReadAheadStats};
 
 /// How far ahead of the playhead an HTTP stream is buffered, in bytes. About
 /// 28 s of the heaviest PCM we stream (24-bit / 192 kHz stereo, ~1.15 MB/s) and
@@ -44,6 +44,8 @@ pub struct StreamProgress {
     pub content_length: Option<u64>,
     /// Byte offset this response starts at (HTTP Range resume), else 0.
     pub offset: u64,
+    /// Network speed and buffer fill, when the stream is read ahead.
+    pub stats: Option<Arc<ReadAheadStats>>,
 }
 
 impl StreamProgress {
@@ -195,10 +197,12 @@ impl Transport for HttpTransport {
             inner: resp.into_body().into_reader(),
             count: received.clone(),
         };
-        let reader: Box<dyn Read + Send> = if self.read_ahead_bytes > 0 {
-            Box::new(ReadAhead::new(counting, self.read_ahead_bytes))
+        let (reader, stats): (Box<dyn Read + Send>, _) = if self.read_ahead_bytes > 0 {
+            let ahead = ReadAhead::new(counting, self.read_ahead_bytes);
+            let stats = ahead.stats();
+            (Box::new(ahead), Some(stats))
         } else {
-            Box::new(counting)
+            (Box::new(counting), None)
         };
         Ok(StreamInfo {
             reader,
@@ -206,6 +210,7 @@ impl Transport for HttpTransport {
                 received,
                 content_length,
                 offset: opts.range_start.unwrap_or(0),
+                stats,
             }),
             content_type,
             chain,
@@ -358,11 +363,49 @@ mod tests {
     }
 
     #[test]
+    fn a_read_ahead_stream_reports_its_network_speed_and_fill() {
+        // A 3 MiB body is more than one speed sample, so a rate must appear;
+        // read ahead is on by default, and off (0) reports no stats at all.
+        let body = "x".repeat(3 * 1024 * 1024);
+        let response: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        );
+        let stub = Stub::serve_once(response);
+        let t = HttpTransport::new(format!("http://{}", stub.addr));
+        let mut info = t.open_stream(1, &StreamOptions::default()).expect("open");
+        let stats = info
+            .progress
+            .clone()
+            .unwrap()
+            .stats
+            .expect("read ahead reports stats");
+        assert_eq!(stats.capacity(), DEFAULT_READ_AHEAD_BYTES);
+        let mut all = Vec::new();
+        info.reader.read_to_end(&mut all).unwrap();
+        assert_eq!(all.len(), body.len());
+        assert!(stats.rate_bps().is_some(), "a speed was measured");
+        assert_eq!(stats.queued_bytes(), 0, "everything has been read");
+
+        let stub = Stub::serve_once(TEN_BYTES);
+        let t = HttpTransport::new(format!("http://{}", stub.addr)).with_read_ahead(0);
+        let info = t.open_stream(1, &StreamOptions::default()).expect("open");
+        assert!(
+            info.progress.unwrap().stats.is_none(),
+            "no read ahead, no stats"
+        );
+    }
+
+    #[test]
     fn progress_is_relative_to_the_whole_file_for_range_resumes() {
         let p = StreamProgress {
             received: Arc::new(AtomicU64::new(25)),
             content_length: Some(50),
             offset: 50,
+            stats: None,
         };
         assert_eq!(p.fraction(), Some(0.75)); // (50 + 25) / (50 + 50)
         let unknown = StreamProgress {

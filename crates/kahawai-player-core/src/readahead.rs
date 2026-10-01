@@ -20,11 +20,61 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Bytes the fetch thread asks the network for at a time.
 const CHUNK: usize = 64 * 1024;
+
+/// A speed sample closes once this much time has been spent waiting on the
+/// network, or this many bytes have arrived, whichever comes first.
+const SAMPLE_TIME: Duration = Duration::from_millis(200);
+const SAMPLE_BYTES: u64 = 1024 * 1024;
+
+/// What the read-ahead is doing, readable from any thread.
+#[derive(Debug)]
+pub struct ReadAheadStats {
+    /// Smoothed network speed in bytes/s while data was being fetched; 0 until
+    /// the first sample.
+    rate_bps: AtomicU64,
+    /// Bytes fetched but not yet read.
+    queued: AtomicUsize,
+    /// The whole response has been fetched (clean end of stream).
+    finished: AtomicBool,
+    capacity: usize,
+}
+
+impl ReadAheadStats {
+    /// How fast the network delivers when asked, in bytes per second. This is
+    /// measured only over the time spent waiting on the network, so a full
+    /// buffer (the fetcher idle) does not read as a slow connection. `None`
+    /// until enough has arrived to say.
+    pub fn rate_bps(&self) -> Option<u64> {
+        match self.rate_bps.load(Ordering::Relaxed) {
+            0 => None,
+            r => Some(r),
+        }
+    }
+
+    /// Bytes fetched from the network that have not been read yet.
+    pub fn queued_bytes(&self) -> usize {
+        self.queued.load(Ordering::Relaxed)
+    }
+
+    /// True once the entire response is in the buffer or already read, so
+    /// whatever is queued is all that is left and a short queue is not a
+    /// sign of a slow connection.
+    pub fn finished(&self) -> bool {
+        self.finished.load(Ordering::Relaxed)
+    }
+
+    /// The most the buffer will hold.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
 
 #[derive(Debug)]
 enum End {
@@ -53,6 +103,7 @@ struct Shared {
 /// A [`Read`] that is fed by a background thread. See the module docs.
 pub struct ReadAhead {
     shared: Arc<Shared>,
+    stats: Arc<ReadAheadStats>,
     /// The chunk currently being consumed.
     current: Vec<u8>,
     pos: usize,
@@ -69,24 +120,39 @@ impl ReadAhead {
             readable: Condvar::new(),
             writable: Condvar::new(),
         });
+        let capacity = capacity.max(CHUNK);
+        let stats = Arc::new(ReadAheadStats {
+            rate_bps: AtomicU64::new(0),
+            queued: AtomicUsize::new(0),
+            finished: AtomicBool::new(false),
+            capacity,
+        });
         let fetcher = {
-            let shared = shared.clone();
+            let (shared, stats) = (shared.clone(), stats.clone());
             thread::Builder::new()
                 .name("stream-read-ahead".into())
-                .spawn(move || fetch(source, &shared, capacity.max(CHUNK)))
+                .spawn(move || fetch(source, &shared, &stats, capacity))
                 .expect("spawn read-ahead thread")
         };
         Self {
             shared,
+            stats,
             current: Vec::new(),
             pos: 0,
             _fetcher: fetcher,
         }
     }
+
+    /// Live figures for a gauge; stays valid after the reader is gone.
+    pub fn stats(&self) -> Arc<ReadAheadStats> {
+        self.stats.clone()
+    }
 }
 
 /// The fetch thread: wait for room, read a chunk, queue it; repeat.
-fn fetch<R: Read>(mut source: R, shared: &Shared, capacity: usize) {
+fn fetch<R: Read>(mut source: R, shared: &Shared, stats: &ReadAheadStats, capacity: usize) {
+    // The open speed sample: bytes that arrived and time spent waiting for them.
+    let (mut sample_bytes, mut sample_time) = (0u64, Duration::ZERO);
     loop {
         // Wait for space *before* reading, so no more than `capacity` (plus
         // nothing in flight) is ever held, and a cancel is seen promptly.
@@ -100,7 +166,9 @@ fn fetch<R: Read>(mut source: R, shared: &Shared, capacity: usize) {
             }
         }
         let mut chunk = vec![0u8; CHUNK];
+        let started = Instant::now();
         let result = source.read(&mut chunk);
+        let waited = started.elapsed();
         let mut st = shared.state.lock().expect("read-ahead lock");
         if st.cancelled {
             return;
@@ -108,14 +176,32 @@ fn fetch<R: Read>(mut source: R, shared: &Shared, capacity: usize) {
         match result {
             Ok(0) => {
                 st.end = Some(End::Eof);
+                stats.finished.store(true, Ordering::Relaxed);
                 shared.readable.notify_all();
                 return;
             }
             Ok(n) => {
                 chunk.truncate(n);
                 st.queued += n;
+                stats.queued.store(st.queued, Ordering::Relaxed);
                 st.queue.push_back(chunk);
                 shared.readable.notify_all();
+                sample_bytes += n as u64;
+                sample_time += waited;
+                if sample_time >= SAMPLE_TIME || sample_bytes >= SAMPLE_BYTES {
+                    // Exponentially smoothed, so the figure is steady but
+                    // follows a real change within a second or two.
+                    let secs = sample_time.as_secs_f64().max(0.001);
+                    let instant = sample_bytes as f64 / secs;
+                    let prev = stats.rate_bps.load(Ordering::Relaxed);
+                    let next = if prev == 0 {
+                        instant
+                    } else {
+                        0.7 * prev as f64 + 0.3 * instant
+                    };
+                    stats.rate_bps.store(next as u64, Ordering::Relaxed);
+                    (sample_bytes, sample_time) = (0, Duration::ZERO);
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
@@ -137,6 +223,7 @@ impl Read for ReadAhead {
             loop {
                 if let Some(next) = st.queue.pop_front() {
                     st.queued -= next.len();
+                    self.stats.queued.store(st.queued, Ordering::Relaxed);
                     self.shared.writable.notify_all();
                     self.current = next;
                     self.pos = 0;
@@ -163,6 +250,7 @@ impl Drop for ReadAhead {
         st.cancelled = true;
         st.queue.clear();
         st.queued = 0;
+        self.stats.queued.store(0, Ordering::Relaxed);
         self.shared.writable.notify_all();
     }
 }
@@ -423,5 +511,107 @@ mod tests {
             0,
             "a zero-length read is a no-op"
         );
+    }
+
+    /// Hands out 10 KB per read, taking 20 ms each: a ~500 KB/s link.
+    struct Paced {
+        left: usize,
+    }
+
+    impl Read for Paced {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.left == 0 {
+                return Ok(0);
+            }
+            thread::sleep(Duration::from_millis(20));
+            let n = buf.len().min(10_000).min(self.left);
+            buf[..n].fill(7);
+            self.left -= n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn measures_the_network_speed_while_fetching() {
+        let mut ra = ReadAhead::new(Paced { left: 1_000_000 }, 4 * 1024 * 1024);
+        let stats = ra.stats();
+        assert_eq!(stats.rate_bps(), None, "nothing measured yet");
+        assert!(
+            eventually(|| stats.rate_bps().is_some()),
+            "a sample closes within a few hundred ms"
+        );
+        // The link is about 500 KB/s; scheduling jitter allows a wide band.
+        let rate = stats.rate_bps().unwrap();
+        assert!((200_000..1_500_000).contains(&rate), "rate {rate} B/s");
+        let mut sink = Vec::new();
+        ra.read_to_end(&mut sink).unwrap();
+        assert_eq!(sink.len(), 1_000_000);
+        assert!(
+            stats.rate_bps().is_some(),
+            "the last speed stays readable after the stream ends"
+        );
+    }
+
+    #[test]
+    fn a_full_buffer_does_not_look_like_a_slow_connection() {
+        // The fetcher idles on a full buffer; that must not drag the speed down.
+        let cap = 2 * 1024 * 1024; // more than one speed sample's worth of bytes
+        let (src, taken, _) = Source::new(data(16 * 1024 * 1024));
+        let ra = ReadAhead::new(src, cap);
+        let stats = ra.stats();
+        assert!(eventually(|| taken.load(Ordering::SeqCst) >= cap));
+        assert!(eventually(|| stats.rate_bps().is_some()));
+        let before = stats.rate_bps().unwrap();
+        thread::sleep(Duration::from_millis(400)); // idle, buffer full
+        assert_eq!(stats.rate_bps().unwrap(), before, "unchanged while idle");
+        drop(ra);
+    }
+
+    #[test]
+    fn reports_how_much_is_buffered() {
+        let cap = 256 * 1024;
+        let (src, taken, _) = Source::new(data(4 * 1024 * 1024));
+        let mut ra = ReadAhead::new(src, cap);
+        let stats = ra.stats();
+        assert_eq!(stats.capacity(), cap);
+        assert!(eventually(|| stats.queued_bytes() >= cap));
+        assert!(stats.queued_bytes() <= cap + CHUNK);
+        let full = stats.queued_bytes();
+        let mut buf = vec![0u8; 100 * 1024];
+        ra.read_exact(&mut buf).unwrap();
+        // Reading frees bytes, so the count drops (the fetcher may refill some).
+        assert!(taken.load(Ordering::SeqCst) >= full);
+        drop(ra);
+        assert_eq!(stats.queued_bytes(), 0, "empty once the reader is gone");
+    }
+
+    #[test]
+    fn knows_when_the_whole_response_has_been_fetched() {
+        let (src, _, _) = Source::new(data(300_000));
+        let mut ra = ReadAhead::new(src, 1024 * 1024);
+        let stats = ra.stats();
+        assert!(
+            eventually(|| stats.finished()),
+            "a small body is fully fetched at once"
+        );
+        assert!(
+            stats.queued_bytes() > 0,
+            "...while it is still waiting to be played"
+        );
+        let mut all = Vec::new();
+        ra.read_to_end(&mut all).unwrap();
+        assert!(stats.finished());
+
+        // A failure is not a clean finish.
+        let ra = ReadAhead::new(
+            Failing {
+                good: Some(data(10)),
+            },
+            1024,
+        );
+        let stats = ra.stats();
+        thread::sleep(Duration::from_millis(100));
+        assert!(!stats.finished());
+        drop(ra);
     }
 }
