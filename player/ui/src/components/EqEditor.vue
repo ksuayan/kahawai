@@ -4,7 +4,8 @@ import { computed, ref } from "vue";
 import { bandHasGain, bandSeverity, constrainBand, DEFAULT_RATE_HZ, EQ_LIMITS, maxFreqFor, qRange, totalResponseDb } from "../eqResponse";
 import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
-import { EQ_BAND_TYPES, MAX_EQ_BANDS, type EqBandType } from "../types";
+import { EQ_BAND_TYPES, EQ_PREAMP_RANGE_DB, MAX_EQ_BANDS, type EqBandType } from "../types";
+import EqImportDialog from "./EqImportDialog.vue";
 import PromptDialog from "../ui/PromptDialog.vue";
 import UiButton from "../ui/UiButton.vue";
 import UiInput from "../ui/UiInput.vue";
@@ -87,7 +88,9 @@ const peakDb = computed(() => Math.max(0, ...samples.value.map((p) => p.db)));
 /** Per band: how risky it is for sound quality (drives node colour, tooltip and panel note). */
 const severities = computed(() => dsp.rows.map((r) => (r.enabled ? bandSeverity(r, rate.value, peakDb.value) : { level: "ok" as const, reason: null })));
 const selSeverity = computed(() => (selected.value === null ? null : (severities.value[selected.value] ?? null)));
-const clipRisk = computed(() => dsp.eqEnabled && peakDb.value > 0.5);
+/** The preamp offsets the boost, so a profile that cuts by its own boost is safe. */
+const netPeakDb = computed(() => peakDb.value + dsp.eqPreamp);
+const clipRisk = computed(() => dsp.eqEnabled && netPeakDb.value > 0.5);
 const fill = computed(() => `${curve.value} L${xOf(F_MAX)},${yOf(0)} L${xOf(F_MIN)},${yOf(0)} Z`);
 
 const hasGain = bandHasGain;
@@ -183,6 +186,12 @@ function onType(v: string | null): void {
 // --- presets ----------------------------------------------------------------
 const CUSTOM = "custom";
 const naming = ref(false);
+const importing = ref(false);
+function onPreamp(e: Event): void {
+  const el = e.target as HTMLInputElement;
+  const v = Number(el.value);
+  void dsp.saveEqPreamp(Number.isFinite(v) ? v : 0).then(() => (el.value = String(dsp.eqPreamp)));
+}
 const presetOptions = computed<UiSelectOption[]>(() => [
   ...(dsp.activePreset ? [] : [{ value: CUSTOM, label: "Custom", disabled: true }]),
   ...dsp.presets.map((p) => ({ value: p.id, label: p.builtin ? p.name : `${p.name} (mine)` })),
@@ -230,6 +239,22 @@ function choose(v: string | null): void {
           <Trash2 />
         </UiButton>
         <UiButton :disabled="dsp.activeBands.length === 0" data-testid="save-preset" @click="naming = true">Save as preset…</UiButton>
+        <UiButton data-testid="import-profile" @click="importing = true">Import…</UiButton>
+        <label class="flex items-center gap-1 text-xs text-dim">
+          Preamp
+          <UiInput
+            class="w-[70px]"
+            type="number"
+            :model-value="String(dsp.eqPreamp)"
+            :min="EQ_PREAMP_RANGE_DB[0]"
+            :max="EQ_PREAMP_RANGE_DB[1]"
+            step="0.5"
+            aria-label="EQ preamp (dB)"
+            data-testid="eq-preamp"
+            @change="onPreamp"
+          />
+          dB
+        </label>
       </div>
 
       <svg
@@ -286,7 +311,7 @@ function choose(v: string | null): void {
       </p>
       <p v-if="clipRisk" class="m-0 mt-2 flex items-start gap-1.5 text-xs text-warn-fg" role="status" data-testid="eq-headroom">
         <TriangleAlert class="mt-px size-3.5 shrink-0" />
-        Peak boost of +{{ peakDb.toFixed(1) }} dB can clip loud tracks. Lower the boost, or cut the loud bands instead.
+        Peak boost of +{{ netPeakDb.toFixed(1) }} dB can clip loud tracks. Lower the boost, cut the loud bands, or lower the preamp.
       </p>
       <p
         v-if="selSeverity?.reason"
@@ -317,6 +342,7 @@ function choose(v: string | null): void {
         <span v-if="dsp.rowError" class="text-danger" role="alert">{{ dsp.rowError }}</span>
       </div>
     </div>
+    <EqImportDialog v-model:open="importing" />
     <PromptDialog v-model:open="naming" title="Save EQ preset" label="Preset name" placeholder="My tuning" confirm-label="Save" :maxlength="40" @submit="(n) => dsp.saveUserPreset(n)" />
   </div>
 </template>

@@ -99,6 +99,8 @@ export const usePlayerStore = defineStore("player", () => {
   const downloadBps = computed(() => raw.value?.download_bps ?? null);
   const bufferAheadMs = computed(() => raw.value?.buffer_ahead_ms ?? null);
   const bufferComplete = computed(() => raw.value?.buffer_complete ?? false);
+  /** Waiting on the network with nothing left to play. */
+  const buffering = computed(() => raw.value?.buffering ?? false);
   const outputRateHz = computed(() => raw.value?.output_rate_hz ?? null);
   const analogPlan = computed(() => raw.value?.analog_plan ?? null);
   const analogLevel = computed(() => raw.value?.analog_level ?? null);
@@ -202,6 +204,7 @@ export const usePlayerStore = defineStore("player", () => {
     downloadBps,
     bufferAheadMs,
     bufferComplete,
+    buffering,
     outputRateHz,
     analogPlan,
     analogLevel,

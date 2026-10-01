@@ -392,7 +392,7 @@ fn set_artwork_cache_max_bytes(state: State<'_, ArtworkState>, max_bytes: u64) -
     artwork_cache_stats_for(&state.cache)
 }
 
-// --- Catalog cache (docs/v2/kahawai-player-catalog-cache-spec.md) ----------
+// --- Catalog cache (docs/v1/kahawai-player-catalog-cache-spec.md) ----------
 
 struct CatalogState {
     cache: Arc<CatalogCache>,
@@ -482,6 +482,8 @@ struct PlayerStateDto {
     buffer_ahead_ms: Option<u64>,
     /// The whole stream is already fetched (a short buffer is just the track's end).
     buffer_complete: bool,
+    /// Playback has run out of buffered audio and is waiting for the network.
+    buffering: bool,
     /// Rate of the audio reaching the output; the rate the EQ is designed at.
     output_rate_hz: Option<u32>,
     /// What the analog stage is doing right now (plan and latency), if on.
@@ -553,6 +555,7 @@ impl From<PlayerSnapshot> for PlayerStateDto {
             download_bps: s.download_bps,
             buffer_ahead_ms: s.buffer_ahead_ms,
             buffer_complete: s.buffer_complete,
+            buffering: s.buffering,
             output_rate_hz: s.output_rate_hz,
             analog_plan: s.analog_plan,
             analog_level: s.analog_level.map(|l| AnalogLevelDto {
@@ -907,7 +910,7 @@ fn set_output_device(state: State<'_, AppState>, name: Option<String>) {
     state.engine.set_output_device(name);
 }
 
-/// Replace the parametric EQ bands (≤ 8; validated before anything is
+/// Replace the parametric EQ bands (≤ 12; validated before anything is
 /// sent to the engine). PCM only — DoP bypasses EQ entirely.
 #[tauri::command]
 fn set_eq_bands(
@@ -932,6 +935,15 @@ fn set_analog(app: AppHandle, state: State<'_, AppState>, settings: AnalogSettin
 #[tauri::command]
 fn set_eq_enabled(app: AppHandle, state: State<'_, AppState>, enabled: bool) {
     state.engine.set_eq_enabled(enabled);
+    emit_state(&app, &state.engine);
+}
+
+/// The EQ's preamp in dB (headroom for its boosts; AutoEq profiles carry a
+/// negative one). Clamped and saved by the engine; in effect only while the EQ
+/// is on. PCM only, like the EQ.
+#[tauri::command]
+fn set_eq_preamp(app: AppHandle, state: State<'_, AppState>, db: f32) {
+    state.engine.set_eq_preamp(db);
     emit_state(&app, &state.engine);
 }
 
@@ -1326,6 +1338,7 @@ fn main() {
             set_output_device,
             set_eq_bands,
             set_eq_enabled,
+            set_eq_preamp,
             set_analog,
             set_loudness_target,
             set_loudness_enabled,

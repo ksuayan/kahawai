@@ -1,5 +1,5 @@
 //! The `enrich_metadata` job: look up albums that have no MusicBrainz ID
-//! (docs/v2/kahawai-metadata-enrichment-spec.md).
+//! (docs/v1/kahawai-metadata-enrichment-spec.md).
 //!
 //! - Only albums without an ID are looked up: embedded IDs (Picard) never
 //!   cost a request. One search per album, never per track.

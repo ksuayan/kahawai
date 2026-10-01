@@ -55,6 +55,31 @@ describe("jobs store: polling", () => {
     expect(toasts.toasts[0].progress).toBe(0.65);
   });
 
+  it("shows how many files a scan has got through, with the finish time on a rescan", async () => {
+    const feed = jobsFeed([job({ progress: 0, files: { done: 1234, per_sec: 40 } })]);
+    const jobs = useJobsStore();
+    const toasts = useToastsStore();
+    jobs.init();
+    await flushPromises();
+    expect(toasts.toasts[0].detail).toBe(`${(1234).toLocaleString()} files scanned`);
+
+    const eta = Date.now() + 600_000;
+    feed.set([job({ progress: 0.25, files: { done: 1250, total: 5000, per_sec: 40, eta_at: eta } })]);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(toasts.toasts[0].detail).toBe(
+      `${(1250).toLocaleString()} of about ${(5000).toLocaleString()} files, done around ${new Date(eta).toLocaleTimeString(undefined, { timeStyle: "short" })}`,
+    );
+  });
+
+  it("adds the read speed to a hashing job's detail", async () => {
+    jobsFeed([job({ kind: "hash_files", label: "Content hashing", progress: 0.1, files: { done: 800, total: 8000, per_sec: 2, mb_per_sec: 112.4 } })]);
+    const jobs = useJobsStore();
+    const toasts = useToastsStore();
+    jobs.init();
+    await flushPromises();
+    expect(toasts.toasts[0].detail).toBe(`${(800).toLocaleString()} of about ${(8000).toLocaleString()} files, 112 MB/s`);
+  });
+
   it("reloads the library when a scan finishes, but not for other jobs or a still-running scan", async () => {
     const feed = jobsFeed([job()]);
     const jobs = useJobsStore();

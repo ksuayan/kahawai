@@ -237,6 +237,7 @@ fn main() {
             desktop::setup_get_running_config,
             desktop::setup_apply_config,
             desktop::setup_recent_scans,
+            desktop::setup_active_hash_job,
             desktop::setup_live_scan_stats,
             desktop::setup_enrichment_status,
             desktop::setup_set_enrichment,
@@ -1534,7 +1535,7 @@ mod integration_tests {
             snap["rev"].as_i64().unwrap(),
         );
         assert_eq!(snap["tracks"].as_array().unwrap().len(), 11);
-        crate::hashing::hash_pending(&state.pool, |_, _| {})
+        crate::hashing::hash_pending(&state.pool, |_, _, _| {})
             .await
             .unwrap();
         assert_eq!(

@@ -1,4 +1,4 @@
-//! Local catalog cache (docs/v2/kahawai-player-catalog-cache-spec.md).
+//! Local catalog cache (docs/v1/kahawai-player-catalog-cache-spec.md).
 //!
 //! The player keeps the server's catalog (present tracks, albums, artists,
 //! genres) in a small SQLite file, plus the revision it reflects. The

@@ -377,7 +377,7 @@ const dopRates = computed(() =>
       >
         <template #note>
           <UiHint>
-            Up to 8 bands, applied to PCM only (DoP bypasses EQ). Drag a point to shape the sound,
+            Up to 12 bands, applied to PCM only (DoP bypasses EQ). Drag a point to shape the sound,
             double-click the graph to add a band. Changes apply live and are saved as you go.
           </UiHint>
         </template>

@@ -16,6 +16,7 @@ pub mod dop;
 pub mod dsd_devices;
 pub mod dsp;
 pub mod engine;
+pub mod fader;
 pub mod quality;
 pub mod queue;
 pub mod rangesource;
@@ -23,6 +24,7 @@ pub mod readahead;
 pub mod resample;
 pub mod sink;
 pub mod transport;
+pub mod worker;
 
 pub use analog::{
     anti_alias_plan, koren_plate_current, oversample_factor, triode_table, AnalogFlavour,
@@ -38,13 +40,15 @@ pub use dsp::{
     headroom_guard, integrated_lufs, max_boost_db, plan_gain_db, scan_track_levels,
     scan_track_lufs, usable_freq, validate_bands, DspStage, EqBand, EqBandType, GainRamp,
     LookaheadLimiter, LoudnessMeter, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
-    LIMITER_CEILING, MAX_EQ_BANDS, MAX_LOUDNESS_GAIN_DB, MIN_LOUDNESS_GAIN_DB, NYQUIST_FRACTION,
+    EQ_PREAMP_RANGE_DB, LIMITER_CEILING, MAX_EQ_BANDS, MAX_LOUDNESS_GAIN_DB, MIN_LOUDNESS_GAIN_DB,
+    NYQUIST_FRACTION,
 };
 pub use engine::{
     resolve_format, snapshot_key_differs, valid_formats, AnalogLevel, DsdStory, DspSettings,
     EngineCommand, EngineController, Player, PlayerEvent, PlayerSnapshot, PlayerStatus,
     DEFAULT_SERVER_URL,
 };
+pub use fader::{AmpRamp, Fader};
 pub use quality::QualityMode;
 pub use queue::{Queue, RepeatMode};
 pub use rangesource::{RangeSource, SeekableControl, SeekableRead, SeekableStream};

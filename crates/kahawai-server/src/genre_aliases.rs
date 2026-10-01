@@ -1,4 +1,4 @@
-//! Genre alias table (docs/v2/kahawai-genre-normalization-spec.md). Static
+//! Genre alias table (docs/v1/kahawai-genre-normalization-spec.md). Static
 //! and meant to be extended: `GET /api/genres/report` lists the raw tags that
 //! fell through to the keyword fallback or matched nothing.
 //!

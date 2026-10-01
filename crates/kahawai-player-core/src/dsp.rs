@@ -103,8 +103,14 @@ pub struct EqBand {
     pub q: f32,
 }
 
-/// Maximum simultaneous bands (v1 design decision).
-pub const MAX_EQ_BANDS: usize = 8;
+/// Maximum simultaneous bands. Headphone-correction profiles (AutoEq) are
+/// usually ten filters, so this leaves room for those plus a couple of the
+/// user's own.
+pub const MAX_EQ_BANDS: usize = 12;
+
+/// Range of the EQ preamp, in dB. Correction profiles only ever cut (to leave
+/// headroom for their boosts); the top end allows a deliberate makeup gain.
+pub const EQ_PREAMP_RANGE_DB: (f32, f32) = (-24.0, 12.0);
 
 fn validate_band(b: &EqBand) -> Result<(), MusicError> {
     if !(10.0..=24_000.0).contains(&b.freq) || !b.freq.is_finite() {
@@ -1039,6 +1045,12 @@ impl LoudnessNorm {
 
     /// Gain in dB for this track: cached, else `scan()` once and cache.
     /// A failed or silent scan yields 0 dB (never blocks playback).
+    /// Whether this (track, format)'s levels are already cached, so no
+    /// pre-scan is needed.
+    pub fn has_levels(&self, track_id: i64, fmt: StreamFormat) -> bool {
+        self.levels.contains_key(&(track_id, fmt))
+    }
+
     /// The gain for a track, planned against its real peak and the EQ's
     /// worst-case boost so the result cannot clip. `scan` runs at most once
     /// per (track, format); the levels are cached, the gain is re-planned.
@@ -1223,6 +1235,14 @@ impl GainRamp {
             step: 0.0,
             ramp_frames: ramp_frames.max(1),
         }
+    }
+
+    /// Jump to `db` at once (the start of a stream: nothing to smooth).
+    pub fn snap(&mut self, db: f32) {
+        let g = 10f32.powf(db / 20.0);
+        self.current = g;
+        self.target = g;
+        self.step = 0.0;
     }
 
     pub fn retarget(&mut self, target_db: f32) {
@@ -1647,7 +1667,7 @@ mod tests {
                 freq: 1000.0,
                 gain_db: 0.0,
                 q: 1.0,
-            }; 9]
+            }; MAX_EQ_BANDS + 1]
         )
         .is_err());
         assert!(validate_bands(&[EqBand {

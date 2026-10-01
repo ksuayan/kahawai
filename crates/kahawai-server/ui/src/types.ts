@@ -123,7 +123,7 @@ export type JobStatus = "queued" | "running" | "done" | "failed" | "paused" | "c
 
 export interface ScanJob {
   id: string;
-  kind: "scan";
+  kind: "scan" | "hash_files";
   label: string;
   progress: number;
   status: JobStatus;
@@ -132,6 +132,45 @@ export interface ScanJob {
   started_at?: number | null;
   /** When it ended (done or failed), Unix ms. */
   finished_at?: number | null;
+  /** Live file counts while it runs. */
+  files?: FileProgress | null;
+}
+
+/** Mirrors `FileProgress` in kahawai-core. */
+export interface FileProgress {
+  done: number;
+  /** The previous scan's count; absent on a first scan. */
+  total?: number | null;
+  per_sec?: number | null;
+  /** Megabytes per second, for hashing. */
+  mb_per_sec?: number | null;
+  /** Estimated finish, Unix ms. */
+  eta_at?: number | null;
+}
+
+/** What the Status tab shows for a running scan. Remaining and ETA need the
+ *  previous scan's count; the rate needs a few seconds of data. */
+export function scanFiles(f: FileProgress, now: number): {
+  processed: string;
+  remaining: string | null;
+  rate: string | null;
+  mbps: string | null;
+  eta: string | null;
+} {
+  const n = (v: number): string => Math.round(v).toLocaleString();
+  const eta = f.eta_at ?? null;
+  return {
+    processed: n(f.done),
+    remaining: f.total != null ? n(Math.max(0, f.total - f.done)) : null,
+    rate: f.per_sec != null ? `${f.per_sec >= 10 ? Math.round(f.per_sec) : f.per_sec.toFixed(1)} files/s` : null,
+    mbps: f.mb_per_sec != null ? `${f.mb_per_sec >= 10 ? Math.round(f.mb_per_sec) : f.mb_per_sec.toFixed(1)} MB/s` : null,
+    eta:
+      eta === null
+        ? null
+        : Math.abs(eta - now) < 12 * 3600_000
+          ? new Date(eta).toLocaleTimeString(undefined, { timeStyle: "short" })
+          : formatWhen(eta),
+  };
 }
 
 /** A job's start, in the user's own locale and time zone:
