@@ -426,7 +426,7 @@ pub async fn search(
 }
 
 // ---------------------------------------------------------------------------
-// Genres  (docs/v2/kahawai-genre-normalization-spec.md)
+// Genres  (docs/v1/kahawai-genre-normalization-spec.md)
 // ---------------------------------------------------------------------------
 
 /// Canonical genres with their present-track counts, most tracks first.

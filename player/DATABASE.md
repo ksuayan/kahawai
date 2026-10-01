@@ -5,8 +5,8 @@ and the server's), which indexes serve them, and the rules that keep them
 fast. Measured numbers come from a real library: 81,316 tracks, 5,754
 albums, 16,317 artists, on a server whose database sits on a spinning disk.
 
-Related specs: [catalog cache](../docs/v2/kahawai-player-catalog-cache-spec.md),
-[genres](../docs/v2/kahawai-genre-normalization-spec.md),
+Related specs: [catalog cache](../docs/v1/kahawai-player-catalog-cache-spec.md),
+[genres](../docs/v1/kahawai-genre-normalization-spec.md),
 [server](../docs/v1/kahawai-server-spec.md).
 
 ## Overview: where the player keeps things

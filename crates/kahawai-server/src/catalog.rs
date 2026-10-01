@@ -1,5 +1,5 @@
 //! Catalog snapshot and delta for the player's local cache
-//! (docs/v2/kahawai-player-catalog-cache-spec.md).
+//! (docs/v1/kahawai-player-catalog-cache-spec.md).
 //!
 //! Triggers from migration 010 stamp every shown change to a track, album
 //! or artist with the next `meta.catalog_rev`, and leave a tombstone for a

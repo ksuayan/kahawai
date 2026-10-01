@@ -103,7 +103,7 @@ in `docs/Backlog.md`.
 Docs live under `docs/`, split by audience and by how settled the material is:
 
 - **`docs/v1/`** — design & feature docs for what's actually built and shipped. Read these before touching code.
-- **`docs/v2/`** — v2 feature specs. The three here are built; `docs/Backlog.md` tracks what's left of each.
+- **`docs/v2/`** — specs for work not yet started. Empty right now: the three v2 specs are built and have moved to `docs/v1/`; `docs/Backlog.md` tracks what's left of each.
 - **`docs/users/`** — non-technical, general-audience material (press release, background articles). No code references, nothing here assumes you're a contributor.
 - **`docs/Backlog.md`** / **`docs/Roadmap.md`** — cross-cutting planning docs, not tied to a single version.
 - **`docs/Installation.md`** — for beta testers: installing the disk image, troubleshooting, FAQ.
@@ -132,17 +132,17 @@ New here? Read top to bottom. Already know the codebase? Jump to whichever group
 - `docs/users/Euphonics-Vacuum-Tube-Primer.md` — background primer on why tube gear sounds the way it does; companion reading for Analog Emulation, written for a general audience.
 - `docs/v1/SACD-Extraction.md` — a scope decision, not a roadmap item: why SACD ISO decoding is permanently out of scope.
 
-**v2 features** (`docs/v2/`) — built; follow-ups tracked in `docs/Backlog.md`
+**Built v2 features** (`docs/v1/`) — follow-ups tracked in `docs/Backlog.md`
 
-- `docs/v2/kahawai-genre-normalization-spec.md` — genre normalization + browse/search.
-- `docs/v2/kahawai-metadata-enrichment-spec.md` — metadata remapping & external enrichment (Phase C: MusicBrainz and the Cover Art Archive, off by default).
-- `docs/v2/kahawai-player-catalog-cache-spec.md` — the player's local catalog cache: a snapshot, then only what changed (catalog revisions and deltas).
+- `docs/v1/kahawai-genre-normalization-spec.md` — genre normalization + browse/search.
+- `docs/v1/kahawai-metadata-enrichment-spec.md` — metadata remapping & external enrichment (Phase C: MusicBrainz and the Cover Art Archive, off by default).
+- `docs/v1/kahawai-player-catalog-cache-spec.md` — the player's local catalog cache: a snapshot, then only what changed (catalog revisions and deltas).
 - `player/DATABASE.md` — the player's schema, its key queries (its own and the server's), the indexes that serve them, and best practices.
 
 **Planning & scope**
 
 - `docs/Roadmap.md` — future enhancements: possibilities, not commitments, grouped by area.
-- `docs/Backlog.md` — deferred decisions and known rough edges, with enough context to pick them back up cold; includes the `docs/v2/` specs above.
+- `docs/Backlog.md` — deferred decisions and known rough edges, with enough context to pick them back up cold; includes the built v2 features above.
 
 Outside `docs/`: `player/README.md` (the desktop client's own setup/build README), `LICENSE`, `DISCLAIMER.md` (the disclaimers, shown in both apps' About and in this README), `CLAUDE.md` (orientation for AI coding agents working in this repo), and `player/ui/src/content/notices.md` (third-party dependency licenses).
 
