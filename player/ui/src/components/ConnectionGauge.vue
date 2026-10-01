@@ -16,14 +16,18 @@ const visible = computed(
   () =>
     player.currentTrack !== null &&
     player.status !== "stopped" &&
-    (player.downloadBps !== null || player.bufferAheadMs !== null),
+    (player.downloadBps !== null || player.bufferAheadMs !== null || player.buffering),
 );
-const health = computed(() => connectionHealth(player.bufferAheadMs, player.bufferComplete));
-const fill = computed(() => gaugeFill(player.bufferAheadMs, player.bufferComplete));
-const rate = computed(() => formatRate(player.downloadBps));
-const ahead = computed(() => (player.bufferComplete ? "all" : formatAhead(player.bufferAheadMs)));
+// Out of audio and waiting on the network is the worst state there is.
+const health = computed(() =>
+  player.buffering ? "low" : connectionHealth(player.bufferAheadMs, player.bufferComplete),
+);
+const fill = computed(() => (player.buffering ? 0 : gaugeFill(player.bufferAheadMs, player.bufferComplete)));
+const rate = computed(() => (player.buffering ? "Buffering…" : formatRate(player.downloadBps)));
+const ahead = computed(() => (player.buffering ? "0 s" : player.bufferComplete ? "all" : formatAhead(player.bufferAheadMs)));
 
 const label = computed(() => {
+  if (player.buffering) return "Connection: buffering, waiting for the server";
   const parts = [`Connection: ${rate.value === "—" ? "measuring" : rate.value}`];
   parts.push(player.bufferComplete ? "whole track buffered" : `${formatAhead(player.bufferAheadMs)} buffered ahead`);
   return parts.join(" · ");

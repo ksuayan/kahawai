@@ -20,6 +20,22 @@ use crate::readahead::{ReadAhead, ReadAheadStats};
 /// dropout without holding a whole album in memory. 0 turns read-ahead off.
 pub const DEFAULT_READ_AHEAD_BYTES: usize = 32 * 1024 * 1024;
 
+/// Opening a stream (connect, then the response headers) must not hang the
+/// playback thread on a dead network. Reading the body is deliberately left
+/// unbounded: ureq's body timeout is a total budget, not per read, so it would
+/// cut off a long track; a stalled body is handled by the read-ahead instead.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(RESPONSE_TIMEOUT))
+            .build(),
+    )
+}
+
 /// How to open one stream. Mirrors the server's `StreamQuery` (§3.4).
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
@@ -130,7 +146,7 @@ impl HttpTransport {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: Arc::new(RwLock::new(base_url.into())),
-            agent: ureq::Agent::new_with_defaults(),
+            agent: http_agent(),
             read_ahead_bytes: DEFAULT_READ_AHEAD_BYTES,
         }
     }
@@ -146,7 +162,7 @@ impl HttpTransport {
     pub fn with_shared_url(base_url: Arc<RwLock<String>>) -> Self {
         Self {
             base_url,
-            agent: ureq::Agent::new_with_defaults(),
+            agent: http_agent(),
             read_ahead_bytes: DEFAULT_READ_AHEAD_BYTES,
         }
     }

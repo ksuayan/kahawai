@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -45,6 +46,7 @@ use crate::queue::{Queue, RepeatMode};
 use crate::resample::CubicResampler;
 use crate::sink::{AudioSink, OutputPath, PcmChunk};
 use crate::transport::{HttpTransport, StreamInfo, StreamOptions, StreamProgress, Transport};
+use crate::worker::{ChunkWorker, Polled};
 
 /// Frames decoded per pump iteration (~93 ms at 44.1 kHz).
 const CHUNK_FRAMES: usize = 4096;
@@ -189,6 +191,9 @@ pub struct PlayerSnapshot {
     /// of the track, not a slow connection.
     #[serde(default)]
     pub buffer_complete: bool,
+    /// Playback has run out of buffered audio and is waiting for the network.
+    #[serde(default)]
+    pub buffering: bool,
     /// Sample rate of the audio reaching the output (after any resampling);
     /// the rate the EQ is designed at. `None` when idle.
     #[serde(default)]
@@ -241,6 +246,7 @@ impl Default for PlayerSnapshot {
             download_bps: None,
             buffer_ahead_ms: None,
             buffer_complete: false,
+            buffering: false,
             output_rate_hz: None,
             analog_plan: None,
             analog_level: None,
@@ -321,7 +327,11 @@ struct PcmStream {
     gapless_mode: Option<String>,
     format_used: StreamFormat,
     chain: Option<String>,
-    decoder: StreamDecoder,
+    /// Decodes on its own thread (the network read can block); the playback
+    /// thread only polls it. See [`crate::worker`].
+    worker: ChunkWorker<Vec<f32>>,
+    /// Container streams the decoder has finished (chained gapless).
+    streams_completed: Arc<AtomicUsize>,
     spec: DecodedSpec,
     resampler: Option<CubicResampler>,
     /// Rate of the frames handed to the sink (post-resample).
@@ -349,7 +359,10 @@ struct DopPlayback {
     seg_frames: Vec<u64>,
     gapless_mode: Option<String>,
     chain: Option<String>,
-    stream: DopStream,
+    /// Reads the DoP stream on its own thread, like [`PcmStream::worker`].
+    worker: ChunkWorker<Vec<u8>>,
+    /// WAV segments the reader has finished (chained gapless).
+    segments_completed: Arc<AtomicUsize>,
     spec: DopSpec,
     /// DoP frames written to the sink.
     pumped_frames: u64,
@@ -530,11 +543,19 @@ impl ActiveStream {
                 Some("single-session") => a.segments.len(),
                 // One container stream per segment; a broken chain falls back
                 // to sequential requests for whatever didn't play.
-                Some("chained") => a.decoder.streams_completed.min(a.segments.len()).max(1),
+                Some("chained") => a
+                    .streams_completed
+                    .load(AtomicOrdering::Relaxed)
+                    .min(a.segments.len())
+                    .max(1),
                 _ => 1,
             },
             ActiveStream::Dop(a) => match a.gapless_mode.as_deref() {
-                Some("chained") => a.stream.segments_completed.min(a.segments.len()).max(1),
+                Some("chained") => a
+                    .segments_completed
+                    .load(AtomicOrdering::Relaxed)
+                    .min(a.segments.len())
+                    .max(1),
                 // DoP single-session is one WAV per response in practice;
                 // treat like the PCM rule for uniformity.
                 Some("single-session") => a.segments.len(),
@@ -555,6 +576,11 @@ pub struct Player {
     transport: Box<dyn Transport>,
     queue: Queue,
     status: PlayerStatus,
+    /// When the playing stream ran out of data with the network stalled (the
+    /// player is "buffering"); `None` while data is flowing.
+    starved_since: Option<Instant>,
+    /// How long a starved stream is waited for before giving up.
+    stall_timeout: Duration,
     global_format: Option<StreamFormat>,
     /// Client DSD preference (Settings → DSD handling); consulted by
     /// [`resolve_format`] when no explicit override applies.
@@ -632,6 +658,8 @@ impl Player {
             transport,
             queue: Queue::new(),
             status: PlayerStatus::Stopped,
+            starved_since: None,
+            stall_timeout: STALL_TIMEOUT,
             global_format: None,
             dsd_story: DsdStory::default(),
             dsd_devices: Vec::new(),
@@ -975,6 +1003,7 @@ impl Player {
     pub fn pause(&mut self) {
         if self.status == PlayerStatus::Playing {
             self.status = PlayerStatus::Paused;
+            self.starved_since = None;
             let _ = self.sink.pause();
             self.persist_queue();
         }
@@ -984,6 +1013,7 @@ impl Player {
         match self.status {
             PlayerStatus::Paused => {
                 self.status = PlayerStatus::Playing;
+                self.starved_since = None;
                 let _ = self.sink.play();
             }
             PlayerStatus::Stopped if self.queue.current().is_some() => {
@@ -1004,6 +1034,7 @@ impl Player {
 
     pub fn stop(&mut self) {
         self.skip_exclusive_track = None;
+        self.starved_since = None;
         self.status = PlayerStatus::Stopped;
         self.active = None;
         self.resume_at_ms = None;
@@ -1314,6 +1345,7 @@ impl Player {
 
     /// Open the current queue item. `seek` = scrub target in ms.
     fn open_current(&mut self, seek: Option<u64>) {
+        self.starved_since = None;
         self.resume_at_ms = None; // a restored position only applies to the first resume
         let track = match self.queue.current().cloned() {
             Some(t) => t,
@@ -1499,13 +1531,15 @@ impl Player {
         }
 
         let base_frames = seek.unwrap_or(0) * spec.dop_rate_hz as u64 / 1000;
+        let (worker, segments_completed) = spawn_dop_worker(stream, spec.frame_bytes());
         self.active = Some(ActiveStream::Dop(DopPlayback {
             segments,
             seg_idx: 0,
             seg_frames,
             gapless_mode,
             chain: info.chain,
-            stream,
+            worker,
+            segments_completed,
             spec,
             pumped_frames: 0,
             base_frames,
@@ -1739,6 +1773,7 @@ impl Player {
             0
         };
 
+        let (worker, streams_completed) = spawn_pcm_worker(decoder, spec.channels as usize);
         self.active = Some(ActiveStream::Pcm(PcmStream {
             segments,
             seg_idx: 0,
@@ -1746,7 +1781,8 @@ impl Player {
             gapless_mode,
             format_used: fmt,
             chain: info.chain,
-            decoder,
+            worker,
+            streams_completed,
             spec,
             resampler,
             sink_rate,
@@ -1760,8 +1796,27 @@ impl Player {
         self.status = PlayerStatus::Playing;
     }
 
-    /// Decode one chunk and push it to the sink. Call in a loop while
-    /// [`wants_pump`](Self::wants_pump).
+    /// The stream has nothing decoded to play and the network is the reason
+    /// (the worker is waiting on a read). The playback thread is not blocked,
+    /// so commands are still served; this only tracks how long it has been
+    /// and gives up after `stall_timeout` rather than waiting for ever.
+    fn note_starved(&mut self) {
+        let since = *self.starved_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= self.stall_timeout {
+            tracing::warn!(waited = ?since.elapsed(), "stream starved; giving up");
+            self.fail("The connection to the server was lost.");
+        }
+    }
+
+    /// How long a starved stream is waited for before playback stops with an
+    /// error (30 s by default). Exposed for tests.
+    pub fn set_stall_timeout(&mut self, d: Duration) {
+        self.stall_timeout = d;
+    }
+
+    /// Take one decoded chunk and push it to the sink. Call in a loop while
+    /// [`wants_pump`](Self::wants_pump). Never blocks on the network: the
+    /// decoder runs on a worker thread and this only polls it.
     pub fn pump(&mut self) {
         if self.status != PlayerStatus::Playing {
             return;
@@ -1781,26 +1836,35 @@ impl Player {
 
     /// PCM pump: decode -> EQ -> loudness gain ramp -> volume -> sink.
     fn pump_pcm(&mut self) {
-        // Decode one chunk.
+        // Take one decoded chunk from the worker.
         let channels = match self.active.as_ref() {
             Some(ActiveStream::Pcm(a)) => a.spec.channels as usize,
             _ => return,
         };
-        let mut pcm = vec![0.0f32; CHUNK_FRAMES * channels];
-        let decoded_frames = {
-            let active = match self.active.as_mut() {
-                Some(ActiveStream::Pcm(a)) => a,
-                _ => return,
-            };
-            match active.decoder.decode_interleaved(&mut pcm) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(error = %e, "decode failed");
-                    self.fail("Couldn't decode this file.");
-                    return;
-                }
+        let polled = match self.active.as_mut() {
+            Some(ActiveStream::Pcm(a)) => a.worker.poll(POLL_WAIT),
+            _ => return,
+        };
+        let pcm = match polled {
+            Polled::Ready(chunk) => {
+                self.starved_since = None;
+                chunk
+            }
+            Polled::Empty => {
+                self.note_starved();
+                return;
+            }
+            Polled::Ended => {
+                self.starved_since = None;
+                Vec::new()
+            }
+            Polled::Failed(e) => {
+                tracing::warn!(error = %e, "decode failed");
+                self.fail("Couldn't decode this file.");
+                return;
             }
         };
+        let decoded_frames = pcm.len() / channels.max(1);
         if decoded_frames == 0 {
             // A response that never yields audio is skipped, but a streak
             // longer than the queue means every track is poison - fail
@@ -1956,22 +2020,32 @@ impl Player {
             Some(ActiveStream::Dop(a)) => a.spec.frame_bytes(),
             _ => return,
         };
-        // Whole frames only: the sink must never see a partial DoP frame.
-        let mut buf = vec![0u8; 4096 * frame_bytes];
-        let n = {
-            let active = match self.active.as_mut() {
-                Some(ActiveStream::Dop(a)) => a,
-                _ => return,
-            };
-            match active.stream.read_frames(&mut buf) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(error = %e, "DoP read failed");
-                    self.fail("Couldn't read the DSD stream.");
-                    return;
-                }
+        // Whole frames only: the sink must never see a partial DoP frame (the
+        // worker's reader only ever returns whole frames).
+        let polled = match self.active.as_mut() {
+            Some(ActiveStream::Dop(a)) => a.worker.poll(POLL_WAIT),
+            _ => return,
+        };
+        let buf = match polled {
+            Polled::Ready(chunk) => {
+                self.starved_since = None;
+                chunk
+            }
+            Polled::Empty => {
+                self.note_starved();
+                return;
+            }
+            Polled::Ended => {
+                self.starved_since = None;
+                Vec::new()
+            }
+            Polled::Failed(e) => {
+                tracing::warn!(error = %e, "DoP read failed");
+                self.fail("Couldn't read the DSD stream.");
+                return;
             }
         };
+        let n = buf.len();
         if n == 0 {
             let never_produced =
                 matches!(self.active.as_ref(), Some(ActiveStream::Dop(a)) if a.pumped_frames == 0);
@@ -2056,6 +2130,7 @@ impl Player {
     }
 
     fn fail(&mut self, msg: &str) {
+        self.starved_since = None;
         self.error = Some(msg.to_string());
         self.status = PlayerStatus::Stopped;
         self.active = None;
@@ -2110,6 +2185,7 @@ impl Player {
             download_bps: net.0,
             buffer_ahead_ms: net.1,
             buffer_complete: net.2,
+            buffering: self.starved_since.is_some() && self.status == PlayerStatus::Playing,
             output_rate_hz,
             analog_plan: if self.active.is_some() && self.output_path == OutputPath::Pcm {
                 self.analog.status().map(|s| s.describe())
@@ -2900,6 +2976,60 @@ fn estimate_ahead_ms(
         _ => return None,
     };
     Some((queued as f64 / bytes_per_ms) as u64)
+}
+
+/// How long a starved stream is waited for before giving up.
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a pump waits for the decode worker's next chunk. Short, because
+/// the same thread serves commands: while the network is stalled a pause, seek
+/// or stop is answered within about this long.
+const POLL_WAIT: Duration = Duration::from_millis(25);
+
+/// Decoded chunks the worker may run ahead of the playback thread.
+const DECODE_DEPTH: usize = 8;
+
+/// Run a decoder on its own thread, producing `CHUNK_FRAMES`-frame chunks of
+/// interleaved `f32`. Also returns the live count of container streams it has
+/// finished (for chained gapless).
+fn spawn_pcm_worker(
+    mut decoder: StreamDecoder,
+    channels: usize,
+) -> (ChunkWorker<Vec<f32>>, Arc<AtomicUsize>) {
+    let channels = channels.max(1);
+    let completed = Arc::new(AtomicUsize::new(decoder.streams_completed));
+    let shared = completed.clone();
+    let worker = ChunkWorker::spawn(DECODE_DEPTH, move || {
+        let mut pcm = vec![0.0f32; CHUNK_FRAMES * channels];
+        let frames = decoder.decode_interleaved(&mut pcm)?;
+        shared.store(decoder.streams_completed, AtomicOrdering::Relaxed);
+        if frames == 0 {
+            return Ok(None); // fully consumed
+        }
+        pcm.truncate(frames * channels);
+        Ok(Some(pcm))
+    });
+    (worker, completed)
+}
+
+/// The same for a DoP stream: whole-frame byte chunks.
+fn spawn_dop_worker(
+    mut stream: DopStream,
+    frame_bytes: usize,
+) -> (ChunkWorker<Vec<u8>>, Arc<AtomicUsize>) {
+    let completed = Arc::new(AtomicUsize::new(stream.segments_completed));
+    let shared = completed.clone();
+    let worker = ChunkWorker::spawn(DECODE_DEPTH, move || {
+        let mut buf = vec![0u8; 4096 * frame_bytes];
+        let n = stream.read_frames(&mut buf)?;
+        shared.store(stream.segments_completed, AtomicOrdering::Relaxed);
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.truncate(n);
+        Ok(Some(buf))
+    });
+    (worker, completed)
 }
 
 /// How far inside the end a seek onto the end lands, in ms.

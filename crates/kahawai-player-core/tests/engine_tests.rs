@@ -3494,6 +3494,167 @@ fn without_a_seekable_source_the_seek_falls_back_to_streaming_and_skipping() {
 }
 
 // ---------------------------------------------------------------------------
+// A stalled network must never freeze the controls
+// ---------------------------------------------------------------------------
+
+use kahawai_player_core::transport::StreamProgress;
+use kahawai_player_core::ReadAhead;
+use std::sync::atomic::AtomicBool;
+
+/// Serves some chunks, then goes dead until released, then serves the rest.
+struct DeadThenAlive {
+    before: Vec<u8>,
+    after: Vec<u8>,
+    at: usize,
+    release: Arc<AtomicBool>,
+}
+
+impl std::io::Read for DeadThenAlive {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n_before = self.before.len();
+        if self.at < n_before {
+            let n = buf.len().min(n_before - self.at).min(4096);
+            buf[..n].copy_from_slice(&self.before[self.at..self.at + n]);
+            self.at += n;
+            return Ok(n);
+        }
+        while !self.release.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let off = self.at - n_before;
+        if off >= self.after.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(self.after.len() - off).min(4096);
+        buf[..n].copy_from_slice(&self.after[off..off + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// A 2 s track whose network delivers the first 0.5 s, dies, and (when
+/// released) delivers the rest. Read ahead, as the real transport does.
+struct DyingNetwork {
+    release: Arc<AtomicBool>,
+}
+
+impl Transport for DyingNetwork {
+    fn open_stream(&self, _id: i64, _opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+        let whole = wav_bytes(440.0, 44100 * 2);
+        let half = 44 + 44100 * 4 / 2; // header + 0.5 s of 16-bit stereo
+        let ahead = ReadAhead::new(
+            DeadThenAlive {
+                before: whole[..half].to_vec(),
+                after: whole[half..].to_vec(),
+                at: 0,
+                release: self.release.clone(),
+            },
+            1 << 20,
+        );
+        let stats = ahead.stats();
+        Ok(StreamInfo {
+            reader: Box::new(ahead),
+            content_type: "audio/wav".into(),
+            chain: None,
+            gapless_next: None,
+            gapless_mode: None,
+            progress: Some(StreamProgress {
+                received: Arc::new(AtomicU64::new(0)),
+                content_length: None,
+                offset: 0,
+                stats: Some(stats),
+            }),
+        })
+    }
+}
+
+fn dying_network_controller(suffix: &str) -> (EngineController, Arc<AtomicBool>) {
+    let release = Arc::new(AtomicBool::new(false));
+    let dir = std::env::temp_dir().join(format!("kahawai-player-core-{suffix}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ctl = EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(DyingNetwork {
+            release: release.clone(),
+        }),
+        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
+        dir.join("settings.json"),
+    );
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 2_000)], 0);
+    (ctl, release)
+}
+
+#[test]
+fn the_controls_still_answer_while_the_network_is_stalled() {
+    let (ctl, release) = dying_network_controller("stall-controls");
+    wait_for(|| ctl.snapshot().buffering);
+    assert_eq!(
+        ctl.snapshot().status,
+        PlayerStatus::Playing,
+        "still the playing track, just buffering"
+    );
+    // Before the fix this pause was never processed: the playback thread sat
+    // blocked in the network read.
+    ctl.pause();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Paused);
+    assert!(
+        !ctl.snapshot().buffering,
+        "a paused player is not buffering"
+    );
+    ctl.stop();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Stopped);
+    release.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn playback_resumes_by_itself_when_the_network_comes_back() {
+    let (ctl, release) = dying_network_controller("stall-resume");
+    wait_for(|| ctl.snapshot().buffering);
+    assert_eq!(ctl.snapshot().status, PlayerStatus::Playing);
+    release.store(true, Ordering::SeqCst);
+    // It plays on to the end of the track by itself: finished, with no error
+    // and no one having touched the controls.
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Stopped);
+    let s = ctl.snapshot();
+    assert!(s.error.is_none(), "completed cleanly: {:?}", s.error);
+    assert!(!s.buffering);
+}
+
+#[test]
+fn a_stream_that_never_comes_back_ends_with_a_clear_error_not_a_hang() {
+    let release = Arc::new(AtomicBool::new(false));
+    let sink = SharedSink(Arc::new(Mutex::new(VecSink::new())));
+    let mut player = Player::new(
+        Box::new(sink),
+        Box::new(DyingNetwork {
+            release: release.clone(),
+        }),
+    );
+    player.set_stall_timeout(Duration::from_millis(250));
+    player.play_queue(vec![track(1, AudioFormat::Wav, 2_000)], 0);
+    let mut waited = 0;
+    while player.status() == PlayerStatus::Playing && waited < 600 {
+        player.pump();
+        waited += 1;
+    }
+    let s = player.snapshot();
+    assert_eq!(
+        s.status,
+        PlayerStatus::Stopped,
+        "gave up instead of hanging"
+    );
+    assert!(
+        s.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("connection to the server was lost"),
+        "says why: {:?}",
+        s.error
+    );
+    release.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
 // Turning off the last thing that holds Best quality back engages it now
 // ---------------------------------------------------------------------------
 

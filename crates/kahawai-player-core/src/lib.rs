@@ -23,6 +23,7 @@ pub mod readahead;
 pub mod resample;
 pub mod sink;
 pub mod transport;
+pub mod worker;
 
 pub use analog::{
     anti_alias_plan, koren_plate_current, oversample_factor, triode_table, AnalogFlavour,
