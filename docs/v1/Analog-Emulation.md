@@ -91,7 +91,7 @@ Our sources are 44.1 to 192 kHz. Content at 96 kHz and above has a lot of headro
 
 ### 4.1 Where it lives
 
-- A new module `analog.rs` in [kahawai-player-core](../../crates/kahawai-player-core/src/) (pure Rust, no platform imports, like `dsp.rs`).
+- A new module `dsp/analog.rs` in [kahawai-player-core](../../crates/kahawai-player-core/src/dsp/) (pure Rust, no platform imports, like the other DSP stages).
 - A small trait so stages compose (this is the `DspStage` idea from EQ.md):
 
 ```rust
@@ -342,7 +342,7 @@ A correction to my own first run: an early version of this test reported about â
 
 ## 11. Phase 1 results
 
-Code: [analog.rs](../../crates/kahawai-player-core/src/analog.rs) (the stage), the `DspStage` trait in [dsp.rs](../../crates/kahawai-player-core/src/dsp.rs), and the wiring in [engine.rs](../../crates/kahawai-player-core/src/engine.rs). Tauri command: `set_analog`. (The Settings panel came later; see section 13.)
+Code: [dsp/analog.rs](../../crates/kahawai-player-core/src/dsp/analog.rs) (the stage), the `DspStage` trait in [dsp/mod.rs](../../crates/kahawai-player-core/src/dsp/mod.rs), and the wiring in [engine.rs](../../crates/kahawai-player-core/src/engine.rs). Tauri command: `set_analog`. (The Settings panel came later; see section 13.)
 
 ### 11.1 What exists
 
@@ -371,7 +371,7 @@ Code: [analog.rs](../../crates/kahawai-player-core/src/analog.rs) (the stage), t
 
 ### 11.3 Tests (all pass)
 
-The stage's tests are in `analog.rs`, plus two engine tests:
+The stage's tests are in `dsp/analog.rs`, plus two engine tests:
 
 - bit-transparent when off, and again after fading out;
 - warm triode: 2nd harmonic well above the 3rd; solid state: no 2nd, audible 3rd;
@@ -417,7 +417,7 @@ Start the app and play something on the normal (shared) output. Use `"solid_stat
 
 ## 12. Phase 2 results
 
-Code: the tube model, table and ADAA in [analog.rs](../../crates/kahawai-player-core/src/analog.rs). Measurements come from `cargo test --release -p kahawai-player-core --lib measure_anti_alias_plans -- --ignored --nocapture` (aliasing) and [phase1_cost.rs](../../research/analog-spike/src/bin/phase1_cost.rs) (CPU, output in [PHASE1_COST.txt](../../research/analog-spike/PHASE1_COST.txt)).
+Code: the tube model, table and ADAA in [dsp/analog.rs](../../crates/kahawai-player-core/src/dsp/analog.rs). Measurements come from `cargo test --release -p kahawai-player-core --lib measure_anti_alias_plans -- --ignored --nocapture` (aliasing) and [phase1_cost.rs](../../research/analog-spike/src/bin/phase1_cost.rs) (CPU, output in [PHASE1_COST.txt](../../research/analog-spike/PHASE1_COST.txt)).
 
 ### 12.1 The triode curve
 
@@ -524,7 +524,7 @@ A small message ("Analog warmth: listening to B", with a one-line summary of the
 
 ### 13.7 Level meter and level matching
 
-A/B comparisons are only fair when both sides are equally loud, so the panel now measures it. Code: `LoudnessMeter` in [dsp.rs](../../crates/kahawai-player-core/src/dsp.rs), the wiring in [engine.rs](../../crates/kahawai-player-core/src/engine.rs), the panel in [AnalogSection.vue](../../player/ui/src/components/AnalogSection.vue) and the matching logic in [stores/analog.ts](../../player/ui/src/stores/analog.ts).
+A/B comparisons are only fair when both sides are equally loud, so the panel now measures it. Code: `LoudnessMeter` in [dsp/loudness.rs](../../crates/kahawai-player-core/src/dsp/loudness.rs), the wiring in [engine.rs](../../crates/kahawai-player-core/src/engine.rs), the panel in [AnalogSection.vue](../../player/ui/src/components/AnalogSection.vue) and the matching logic in [stores/analog.ts](../../player/ui/src/stores/analog.ts).
 
 **What it measures.** The engine measures the loudness of the signal going into the stage and coming out of it, and reports the difference: *what the stage adds to the level*. The measurement:
 
@@ -585,7 +585,7 @@ Code: [stores/abx.ts](../../player/ui/src/stores/abx.ts) and the "Blind test" bl
 
 ## 14. Phase 3 results
 
-Code: the sag envelope, transformer stage and their settings in [analog.rs](../../crates/kahawai-player-core/src/analog.rs). Two new controls, **Sag** and **Transformer** (0 to 100%, default 30% each), in the engine settings, in `dsp.analog`, and in each A/B slot in Settings.
+Code: the sag envelope, transformer stage and their settings in [dsp/analog.rs](../../crates/kahawai-player-core/src/dsp/analog.rs). Two new controls, **Sag** and **Transformer** (0 to 100%, default 30% each), in the engine settings, in `dsp.analog`, and in each A/B slot in Settings.
 
 ### 14.1 Sag (3.1)
 
@@ -636,7 +636,7 @@ Phase 2 was 3.4%, 4.0% and 1.0% for the triode. The 192 kHz figure rose most bec
 
 ## 15. More flavours: tube variants, push-pull, hard transistor
 
-The Flavour menu now offers **ten** characters (Settings, Analog warmth, in each A/B slot). Choosing one also sets **Sag** and **Transformer** to typical values for that kind of stage (you can adjust them afterwards). Code: [analog.rs](../../crates/kahawai-player-core/src/analog.rs); labels and typical values in [types.ts](../../player/ui/src/types.ts) (`FLAVOUR_INFO`).
+The Flavour menu now offers **ten** characters (Settings, Analog warmth, in each A/B slot). Choosing one also sets **Sag** and **Transformer** to typical values for that kind of stage (you can adjust them afterwards). Code: [dsp/analog.rs](../../crates/kahawai-player-core/src/dsp/analog.rs); labels and typical values in [types.ts](../../player/ui/src/types.ts) (`FLAVOUR_INFO`).
 
 ### 15.1 The list
 
@@ -725,7 +725,7 @@ Harmonics relative to the tone, at an input level of 0.1 / 0.3 / 0.6:
 
 ## 16. Eleven more flavours (21 in total)
 
-Seven more tubes and pentode pairs, three solid-state characters, and one utility. Menu order: small-signal tubes, power triodes, the pentode, push-pull, solid state, then the utility. Code: [analog.rs](../../crates/kahawai-player-core/src/analog.rs); menu text and typical Sag/Transformer in [types.ts](../../player/ui/src/types.ts).
+Seven more tubes and pentode pairs, three solid-state characters, and one utility. Menu order: small-signal tubes, power triodes, the pentode, push-pull, solid state, then the utility. Code: [dsp/analog.rs](../../crates/kahawai-player-core/src/dsp/analog.rs); menu text and typical Sag/Transformer in [types.ts](../../player/ui/src/types.ts).
 
 ### 16.1 New tubes (Koren's library fits)
 

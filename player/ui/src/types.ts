@@ -585,7 +585,7 @@ export interface DspSettings {
   crossfeed?: CrossfeedSettings;
 }
 
-// --- Headphone crossfeed (mirrors kahawai-player-core/src/crossfeed.rs) ------
+// --- Headphone crossfeed (mirrors kahawai-player-core/src/dsp/crossfeed.rs) ------
 
 export type CrossfeedPreset = "bauer" | "chu_moy" | "meier" | "custom";
 
@@ -645,10 +645,10 @@ export const DEFAULT_DSP_SETTINGS: DspSettings = {
   crossfeed: DEFAULT_CROSSFEED_SETTINGS,
 };
 
-/** Room for an AutoEq profile (usually 10 filters) plus a couple of your own. Mirrors `MAX_EQ_BANDS` in dsp.rs. */
+/** Room for an AutoEq profile (usually 10 filters) plus a couple of your own. Mirrors `MAX_EQ_BANDS` in dsp/eq.rs. */
 export const MAX_EQ_BANDS = 12;
 
-/** Range of the EQ preamp in dB. Mirrors `EQ_PREAMP_RANGE_DB` in dsp.rs. */
+/** Range of the EQ preamp in dB. Mirrors `EQ_PREAMP_RANGE_DB` in dsp/eq.rs. */
 export const EQ_PREAMP_RANGE_DB = [-24, 12] as const;
 
 export interface OutputDevice {

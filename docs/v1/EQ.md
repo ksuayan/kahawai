@@ -36,7 +36,7 @@ flowchart LR
     hog --> dev
 ```
 
-The relevant code is `Player::pump_pcm` in [engine.rs](../../crates/kahawai-player-core/src/engine.rs): it decodes one chunk (4096 frames, about 93 ms at 44.1 kHz), optionally resamples, then runs `eq.process` → `analog.process` (optional, off by default) → `gain_ramp.apply` → volume → `sink.write`. The order is fixed. The DSP itself is in [dsp.rs](../../crates/kahawai-player-core/src/dsp.rs), which imports nothing platform-specific.
+The relevant code is `Player::pump_pcm` in [engine.rs](../../crates/kahawai-player-core/src/engine.rs): it decodes one chunk (4096 frames, about 93 ms at 44.1 kHz), optionally resamples, then runs `eq.process` → `analog.process` (optional, off by default) → `gain_ramp.apply` → volume → `sink.write`. The order is fixed. The DSP itself is in [dsp/](../../crates/kahawai-player-core/src/dsp/), one file per stage, none of which imports anything platform-specific.
 
 Everything before the sink runs on the engine's dedicated playback thread. The audio device callback (cpal) only drains a lock-free ring buffer, so no DSP happens on the real-time audio thread.
 
@@ -44,7 +44,7 @@ Everything before the sink runs on the engine's dedicated playback thread. The a
 
 ## 3. The filter chain
 
-`ParametricEq` in dsp.rs:
+`ParametricEq` in dsp/eq.rs:
 
 | Aspect | Current behaviour |
 |---|---|
@@ -150,7 +150,7 @@ flowchart LR
     vol --> sink["sink"]
 ```
 
-That trait now exists in [dsp.rs](../../crates/kahawai-player-core/src/dsp.rs) and is implemented by both the EQ and the analog stage (`AnalogStage`, [analog.rs](../../crates/kahawai-player-core/src/analog.rs)):
+That trait now exists in [dsp/mod.rs](../../crates/kahawai-player-core/src/dsp/mod.rs) and is implemented by both the EQ and the analog stage (`AnalogStage`, [dsp/analog.rs](../../crates/kahawai-player-core/src/dsp/analog.rs)):
 
 ```rust
 // kahawai-player-core: platform-free

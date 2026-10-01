@@ -15,7 +15,7 @@ export const EQ_LIMITS = {
   slopeMax: 3,
 } as const;
 
-/** Mirrors `usable_freq` in dsp.rs: the engine caps a band at 0.45 x the sample rate. */
+/** Mirrors `usable_freq` in dsp/eq.rs: the engine caps a band at 0.45 x the sample rate. */
 export const NYQUIST_FRACTION = 0.45;
 export const usableFreq = (freq: number, fs: number): number => Math.min(freq, fs * NYQUIST_FRACTION);
 
