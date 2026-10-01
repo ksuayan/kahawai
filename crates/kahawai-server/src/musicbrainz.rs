@@ -1,5 +1,5 @@
 //! MusicBrainz and Cover Art Archive client for metadata enrichment
-//! (docs/v2/kahawai-metadata-enrichment-spec.md).
+//! (docs/v1/kahawai-metadata-enrichment-spec.md).
 //!
 //! MusicBrainz's rules (musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting):
 //! on average one request per second per IP, a meaningful User-Agent with

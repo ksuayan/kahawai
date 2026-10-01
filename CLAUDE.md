@@ -40,13 +40,14 @@ kahawai-server` gives you a headless process on macOS — it doesn't.
 Docs live under `docs/`, split by how settled the material is:
 
 - **`docs/v1/`** — design & feature docs for what's actually built and shipped.
-- **`docs/v2/`** — specs for work that has **not been started**. Verify against
-  the actual code before trusting a v2 doc's "current state" section — that's
-  a snapshot from whenever the spec was written.
+- **`docs/v2/`** — specs for work that has **not been started** (the folder
+  doesn't exist while there are none). Verify against the actual code before
+  trusting a v2 doc's "current state" section — that's a snapshot from
+  whenever the spec was written.
 - **`docs/users/`** — non-technical, general-audience material (press release,
   background articles). Nothing here assumes the reader is a contributor.
 - **`docs/Backlog.md`** — deferred work with enough context to pick up cold,
-  including a section mapping each `docs/v2/` spec to its status. Update this
+  including a section mapping each spec that began in `docs/v2/` to its status. Update this
   when you defer something or finish a backlog item.
 - **`docs/Roadmap.md`** — possibilities, not commitments.
 

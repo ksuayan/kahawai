@@ -300,7 +300,7 @@ export async function onPlayerState(cb: (s: PlayerState) => void): Promise<Unlis
   }
 }
 
-// --- Catalog cache (docs/v2/kahawai-player-catalog-cache-spec.md) ------------
+// --- Catalog cache (docs/v1/kahawai-player-catalog-cache-spec.md) ------------
 
 /** The library as last synced, straight from the shell's cache file. */
 export interface CachedCatalog {

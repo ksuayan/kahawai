@@ -392,7 +392,7 @@ fn set_artwork_cache_max_bytes(state: State<'_, ArtworkState>, max_bytes: u64) -
     artwork_cache_stats_for(&state.cache)
 }
 
-// --- Catalog cache (docs/v2/kahawai-player-catalog-cache-spec.md) ----------
+// --- Catalog cache (docs/v1/kahawai-player-catalog-cache-spec.md) ----------
 
 struct CatalogState {
     cache: Arc<CatalogCache>,

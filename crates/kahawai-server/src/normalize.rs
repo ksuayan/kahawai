@@ -1,4 +1,4 @@
-//! Deterministic, local metadata cleanup (docs/v2/kahawai-metadata-enrichment-spec.md,
+//! Deterministic, local metadata cleanup (docs/v1/kahawai-metadata-enrichment-spec.md,
 //! "Remap"). Pure functions: display strings are never altered, these derive
 //! the keys the catalog groups and sorts by.
 

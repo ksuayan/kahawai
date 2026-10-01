@@ -1,4 +1,4 @@
-//! Genre normalization (docs/v2/kahawai-genre-normalization-spec.md).
+//! Genre normalization (docs/v1/kahawai-genre-normalization-spec.md).
 //!
 //! `tracks.genre` keeps the raw tag. Every distinct raw value is mapped to
 //! zero or more canonical genres ("Pop, Rock" is two), and `track_genres`
