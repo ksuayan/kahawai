@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from "vue";
+import { computed, onUnmounted, ref } from "vue";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import { useSetupStore } from "../stores/setup";
-import { describeServer, formatElapsed, formatWhen, scanTiming, type ScanJob } from "../types";
+import { describeServer, formatElapsed, formatWhen, scanFiles, scanTiming, type ScanJob } from "../types";
 
 const setup = useSetupStore();
 
@@ -18,6 +18,12 @@ async function stopOther(): Promise<void> {
   confirmStop.value = false;
   await setup.stopOtherServer();
 }
+
+/** The running scan's live file counts, once the server has reported any. */
+const runningFiles = computed(() => {
+  const f = setup.recentScans.find((j) => j.status === "running")?.files;
+  return f ? scanFiles(f, now.value) : null;
+});
 
 function scanLabel(j: ScanJob): string {
   if (j.status === "failed") return "Failed";
@@ -119,6 +125,24 @@ function scanClass(j: ScanJob): string {
         <div><span class="text-dim">Artists</span> <span class="font-semibold">{{ setup.liveScanStats?.artists ?? 0 }}</span></div>
         <div><span class="text-dim">Tracks</span> <span class="font-semibold">{{ setup.liveScanStats?.tracks ?? 0 }}</span></div>
       </div>
+      <dl v-if="runningFiles" class="m-0 mt-2 flex flex-wrap gap-x-6 gap-y-1 text-[13px]" data-testid="scan-files">
+        <div>
+          <dt class="inline text-dim">Files processed</dt>
+          <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-processed">{{ runningFiles.processed }}</dd>
+        </div>
+        <div v-if="runningFiles.remaining !== null">
+          <dt class="inline text-dim">Files remaining to process</dt>
+          <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-remaining">{{ runningFiles.remaining }}</dd>
+        </div>
+        <div v-if="runningFiles.rate">
+          <dt class="inline text-dim">Rate</dt>
+          <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-rate">{{ runningFiles.rate }}</dd>
+        </div>
+        <div v-if="runningFiles.eta">
+          <dt class="inline text-dim">ETA</dt>
+          <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-eta">{{ runningFiles.eta }}</dd>
+        </div>
+      </dl>
       <p v-if="setup.liveScanStats?.last_album" class="mt-2 truncate text-xs text-faint">
         Last added: {{ setup.liveScanStats.last_album
         }}<span v-if="setup.liveScanStats.last_album_artist"> — {{ setup.liveScanStats.last_album_artist }}</span>

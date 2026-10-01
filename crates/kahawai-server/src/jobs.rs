@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-use kahawai_core::{Job, JobKind, JobStatus};
+use kahawai_core::{FileProgress, Job, JobKind, JobStatus};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 
@@ -120,10 +120,54 @@ fn stamp(job: &mut Job, to: JobStatus) {
         JobStatus::Done | JobStatus::Failed | JobStatus::Cancelled => {
             job.started_at.get_or_insert(now);
             job.finished_at = Some(now);
+            job.files = None;
         }
         JobStatus::Queued | JobStatus::Paused => {}
     }
     job.status = to;
+}
+
+/// Turns a stream of `(done, total)` ticks into files per second and an ETA.
+/// The rate is an exponential moving average over windows of at least a
+/// second, so a slow patch on a network share doesn't make the ETA jump.
+#[derive(Default)]
+pub(crate) struct RateTracker {
+    last: Option<(i64, u64)>,
+    rate: Option<f64>,
+}
+
+impl RateTracker {
+    /// How much a new window counts against the history.
+    const NEW_WEIGHT: f64 = 0.3;
+    const WINDOW_MS: i64 = 1000;
+
+    pub(crate) fn observe(&mut self, now: i64, done: u64, total: Option<u64>) -> FileProgress {
+        match self.last {
+            None => self.last = Some((now, done)),
+            Some((t, d)) if now - t >= Self::WINDOW_MS => {
+                let instant = done.saturating_sub(d) as f64 * 1000.0 / (now - t) as f64;
+                self.rate = Some(match self.rate {
+                    None => instant,
+                    Some(r) => r * (1.0 - Self::NEW_WEIGHT) + instant * Self::NEW_WEIGHT,
+                });
+                self.last = Some((now, done));
+            }
+            Some(_) => {}
+        }
+        let eta_at = match (total, self.rate) {
+            (Some(total), Some(rate)) if rate > 0.05 => {
+                let remaining = total.saturating_sub(done) as f64;
+                Some(now + (remaining / rate * 1000.0) as i64)
+            }
+            _ => None,
+        };
+        FileProgress {
+            done,
+            total,
+            per_sec: self.rate.map(|r| r as f32),
+            eta_at,
+        }
+    }
 }
 
 impl JobStore {
@@ -196,6 +240,7 @@ impl JobStore {
                 message,
                 started_at: r.get("started_at"),
                 finished_at: r.get("finished_at"),
+                files: None,
             };
             jobs.insert(id, job);
         }
@@ -268,6 +313,7 @@ impl JobStore {
             message: None,
             started_at: None,
             finished_at: None,
+            files: None,
         };
         self.inner
             .write()
@@ -337,6 +383,19 @@ impl JobStore {
         };
         self.write_through(&job).await;
         true
+    }
+
+    /// Record live file counts for a queued or running job. Memory only: it
+    /// changes about once a second and means nothing after a restart.
+    pub async fn set_files(&self, id: &str, files: FileProgress) -> bool {
+        let mut inner = self.inner.write().unwrap();
+        match inner.get_mut(id) {
+            Some(job) if matches!(job.status, JobStatus::Queued | JobStatus::Running) => {
+                job.files = Some(files);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Mark a job terminal. `ok=true` → Done, else Failed with `message`.
@@ -451,6 +510,64 @@ mod tests {
         store.finish(&job.id, true, None).await;
         assert!(!store.bump(&job.id, 0.1).await); // terminal: no more bumps
         assert!(!store.bump("missing", 0.1).await);
+    }
+
+    #[test]
+    fn rate_tracker_smooths_and_estimates_the_finish() {
+        let mut t = RateTracker::default();
+        // The first tick only starts the clock.
+        let p = t.observe(0, 0, Some(1000));
+        assert_eq!((p.per_sec, p.eta_at), (None, None));
+        // Under a second of data: still no rate.
+        assert_eq!(t.observe(500, 50, Some(1000)).per_sec, None);
+        // 100 files in the first full second: 100/s, 900 left → 9 s.
+        let p = t.observe(1000, 100, Some(1000));
+        assert_eq!(p.per_sec, Some(100.0));
+        assert_eq!(p.eta_at, Some(1000 + 9000));
+        // A slow second (10/s) moves the rate only part of the way: 0.7·100 + 0.3·10.
+        let p = t.observe(2000, 110, Some(1000));
+        assert!((p.per_sec.unwrap() - 73.0).abs() < 0.01);
+        assert_eq!(p.done, 110);
+    }
+
+    #[test]
+    fn rate_tracker_has_no_eta_on_a_first_scan_or_past_the_estimate() {
+        let mut t = RateTracker::default();
+        t.observe(0, 0, None);
+        let p = t.observe(1000, 50, None);
+        assert_eq!(p.per_sec, Some(50.0), "the rate is still known");
+        assert_eq!(
+            (p.total, p.eta_at),
+            (None, None),
+            "but there is nothing to finish against"
+        );
+        // More files than the last scan had: remaining clamps to 0, ETA is now.
+        let p = t.observe(2000, 150, Some(100));
+        assert_eq!(p.eta_at, Some(2000));
+    }
+
+    #[tokio::test]
+    async fn live_file_counts_are_for_running_jobs_only() {
+        let store = JobStore::new();
+        let job = store.create(JobKind::Scan, "scan".into(), None).await;
+        let p = FileProgress {
+            done: 3,
+            total: None,
+            per_sec: None,
+            eta_at: None,
+        };
+        assert!(store.set_files(&job.id, p).await);
+        assert_eq!(store.get(&job.id).unwrap().files, Some(p));
+        store.finish(&job.id, true, None).await;
+        assert_eq!(
+            store.get(&job.id).unwrap().files,
+            None,
+            "cleared at the end"
+        );
+        assert!(
+            !store.set_files(&job.id, p).await,
+            "a finished job takes no more"
+        );
     }
 
     #[tokio::test]

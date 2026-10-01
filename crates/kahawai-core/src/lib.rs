@@ -10,9 +10,10 @@ pub mod error;
 pub mod format;
 
 pub use api::{
-    Album, Artist, BuildInfo, CatalogDelta, CatalogSnapshot, Genre, ImportPlaylistJson,
-    ImportPlaylistResult, Job, JobKind, JobStatus, NewPlaylist, Page, Playlist, PlaylistTracksMode,
-    ServerIdentity, SetPlaylistTracks, StreamFormat, Track, KAHAWAI_SERVICE, KAHAWAI_SOURCE_URL,
+    Album, Artist, BuildInfo, CatalogDelta, CatalogSnapshot, FileProgress, Genre,
+    ImportPlaylistJson, ImportPlaylistResult, Job, JobKind, JobStatus, NewPlaylist, Page, Playlist,
+    PlaylistTracksMode, ServerIdentity, SetPlaylistTracks, StreamFormat, Track, KAHAWAI_SERVICE,
+    KAHAWAI_SOURCE_URL,
 };
 pub use config::{DsdStory, ServerConfig};
 pub use error::MusicError;

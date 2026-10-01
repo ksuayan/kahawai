@@ -1067,7 +1067,19 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
         let job_id2 = job_id.clone();
         let fwd = tokio::spawn(async move {
             let mut last_written = -1.0f64;
+            let mut rate = crate::jobs::RateTracker::default();
+            let mut last_files = i64::MIN;
             while let Some((done, estimate)) = prx.recv().await {
+                // Live counts, about once a second: a first scan has no
+                // estimate and so no percentage, but still shows how many
+                // files it has got through.
+                let now = crate::jobs::now_ms();
+                if now - last_files >= 1000 {
+                    last_files = now;
+                    jobs2
+                        .set_files(&job_id2, rate.observe(now, done, estimate))
+                        .await;
+                }
                 // The total is only an estimate (last scan's count), so cap
                 // below 1: finishing the job is what reports completion. A
                 // first scan has no estimate and stays at 0 until it's done.

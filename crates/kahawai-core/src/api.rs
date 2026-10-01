@@ -297,6 +297,26 @@ pub struct Job {
     /// while queued, running or paused.
     #[serde(default)]
     pub finished_at: Option<i64>,
+    /// Live file counts of a running scan or hash job: not persisted, so
+    /// absent on finished jobs and after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<FileProgress>,
+}
+
+/// How far a file-by-file job has got. `total` is only an estimate (the
+/// previous scan's count), and `None` on a first scan, which has nothing to
+/// measure against; rate and ETA need a few seconds of data.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FileProgress {
+    pub done: u64,
+    #[serde(default)]
+    pub total: Option<u64>,
+    /// Smoothed files per second.
+    #[serde(default)]
+    pub per_sec: Option<f32>,
+    /// Estimated finish, Unix milliseconds. Only with a total and a rate.
+    #[serde(default)]
+    pub eta_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,6 +492,12 @@ mod tests {
             message: None,
             started_at: Some(1_790_000_000_000),
             finished_at: None,
+            files: Some(FileProgress {
+                done: 10,
+                total: Some(40),
+                per_sec: Some(5.0),
+                eta_at: Some(1_790_000_006_000),
+            }),
         };
         assert_eq!(round_trip(&job), job);
         let json = serde_json::to_string(&job).unwrap();
