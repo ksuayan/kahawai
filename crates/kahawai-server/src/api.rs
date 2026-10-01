@@ -68,7 +68,10 @@ impl IntoResponse for ApiError {
 /// 404s, not 403s, to avoid leaking which paths exist. There is
 /// deliberately no empty-roots bypass: serving a file with no configured
 /// music root is a misconfiguration, not a default-open server.
-fn ensure_within_roots(path: &std::path::Path, roots: &[PathBuf]) -> Result<PathBuf, MusicError> {
+pub(crate) fn ensure_within_roots(
+    path: &std::path::Path,
+    roots: &[PathBuf],
+) -> Result<PathBuf, MusicError> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|_| MusicError::NotFound("track file missing".into()))?;
     for root in roots {

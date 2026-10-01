@@ -10,6 +10,7 @@ mod dop;
 mod dsd;
 mod dsd_meta;
 mod enrich;
+mod export;
 mod genre;
 mod genre_aliases;
 mod hashing;
@@ -114,6 +115,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/shutdown", post(api::shutdown))
         .route("/api/albums", get(api::list_albums))
         .route("/api/albums/{id}", get(api::get_album))
+        .route("/api/albums/{id}/export", get(export::export_album))
         .route("/api/artists", get(api::list_artists))
         .route("/api/artists/{id}", get(api::get_artist))
         .route("/api/tracks/{id}", get(api::get_track))
@@ -136,6 +138,7 @@ pub fn app(state: AppState) -> Router {
                 .patch(api::rename_playlist),
         )
         .route("/api/playlists/{id}/tracks", put(api::set_playlist_tracks))
+        .route("/api/playlists/{id}/export", get(export::export_playlist))
         .route("/api/artwork/{hash}", get(api::artwork))
         .route("/api/scan", post(api::trigger_scan))
         .route("/api/jobs", get(api::list_jobs).post(api::create_job))
@@ -2102,7 +2105,7 @@ mod integration_tests {
     // ------------------------------------------------------------------
 
     /// 16-bit PCM WAV fixture: `frames` sine frames.
-    fn wav_fixture(sample_rate: u32, channels: usize, frames: usize) -> Vec<u8> {
+    pub(crate) fn wav_fixture(sample_rate: u32, channels: usize, frames: usize) -> Vec<u8> {
         let mut v = Vec::new();
         let data_len = (frames * channels * 2) as u32;
         v.extend_from_slice(b"RIFF");
@@ -2129,7 +2132,7 @@ mod integration_tests {
     }
 
     /// Minimal stereo DSD64 DSF fixture, `fill`-byte audio blocks.
-    fn dsf_fixture(blocks: usize, block_len: usize, fill: u8) -> Vec<u8> {
+    pub(crate) fn dsf_fixture(blocks: usize, block_len: usize, fill: u8) -> Vec<u8> {
         fn w32(v: &mut Vec<u8>, x: u32) {
             v.extend_from_slice(&x.to_le_bytes());
         }
