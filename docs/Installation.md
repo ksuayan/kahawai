@@ -232,6 +232,10 @@ Not yet; this beta is for Macs.
 The beta isn't signed and notarized with a paid Apple developer certificate yet. The steps
 in [Open them the first time](#2-open-them-the-first-time) are needed once per app.
 
+**Can I play my library in VLC?**
+Yes, one playlist or album at a time, from any computer on your home network. See
+[Playing your library in VLC](VLC.md).
+
 **Can I bring my playlists?**
 Yes: in the Player, **Playlists → Import M3U…** reads `.m3u` / `.m3u8` playlists whose files
 are in your library.

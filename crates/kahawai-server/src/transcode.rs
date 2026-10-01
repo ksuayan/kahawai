@@ -394,6 +394,12 @@ pub struct FlacStreamEncoder {
     channels: usize,
     /// Accumulated interleaved i32 samples (< block_size frames).
     pending: Vec<i32>,
+    /// PCM frames encoded so far, and the smallest/largest encoded frame
+    /// in bytes: what [`Self::final_header_bytes`] needs to describe the
+    /// finished stream.
+    total_samples: u64,
+    min_frame_bytes: u32,
+    max_frame_bytes: u32,
 }
 
 impl FlacStreamEncoder {
@@ -416,6 +422,9 @@ impl FlacStreamEncoder {
             sample_rate,
             channels,
             pending: Vec::with_capacity(FLAC_BLOCK_SIZE * channels),
+            total_samples: 0,
+            min_frame_bytes: 0,
+            max_frame_bytes: 0,
         })
     }
 
@@ -427,6 +436,22 @@ impl FlacStreamEncoder {
     /// min/max block-size fields carry our real fixed block size; flacenc
     /// leaves them as unknown sentinels that strict decoders reject.
     pub fn header_bytes(&self) -> Vec<u8> {
+        self.streaminfo(0, 0, 0)
+    }
+
+    /// The header for the finished stream: the same 42 bytes as
+    /// [`Self::header_bytes`], with the real total sample count and frame
+    /// sizes. Written over the start of a rendered file (D3) so players
+    /// show the duration; a live stream cannot know them up front.
+    pub fn final_header_bytes(&self) -> Vec<u8> {
+        self.streaminfo(
+            self.total_samples,
+            self.min_frame_bytes,
+            self.max_frame_bytes,
+        )
+    }
+
+    fn streaminfo(&self, total_samples: u64, min_frame: u32, max_frame: u32) -> Vec<u8> {
         let mut h = Vec::with_capacity(42);
         h.extend_from_slice(b"fLaC");
         // Metadata block header: last-block flag (1) + type 0 (STREAMINFO)
@@ -436,8 +461,9 @@ impl FlacStreamEncoder {
         // is the only exception; frame headers carry the true sizes).
         h.extend_from_slice(&(FLAC_BLOCK_SIZE as u16).to_be_bytes());
         h.extend_from_slice(&(FLAC_BLOCK_SIZE as u16).to_be_bytes());
-        // min/max frame size: unknown → 0.
-        h.extend_from_slice(&[0u8; 6]);
+        // min/max frame size, 24 bits each (0 = unknown).
+        h.extend_from_slice(&min_frame.to_be_bytes()[1..]);
+        h.extend_from_slice(&max_frame.to_be_bytes()[1..]);
         // 20-bit sample rate | 3-bit (channels-1) | 5-bit (bps-1) |
         // 36-bit total samples (0 = unknown).
         let sr = self.sample_rate;
@@ -446,9 +472,10 @@ impl FlacStreamEncoder {
         h.push((sr >> 12) as u8);
         h.push((sr >> 4) as u8);
         h.push((((sr & 0xF) << 4) | ((ch - 1) << 1) | (bps1 >> 4)) as u8);
-        h.push(((bps1 & 0xF) << 4) as u8); // top 4 bits of total_samples = 0
-        h.extend_from_slice(&[0u8; 4]); // remaining 32 bits of total_samples
-                                        // MD5 of unencoded audio: 0 = verification disabled.
+        // Low 4 bits of bps-1, then the top 4 of the 36-bit total samples.
+        h.push((((bps1 & 0xF) << 4) as u8) | ((total_samples >> 32) & 0xF) as u8);
+        h.extend_from_slice(&(total_samples as u32).to_be_bytes());
+        // MD5 of unencoded audio: 0 = verification disabled.
         h.extend_from_slice(&[0u8; 16]);
         debug_assert_eq!(h.len(), 42);
         h
@@ -508,7 +535,15 @@ impl FlacStreamEncoder {
         frame
             .write(&mut sink)
             .map_err(|e| MusicError::BadRequest(format!("flac write: {e:?}")))?;
-        Ok(sink.as_slice().to_vec())
+        let bytes = sink.as_slice().to_vec();
+        let len = bytes.len() as u32;
+        self.total_samples += frames as u64;
+        self.min_frame_bytes = match self.min_frame_bytes {
+            0 => len,
+            m => m.min(len),
+        };
+        self.max_frame_bytes = self.max_frame_bytes.max(len);
+        Ok(bytes)
     }
 }
 
@@ -574,9 +609,7 @@ mod ogg {
         let crc_pos = page.len();
         page.extend_from_slice(&[0, 0, 0, 0]); // CRC placeholder
         page.push(nseg as u8);
-        for _ in 0..full {
-            page.push(255);
-        }
+        page.extend(std::iter::repeat_n(255, full));
         page.push(rem as u8);
         page.extend_from_slice(packet);
 
@@ -744,7 +777,7 @@ impl OpusOggEncoder {
 
     /// Push interleaved 48 kHz f32; returns complete Ogg pages.
     pub fn push_f32(&mut self, pcm: &[f32]) -> Result<Vec<u8>, MusicError> {
-        assert!(pcm.len() % self.channels == 0);
+        assert!(pcm.len().is_multiple_of(self.channels));
         self.pending.extend_from_slice(pcm);
         self.emit_frames(false)
     }
@@ -906,7 +939,7 @@ impl Mp3Encoder {
 
     /// Push interleaved f32 at the encoder's sample rate; returns MP3 frames.
     pub fn push_f32(&mut self, pcm: &[f32]) -> Result<Vec<u8>, MusicError> {
-        assert!(pcm.len() % self.channels == 0);
+        assert!(pcm.len().is_multiple_of(self.channels));
         for f in pcm.chunks_exact(self.channels) {
             self.pending_l.push(f[0]);
             self.pending_r
@@ -983,7 +1016,7 @@ use kahawai_core::transcode_ladder;
 use tokio::sync::mpsc;
 
 /// Resolved transcode job: everything the blocking producer needs.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TranscodePlan {
     pub path: PathBuf,
     pub source_format: AudioFormat,
@@ -1131,8 +1164,9 @@ fn mp3_disabled() -> MusicError {
 
 enum ActiveEncoder {
     Flac(FlacStreamEncoder),
+    /// Boxed: the Opus encoder state is ~1 KB, five times the others.
     #[cfg(feature = "encode-opus")]
-    Opus(OpusOggEncoder),
+    Opus(Box<OpusOggEncoder>),
     #[cfg(feature = "encode-mp3")]
     Mp3(Mp3Encoder),
 }
@@ -1165,6 +1199,18 @@ impl ActiveEncoder {
             Self::Opus(e) => e.finish(),
             #[cfg(feature = "encode-mp3")]
             Self::Mp3(e) => e.finish(),
+        }
+    }
+
+    /// Replacement for the header once the whole stream is known: FLAC
+    /// only (Ogg and MP3 players work the length out from the file).
+    fn final_header_bytes(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Flac(e) => Some(e.final_header_bytes()),
+            #[cfg(feature = "encode-opus")]
+            Self::Opus(_) => None,
+            #[cfg(feature = "encode-mp3")]
+            Self::Mp3(_) => None,
         }
     }
 
@@ -1342,7 +1388,7 @@ impl PreparedTranscode {
                     let enc = OpusOggEncoder::new(spec.channels, bitrate)?;
                     let rs = (spec.sample_rate != 48_000)
                         .then(|| CubicResampler::new(spec.channels, spec.sample_rate, 48_000));
-                    (ActiveEncoder::Opus(enc), rs)
+                    (ActiveEncoder::Opus(Box::new(enc)), rs)
                 }
                 #[cfg(not(feature = "encode-opus"))]
                 {
@@ -1397,6 +1443,10 @@ impl PreparedTranscode {
     /// client disconnects, or an error occurs (the error is sent once, then
     /// the body ends — the client sees a truncated stream).
     pub fn run(mut self, tx: &mpsc::Sender<Result<Bytes, MusicError>>) {
+        self.run_mut(tx);
+    }
+
+    fn run_mut(&mut self, tx: &mpsc::Sender<Result<Bytes, MusicError>>) {
         let mut alive = emit(tx, self.encoder.header_bytes());
         let mut pcm = vec![0.0f32; 8192 * self.channels];
         let mut rs_out = vec![0.0f32; 8192 * self.channels];
@@ -1677,6 +1727,55 @@ pub fn transcode_body(prepared: PreparedTranscode) -> axum::body::Body {
     let (tx, rx) = mpsc::channel::<Result<Bytes, MusicError>>(32);
     tokio::task::spawn_blocking(move || prepared.run(&tx));
     axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
+}
+
+/// Encoder settings that shape the bytes of a rendered file: part of the
+/// transcode cache key (D3), so changing any of them must change this
+/// string — stale renders then simply stop matching.
+pub const RENDER_PARAMS: &str = "v1 flac24/4096 opus128k|96k/48 mp3-192k/<=48 cubic";
+
+/// Render a whole prepared transcode into `out` (D3: the transcode cache).
+/// Same pipeline as a live stream; `on_written` gets the running byte
+/// count after each write, so readers can follow the file as it grows.
+/// Afterwards a FLAC file gets its STREAMINFO rewritten with the real
+/// length (same size, at offset 0), so players show the duration and can
+/// seek. Blocking: call from `spawn_blocking`. On error `out` is left
+/// partial — callers render to a temporary name.
+pub fn render_to_file(
+    mut prepared: PreparedTranscode,
+    mut out: File,
+    on_written: impl FnMut(u64) + Send,
+) -> Result<(), MusicError> {
+    use std::io::{SeekFrom, Write};
+
+    let (tx, mut rx) = mpsc::channel::<Result<Bytes, MusicError>>(32);
+    let written = std::thread::scope(|scope| {
+        let out = &mut out;
+        let mut on_written = on_written;
+        let sink = scope.spawn(move || -> Result<(), MusicError> {
+            let mut total = 0u64;
+            while let Some(chunk) = rx.blocking_recv() {
+                let chunk = chunk?;
+                out.write_all(&chunk)?;
+                total += chunk.len() as u64;
+                on_written(total);
+            }
+            Ok(())
+        });
+        prepared.run_mut(&tx);
+        // Closing the channel ends the writer loop.
+        drop(tx);
+        sink.join()
+            .map_err(|_| MusicError::Http("transcode writer panicked".into()))?
+    });
+    written?;
+
+    if let Some(header) = prepared.encoder.final_header_bytes() {
+        out.seek(SeekFrom::Start(0))?;
+        out.write_all(&header)?;
+    }
+    out.sync_all()?;
+    Ok(())
 }
 
 /// Spawn the blocking producer for a `?next=` gapless chain and return the

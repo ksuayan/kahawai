@@ -98,9 +98,102 @@ pub async fn serve_file(
         .map_err(|e| MusicError::Http(e.to_string()))
 }
 
+/// A filename made safe for a `Content-Disposition` header: `"`, `\`, `/`
+/// and control characters removed, surrounding whitespace trimmed.
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '/') && !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// RFC 5987 `attr-char`s pass through; every other byte of the UTF-8 is
+/// percent-encoded.
+fn rfc5987_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `Content-Disposition` value for `disposition` (`inline`, `attachment`)
+/// naming `filename`. Sanitized (see [`sanitize_filename`]); `fallback`
+/// (plain ASCII) is used when nothing is left. A non-ASCII name gets the
+/// RFC 5987 `filename*` form, with `fallback` as the plain `filename` for
+/// clients that ignore it — the header value itself is always ASCII.
+pub fn content_disposition(
+    disposition: &str,
+    filename: &str,
+    fallback: &str,
+) -> axum::http::HeaderValue {
+    let name = sanitize_filename(filename);
+    let value = if name.is_empty() {
+        format!("{disposition}; filename=\"{fallback}\"")
+    } else if name.is_ascii() {
+        format!("{disposition}; filename=\"{name}\"")
+    } else {
+        format!(
+            "{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{}",
+            rfc5987_encode(&name)
+        )
+    };
+    // Visible ASCII by construction: controls stripped, non-ASCII encoded,
+    // and callers pass plain-ASCII fallbacks.
+    value.parse().expect("Content-Disposition is visible ASCII")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn disposition(filename: &str) -> String {
+        content_disposition("inline", filename, "track-7.flac")
+            .to_str()
+            .expect("visible ASCII")
+            .to_string()
+    }
+
+    #[test]
+    fn content_disposition_plain_ascii() {
+        assert_eq!(
+            disposition("Miles Davis - So What.flac"),
+            "inline; filename=\"Miles Davis - So What.flac\""
+        );
+    }
+
+    #[test]
+    fn content_disposition_strips_quotes_slashes_and_controls() {
+        assert_eq!(
+            disposition("AC/DC - \"Back\\in\"\r\nBlack.mp3"),
+            "inline; filename=\"ACDC - BackinBlack.mp3\""
+        );
+    }
+
+    #[test]
+    fn content_disposition_falls_back_when_nothing_is_left() {
+        assert_eq!(disposition(" \"/\\ "), "inline; filename=\"track-7.flac\"");
+    }
+
+    #[test]
+    fn content_disposition_encodes_non_ascii_per_rfc5987() {
+        assert_eq!(
+            disposition("坂本龍一 - 戦場.flac"),
+            "inline; filename=\"track-7.flac\"; filename*=UTF-8''\
+             %E5%9D%82%E6%9C%AC%E9%BE%8D%E4%B8%80%20-%20%E6%88%A6%E5%A0%B4.flac"
+        );
+        assert_eq!(
+            content_disposition("attachment", "Café.m3u", "playlist-1.m3u")
+                .to_str()
+                .unwrap(),
+            "attachment; filename=\"playlist-1.m3u\"; filename*=UTF-8''Caf%C3%A9.m3u"
+        );
+    }
 
     fn parsed(header: &str, total: u64) -> (u64, u64) {
         parse_range(header, total).expect("range should parse")
