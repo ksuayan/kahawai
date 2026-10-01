@@ -3946,6 +3946,70 @@ fn the_loudness_pre_scan_does_not_hold_up_the_controls() {
 }
 
 // ---------------------------------------------------------------------------
+// Volume changes must not click or zipper
+// ---------------------------------------------------------------------------
+
+/// Largest jump between consecutive frames (left channel) of the recorded output.
+fn max_frame_step(samples: &[f32]) -> f32 {
+    let left: Vec<f32> = samples.iter().step_by(CHANNELS).copied().collect();
+    left.windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max)
+}
+
+#[test]
+fn a_volume_change_during_playback_does_not_step_the_signal() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 10)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
+    for _ in 0..6 {
+        h.player.pump();
+    }
+    h.player.set_volume(0.2); // a big drop, mid-waveform
+    for _ in 0..12 {
+        h.player.pump();
+    }
+    let heard = h.samples();
+    // A clean 440 Hz tone at 0.7 never steps more than this between frames;
+    // a whole-chunk volume multiply stepped by up to 0.8 of the signal.
+    let natural = 0.7 * 2.0 * std::f32::consts::PI * 440.0 / RATE as f32;
+    let step = max_frame_step(&heard);
+    assert!(
+        step <= natural * 1.1 + 0.7 / 441.0,
+        "volume change stepped the signal: {step} (a clean tone steps {natural})"
+    );
+    // ...and the change did take effect.
+    let tail = &heard[heard.len() - 2 * 2000..];
+    let peak = tail.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(
+        (peak - 0.7 * 0.2).abs() < 0.02,
+        "settled at the new volume: {peak}"
+    );
+}
+
+#[test]
+fn full_volume_still_passes_the_signal_through_unchanged() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.pump_until_done(60);
+    let heard = h.samples();
+    let want = wav_bytes(440.0, 44100);
+    // the first decoded sample of the 16-bit fixture, scaled to f32
+    let first = i16::from_le_bytes([
+        want[44 + 2 * CHANNELS * 100],
+        want[44 + 2 * CHANNELS * 100 + 1],
+    ]) as f32
+        / 32768.0;
+    assert!(
+        (heard[100 * CHANNELS] - first).abs() < 1e-6,
+        "bit-transparent at unity volume"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Turning off the last thing that holds Best quality back engages it now
 // ---------------------------------------------------------------------------
 

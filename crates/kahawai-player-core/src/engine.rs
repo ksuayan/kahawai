@@ -38,6 +38,7 @@ use crate::dsp::{
     headroom_guard, scan_track_levels, DspStage, EqBand, GainRamp, LookaheadLimiter, LoudnessMeter,
     LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
 };
+use crate::fader::AmpRamp;
 use crate::quality::{
     QualityMode, BLOCKER_ANALOG, BLOCKER_CROSSFEED, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS,
     BLOCKER_VOLUME,
@@ -637,6 +638,9 @@ pub struct Player {
     bit_perfect: BitPerfect,
     track_formats: HashMap<i64, StreamFormat>,
     volume: f32,
+    /// Moves the volume to `volume` per frame, so a change never lands as a
+    /// step (see [`AmpRamp`]).
+    volume_ramp: AmpRamp,
     active: Option<ActiveStream>,
     error: Option<String>,
     notice: Option<String>,
@@ -707,6 +711,7 @@ impl Player {
             bit_perfect: BitPerfect::default(),
             track_formats: HashMap::new(),
             volume: 1.0,
+            volume_ramp: AmpRamp::new(441),
             active: None,
             error: None,
             notice: None,
@@ -1751,6 +1756,12 @@ impl Player {
 
         // The EQ runs on what the sink receives (after any resampling), so
         // it is designed at the sink rate, not the file's.
+        self.volume_ramp.set_ramp_frames((sink_rate / 100).max(64));
+        self.volume_ramp.snap(if self.volume < 0.999 {
+            self.volume
+        } else {
+            1.0
+        });
         self.eq.set_sample_rate(sink_rate);
         self.crossfeed.prepare(sink_rate);
         self.crossfeed.reset();
@@ -2090,12 +2101,14 @@ impl Player {
         let peak = chunk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         self.peak_out = peak.max(self.peak_out * 0.5f32.powf(dt));
         self.gain_ramp.apply(&mut chunk);
-        let vol = self.volume;
-        if vol < 0.999 {
-            for s in chunk.iter_mut() {
-                *s *= vol;
-            }
-        }
+        // Volume, ramped per frame (about 10 ms) so dragging the slider does not
+        // zipper. At (or within 0.1 % of) full volume this is a bit-exact no-op.
+        self.volume_ramp.set_target(if self.volume < 0.999 {
+            self.volume
+        } else {
+            1.0
+        });
+        self.volume_ramp.apply(&mut chunk, channels);
         // EQ boosts and loudness gain can lift peaks past full scale, which the
         // output device would hard-clip. The limiter ducks ahead of a peak so
         // the ceiling is reached transparently; the guard is a cheap backstop.
