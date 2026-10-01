@@ -609,9 +609,7 @@ mod ogg {
         let crc_pos = page.len();
         page.extend_from_slice(&[0, 0, 0, 0]); // CRC placeholder
         page.push(nseg as u8);
-        for _ in 0..full {
-            page.push(255);
-        }
+        page.extend(std::iter::repeat_n(255, full));
         page.push(rem as u8);
         page.extend_from_slice(packet);
 
@@ -779,7 +777,7 @@ impl OpusOggEncoder {
 
     /// Push interleaved 48 kHz f32; returns complete Ogg pages.
     pub fn push_f32(&mut self, pcm: &[f32]) -> Result<Vec<u8>, MusicError> {
-        assert!(pcm.len() % self.channels == 0);
+        assert!(pcm.len().is_multiple_of(self.channels));
         self.pending.extend_from_slice(pcm);
         self.emit_frames(false)
     }
@@ -941,7 +939,7 @@ impl Mp3Encoder {
 
     /// Push interleaved f32 at the encoder's sample rate; returns MP3 frames.
     pub fn push_f32(&mut self, pcm: &[f32]) -> Result<Vec<u8>, MusicError> {
-        assert!(pcm.len() % self.channels == 0);
+        assert!(pcm.len().is_multiple_of(self.channels));
         for f in pcm.chunks_exact(self.channels) {
             self.pending_l.push(f[0]);
             self.pending_r
@@ -1166,8 +1164,9 @@ fn mp3_disabled() -> MusicError {
 
 enum ActiveEncoder {
     Flac(FlacStreamEncoder),
+    /// Boxed: the Opus encoder state is ~1 KB, five times the others.
     #[cfg(feature = "encode-opus")]
-    Opus(OpusOggEncoder),
+    Opus(Box<OpusOggEncoder>),
     #[cfg(feature = "encode-mp3")]
     Mp3(Mp3Encoder),
 }
@@ -1389,7 +1388,7 @@ impl PreparedTranscode {
                     let enc = OpusOggEncoder::new(spec.channels, bitrate)?;
                     let rs = (spec.sample_rate != 48_000)
                         .then(|| CubicResampler::new(spec.channels, spec.sample_rate, 48_000));
-                    (ActiveEncoder::Opus(enc), rs)
+                    (ActiveEncoder::Opus(Box::new(enc)), rs)
                 }
                 #[cfg(not(feature = "encode-opus"))]
                 {

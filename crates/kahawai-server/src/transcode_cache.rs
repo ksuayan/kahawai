@@ -714,6 +714,29 @@ mod tests {
         assert!(flac_total_samples(&body) > 0);
     }
 
+    /// The spec's bonus: lossy renditions become seekable too.
+    #[cfg(all(feature = "encode-opus", feature = "encode-mp3"))]
+    #[tokio::test]
+    async fn opus_and_mp3_renders_are_cached_and_seekable() {
+        let f = fixture(1 << 30).await;
+        for (fmt, mime) in [("opus", "audio/ogg"), ("mp3", "audio/mpeg")] {
+            let uri = format!("/stream/1?format={fmt}");
+            let (_, status, first) = send(&f.app, "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{fmt}");
+            let (h, status, full) = send(&f.app, "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{fmt}");
+            assert_eq!(h[header::CONTENT_TYPE], mime);
+            assert_eq!(h[header::ACCEPT_RANGES], "bytes", "{fmt}");
+            assert_eq!(h[header::CONTENT_LENGTH], full.len().to_string());
+            assert_eq!(first, full, "{fmt}: no header rewrite for lossy");
+            let (_, status, part) = send(&f.app, "GET", &uri, Some("bytes=100-199")).await;
+            assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+            assert_eq!(part, &full[100..200]);
+        }
+        assert_eq!(cached_files(&f.cache_dir).len(), 2);
+        assert_eq!(renders(&f.cache), 2);
+    }
+
     #[tokio::test]
     async fn chains_and_seek_ms_stay_live() {
         let f = fixture(1 << 30).await;
