@@ -11,6 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use kahawai_core::{api::StreamFormat, MusicError};
 
+use crate::rangesource::{RangeSource, SeekableStream};
 use crate::readahead::{ReadAhead, ReadAheadStats};
 
 /// How far ahead of the playhead an HTTP stream is buffered, in bytes. About
@@ -62,9 +63,15 @@ impl StreamProgress {
 }
 
 /// Counts bytes as they pass through.
-struct CountingReader<R> {
+pub(crate) struct CountingReader<R> {
     inner: R,
     count: Arc<AtomicU64>,
+}
+
+impl<R> CountingReader<R> {
+    pub(crate) fn new(inner: R, count: Arc<AtomicU64>) -> Self {
+        Self { inner, count }
+    }
 }
 
 impl<R: Read> Read for CountingReader<R> {
@@ -96,6 +103,18 @@ pub struct StreamInfo {
 /// `Box<dyn Transport>`.
 pub trait Transport: Send {
     fn open_stream(&self, track_id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError>;
+
+    /// Open the track's untouched file bytes as a *seekable* source, so a
+    /// passthrough seek can jump to the right place instead of downloading
+    /// from the start. `Ok(None)` when this transport (or the server) cannot,
+    /// and the caller keeps to [`open_stream`](Self::open_stream).
+    fn open_seekable(
+        &self,
+        _track_id: i64,
+        _opts: &StreamOptions,
+    ) -> Result<Option<SeekableStream>, MusicError> {
+        Ok(None)
+    }
 }
 
 /// Live transport over HTTP. The base URL is behind a lock so the UI can
@@ -193,10 +212,7 @@ impl Transport for HttpTransport {
         // The counter sits on the network side, so with read-ahead `received`
         // is what has been fetched (ahead of the playhead), which is exactly
         // what the seek bar's buffered fill should show.
-        let counting = CountingReader {
-            inner: resp.into_body().into_reader(),
-            count: received.clone(),
-        };
+        let counting = CountingReader::new(resp.into_body().into_reader(), received.clone());
         let (reader, stats): (Box<dyn Read + Send>, _) = if self.read_ahead_bytes > 0 {
             let ahead = ReadAhead::new(counting, self.read_ahead_bytes);
             let stats = ahead.stats();
@@ -218,9 +234,26 @@ impl Transport for HttpTransport {
             gapless_mode,
         })
     }
+
+    fn open_seekable(
+        &self,
+        track_id: i64,
+        opts: &StreamOptions,
+    ) -> Result<Option<SeekableStream>, MusicError> {
+        // Only the untouched file can be ranged; a live transcode cannot.
+        let _ = opts;
+        let url = self.stream_url(
+            track_id,
+            &StreamOptions {
+                format: Some(StreamFormat::Passthrough),
+                ..Default::default()
+            },
+        );
+        RangeSource::open(&self.agent, url, self.read_ahead_bytes, track_id)
+    }
 }
 
-fn map_ureq_error(e: ureq::Error, track_id: i64) -> MusicError {
+pub(crate) fn map_ureq_error(e: ureq::Error, track_id: i64) -> MusicError {
     match e {
         ureq::Error::StatusCode(code) => match code {
             404 => MusicError::NotFound(format!("track {track_id}")),

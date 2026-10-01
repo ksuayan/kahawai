@@ -44,7 +44,7 @@ use crate::quality::{
 use crate::queue::{Queue, RepeatMode};
 use crate::resample::CubicResampler;
 use crate::sink::{AudioSink, OutputPath, PcmChunk};
-use crate::transport::{HttpTransport, StreamOptions, StreamProgress, Transport};
+use crate::transport::{HttpTransport, StreamInfo, StreamOptions, StreamProgress, Transport};
 
 /// Frames decoded per pump iteration (~93 ms at 44.1 kHz).
 const CHUNK_FRAMES: usize = 4096;
@@ -1364,6 +1364,45 @@ impl Player {
         self.open_pcm(&track, seek, fmt);
     }
 
+    /// Open a passthrough track at `ms` through a seekable source, if the
+    /// transport offers one and the container can seek. `None` means "use the
+    /// forward-only path"; this never fails the track.
+    fn open_seeked_passthrough(
+        &self,
+        track: &Track,
+        opts: &StreamOptions,
+        ms: u64,
+    ) -> Option<(StreamInfo, StreamDecoder, u64)> {
+        let sk = match self.transport.open_seekable(track.id, opts) {
+            Ok(Some(sk)) => sk,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(error = %e, "seekable open failed; streaming from the start");
+                return None;
+            }
+        };
+        let (decoder, skip) = match StreamDecoder::new_seekable(sk.source, sk.byte_len, ms) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "seeking in the container failed; streaming from the start");
+                return None;
+            }
+        };
+        if let Some(control) = &sk.control {
+            control.warm();
+        }
+        let progress = sk.control.as_ref().and_then(|c| c.progress());
+        let info = StreamInfo {
+            reader: Box::new(std::io::empty()),
+            content_type: sk.content_type,
+            chain: sk.chain,
+            gapless_next: None,
+            gapless_mode: None,
+            progress,
+        };
+        Some((info, decoder, skip))
+    }
+
     /// Start DoP for `track`, or say why it cannot. On `Err` the sink has
     /// been released and nothing is playing.
     fn try_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
@@ -1511,8 +1550,9 @@ impl Player {
         };
         self.gain_ramp.retarget(loudness_gain_db);
 
-        // Passthrough seeks use Range + decode-skip; everything else uses
-        // the server's sample-exact ?seek_ms=.
+        // Passthrough seeks go through a seekable Range source (below), or
+        // failing that decode-skip from the start; everything else uses the
+        // server's sample-exact ?seek_ms=.
         let passthrough_seek = seek.is_some() && fmt == StreamFormat::Passthrough;
         let opts = StreamOptions {
             format: Some(fmt),
@@ -1520,25 +1560,39 @@ impl Player {
             next: next_id,
             range_start: None,
         };
-        let info = match self.transport.open_stream(track.id, &opts) {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::warn!(error = %e, "stream request failed");
-                self.fail("Couldn't get the stream from the server.");
-                return;
+        // A passthrough seek first tries a seekable (HTTP Range) source, so the
+        // container's own index finds the spot and only the bytes from there are
+        // fetched; failing that, the whole file streams and frames are skipped.
+        let seeked = match (passthrough_seek, seek) {
+            (true, Some(ms)) => self.open_seeked_passthrough(track, &opts, ms),
+            _ => None,
+        };
+        let (info, decoder, seek_skip_frames) = match seeked {
+            Some((info, decoder, skip)) => (info, decoder, Some(skip)),
+            None => {
+                let mut info = match self.transport.open_stream(track.id, &opts) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "stream request failed");
+                        self.fail("Couldn't get the stream from the server.");
+                        return;
+                    }
+                };
+                let expect_chained = info.gapless_mode.as_deref() == Some("chained");
+                let reader = std::mem::replace(&mut info.reader, Box::new(std::io::empty()));
+                let decoder = match StreamDecoder::new(reader, expect_chained) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "decode failed");
+                        self.fail("Couldn't decode this file.");
+                        return;
+                    }
+                };
+                (info, decoder, None)
             }
         };
         let gapless_mode = info.gapless_mode.clone();
         let progress = info.progress.clone();
-        let expect_chained = gapless_mode.as_deref() == Some("chained");
-        let decoder = match StreamDecoder::new(info.reader, expect_chained) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(error = %e, "decode failed");
-                self.fail("Couldn't decode this file.");
-                return;
-            }
-        };
         let spec = decoder.spec();
 
         // Segments: the server chained the next track's audio into this
@@ -1582,7 +1636,7 @@ impl Player {
             } else {
                 match self
                     .sink
-                    .open_exclusive_pcm(spec.sample_rate, spec.channels as u16)
+                    .open_exclusive_pcm(spec.sample_rate, spec.channels)
                 {
                     Ok(()) => bit_perfect = true,
                     Err(e) => {
@@ -1678,7 +1732,9 @@ impl Player {
         // after every scrub.)
         let base_frames = seek.unwrap_or(0) * sink_rate as u64 / 1000;
         let skip_frames = if passthrough_seek {
-            seek.unwrap_or(0) * spec.sample_rate as u64 / 1000
+            // A seekable open already jumped near the target and says how much
+            // is left to discard; the forward-only path discards all of it.
+            seek_skip_frames.unwrap_or(seek.unwrap_or(0) * spec.sample_rate as u64 / 1000)
         } else {
             0
         };

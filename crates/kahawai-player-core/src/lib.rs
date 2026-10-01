@@ -18,6 +18,7 @@ pub mod dsp;
 pub mod engine;
 pub mod quality;
 pub mod queue;
+pub mod rangesource;
 pub mod readahead;
 pub mod resample;
 pub mod sink;
@@ -46,6 +47,7 @@ pub use engine::{
 };
 pub use quality::QualityMode;
 pub use queue::{Queue, RepeatMode};
+pub use rangesource::{RangeSource, SeekableControl, SeekableRead, SeekableStream};
 pub use readahead::{ReadAhead, ReadAheadStats};
 pub use resample::CubicResampler;
 pub use sink::{AudioSink, NullSink, OutputPath, PcmChunk, SinkRouter, SinkState, VecSink};
