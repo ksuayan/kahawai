@@ -16,6 +16,7 @@ pub mod dop;
 pub mod dsd_devices;
 pub mod dsp;
 pub mod engine;
+pub mod fader;
 pub mod quality;
 pub mod queue;
 pub mod rangesource;
@@ -23,6 +24,7 @@ pub mod readahead;
 pub mod resample;
 pub mod sink;
 pub mod transport;
+pub mod worker;
 
 pub use analog::{
     anti_alias_plan, koren_plate_current, oversample_factor, triode_table, AnalogFlavour,
@@ -45,6 +47,7 @@ pub use engine::{
     EngineCommand, EngineController, Player, PlayerEvent, PlayerSnapshot, PlayerStatus,
     DEFAULT_SERVER_URL,
 };
+pub use fader::{AmpRamp, Fader};
 pub use quality::QualityMode;
 pub use queue::{Queue, RepeatMode};
 pub use rangesource::{RangeSource, SeekableControl, SeekableRead, SeekableStream};

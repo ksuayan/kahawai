@@ -482,6 +482,8 @@ struct PlayerStateDto {
     buffer_ahead_ms: Option<u64>,
     /// The whole stream is already fetched (a short buffer is just the track's end).
     buffer_complete: bool,
+    /// Playback has run out of buffered audio and is waiting for the network.
+    buffering: bool,
     /// Rate of the audio reaching the output; the rate the EQ is designed at.
     output_rate_hz: Option<u32>,
     /// What the analog stage is doing right now (plan and latency), if on.
@@ -553,6 +555,7 @@ impl From<PlayerSnapshot> for PlayerStateDto {
             download_bps: s.download_bps,
             buffer_ahead_ms: s.buffer_ahead_ms,
             buffer_complete: s.buffer_complete,
+            buffering: s.buffering,
             output_rate_hz: s.output_rate_hz,
             analog_plan: s.analog_plan,
             analog_level: s.analog_level.map(|l| AnalogLevelDto {

@@ -12,6 +12,11 @@
 //!   lock-free ring. `write()` blocks (with a deadline) when the ring is
 //!   full, giving the engine natural backpressure.
 //! - Underruns are counted, never hidden.
+//! - Transitions are click-free: the callback runs a [`Fader`], so pause, stop,
+//!   seek and skip fade the already-queued audio out (about 8 ms) instead of
+//!   cutting it mid-waveform, resume and an interrupted stream's start fade in,
+//!   and an underrun fades what is left instead of dropping to silence. A track
+//!   that ends cleanly (the ring drained) hands over to the next untouched.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -19,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use kahawai_core::{MusicError, Track};
-use kahawai_player_core::{AudioSink, OutputPath, PcmChunk, SinkState};
+use kahawai_player_core::{AudioSink, Fader, OutputPath, PcmChunk, SinkState};
 use ringbuf::{traits::*, HeapRb};
 
 /// One second of headroom at the highest rate we expect to see, in
@@ -36,6 +41,48 @@ const RING_MAX_CHANNELS: usize = 8;
 const TARGET_BUFFER_MS: usize = 200;
 /// How long `write()` waits for the device to drain before giving up.
 const WRITE_DEADLINE: Duration = Duration::from_secs(2);
+/// How long a fade takes: long enough to avoid a click, short enough to be
+/// instant to the ear.
+const FADE_MS: u32 = 8;
+/// The most the engine thread waits for a fade-out to finish (a few callbacks).
+const FADE_WAIT: Duration = Duration::from_millis(40);
+
+/// Where the output callback gets audio: the ring in production, a `Vec` in tests.
+trait Source {
+    fn pop(&mut self, out: &mut [f32]) -> usize;
+}
+
+impl Source for ringbuf::HeapCons<f32> {
+    fn pop(&mut self, out: &mut [f32]) -> usize {
+        self.pop_slice(out)
+    }
+}
+
+/// What the output callback does with one buffer. `audible` is what the engine
+/// wants (false while pausing or stopping). Returns true on a real underrun
+/// (the engine did not keep up), which is counted and never hidden.
+fn render<S: Source>(
+    src: &mut S,
+    fader: &mut Fader,
+    audible: bool,
+    data: &mut [f32],
+    channels: usize,
+) -> bool {
+    fader.set_audible(audible);
+    if fader.is_silent() {
+        // Paused or stopped and faded out: play nothing and leave the queued
+        // audio alone, so resuming carries on exactly where it stopped.
+        data.fill(0.0);
+        return false;
+    }
+    let n = src.pop(data);
+    if n < data.len() {
+        fader.underrun(data, n, channels);
+        return audible;
+    }
+    fader.process(data, channels);
+    false
+}
 
 pub struct CpalSink {
     host: cpal::Host,
@@ -47,6 +94,13 @@ pub struct CpalSink {
     channels: u16,
     underruns: Arc<AtomicU64>,
     stream_error: Arc<AtomicBool>,
+    /// What the engine wants the callback to do: false fades it out.
+    audible: Arc<AtomicBool>,
+    /// Set by the callback once it has faded out completely.
+    silent: Arc<AtomicBool>,
+    /// The last stream drained to its end (a natural track change), so the next
+    /// one starts untouched and nothing needs fading out.
+    clean_end: bool,
     state: SinkState,
 }
 
@@ -61,6 +115,9 @@ impl CpalSink {
             channels: 0,
             underruns: Arc::new(AtomicU64::new(0)),
             stream_error: Arc::new(AtomicBool::new(false)),
+            audible: Arc::new(AtomicBool::new(true)),
+            silent: Arc::new(AtomicBool::new(false)),
+            clean_end: false,
             state: SinkState::Stopped,
         }
     }
@@ -86,7 +143,22 @@ impl CpalSink {
             .ok_or_else(|| MusicError::Audio("no default output device".into()))
     }
 
+    /// Fade the queued audio out and wait (briefly) for the callback to finish,
+    /// so what comes next never cuts it off mid-waveform. Nothing to do when
+    /// the device is not running or the stream just drained to its end.
+    fn fade_out(&self) {
+        if self.stream.is_none() || self.state != SinkState::Playing || self.clean_end {
+            return;
+        }
+        self.audible.store(false, Ordering::SeqCst);
+        let deadline = Instant::now() + FADE_WAIT;
+        while !self.silent.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     fn close_stream(&mut self) {
+        self.fade_out();
         // Dropping the Stream stops the device callback synchronously.
         self.stream = None;
         self.producer = None;
@@ -109,7 +181,9 @@ impl Default for CpalSink {
 
 impl AudioSink for CpalSink {
     fn open(&mut self, track: &Track) -> Result<(), MusicError> {
+        let clean = self.clean_end;
         self.close_stream();
+        self.clean_end = false;
         let device = self.pick_device()?;
 
         let channels = track.channels.unwrap_or(2).clamp(1, 8) as u16;
@@ -133,18 +207,35 @@ impl AudioSink for CpalSink {
         let (prod, mut cons) = HeapRb::<f32>::new(cap).split();
         let underruns = self.underruns.clone();
         let stream_error = self.stream_error.clone();
+        // A stream that follows an interrupted one (seek, skip, a new pick)
+        // fades in; one that follows a clean end starts untouched.
+        self.audible.store(true, Ordering::SeqCst);
+        self.silent.store(false, Ordering::SeqCst);
+        let audible = self.audible.clone();
+        let silent = self.silent.clone();
+        let ch = config.channels as usize;
+        let mut fader = Fader::new(
+            (config.sample_rate.0 * FADE_MS / 1000).max(32),
+            if clean { 1.0 } else { 0.0 },
+        );
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     // Drain only: no allocation, no decode, no blocking.
-                    // A shortfall means the engine didn't keep up — count
-                    // it and emit silence rather than repeating audio.
-                    let n = cons.pop_slice(data);
-                    if n < data.len() {
+                    // A shortfall means the engine didn't keep up: count it,
+                    // fade what there is and emit silence rather than repeat
+                    // audio or cut it off.
+                    if render(
+                        &mut cons,
+                        &mut fader,
+                        audible.load(Ordering::Relaxed),
+                        data,
+                        ch,
+                    ) {
                         underruns.fetch_add(1, Ordering::Relaxed);
-                        data[n..].fill(0.0);
                     }
+                    silent.store(fader.is_silent(), Ordering::Relaxed);
                 },
                 move |err| {
                     tracing::warn!("cpal output stream error: {err}");
@@ -172,6 +263,7 @@ impl AudioSink for CpalSink {
                 chunk.channels, self.channels
             )));
         }
+        self.clean_end = false; // new audio is queued: the old stream is not what ends
         let prod = self
             .producer
             .as_mut()
@@ -211,6 +303,8 @@ impl AudioSink for CpalSink {
             .stream
             .as_ref()
             .ok_or_else(|| MusicError::Audio("sink not open".into()))?;
+        // Ask for audio before the device starts, so the first callback fades in.
+        self.audible.store(true, Ordering::SeqCst);
         s.play()
             .map_err(|e| MusicError::Audio(format!("cpal play: {e}")))?;
         self.state = SinkState::Playing;
@@ -222,6 +316,8 @@ impl AudioSink for CpalSink {
             .stream
             .as_ref()
             .ok_or_else(|| MusicError::Audio("sink not open".into()))?;
+        // Fade out first: halting the device mid-waveform is a click.
+        self.fade_out();
         s.pause()
             .map_err(|e| MusicError::Audio(format!("cpal pause: {e}")))?;
         self.state = SinkState::Paused;
@@ -283,6 +379,8 @@ impl AudioSink for CpalSink {
         while p.occupied_len() > 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
+        // Played out to the end: whatever follows starts untouched.
+        self.clean_end = p.occupied_len() == 0;
     }
 
     fn underrun_count(&self) -> u64 {
@@ -356,5 +454,191 @@ mod device_tests {
         sink.set_output_device(Some("A"));
         assert_eq!(sink.device_name.as_deref(), Some("A"));
         assert!(sink.stream.is_none() && sink.producer.is_none());
+    }
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::*;
+
+    const RATE: u32 = 48_000;
+    const CH: usize = 2;
+    const BUF: usize = 480; // a 10 ms device buffer
+
+    /// A queue of audio the "device" drains, remembering how much it gave out.
+    struct Queue {
+        data: Vec<f32>,
+        at: usize,
+    }
+
+    impl Source for Queue {
+        fn pop(&mut self, out: &mut [f32]) -> usize {
+            let n = out.len().min(self.data.len() - self.at);
+            out[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+            self.at += n;
+            n
+        }
+    }
+
+    fn sine(freq: f32, amp: f32, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let v = amp * (2.0 * std::f32::consts::PI * freq * i as f32 / RATE as f32).sin();
+                [v, v]
+            })
+            .collect()
+    }
+
+    /// Largest jump between consecutive frames (left channel).
+    fn max_step(x: &[f32]) -> f32 {
+        let m: Vec<f32> = x.iter().step_by(CH).copied().collect();
+        m.windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    fn natural(freq: f32, amp: f32) -> f32 {
+        2.0 * std::f32::consts::PI * freq / RATE as f32 * amp
+    }
+
+    /// Run the callback for `buffers` device buffers.
+    fn run(q: &mut Queue, f: &mut Fader, audible: bool, buffers: usize) -> (Vec<f32>, usize) {
+        let (mut out, mut underruns) = (Vec::new(), 0);
+        for _ in 0..buffers {
+            let mut buf = vec![7.0f32; BUF * CH];
+            if render(q, f, audible, &mut buf, CH) {
+                underruns += 1;
+            }
+            out.extend(buf);
+        }
+        (out, underruns)
+    }
+
+    fn fader(initial: f32) -> Fader {
+        Fader::new(RATE * FADE_MS / 1000, initial)
+    }
+
+    #[test]
+    fn steady_playback_is_untouched() {
+        let src = sine(220.0, 0.7, BUF * 10);
+        let mut q = Queue {
+            data: src.clone(),
+            at: 0,
+        };
+        let (out, underruns) = run(&mut q, &mut fader(1.0), true, 10);
+        assert_eq!(out, src, "bit-exact when nothing is fading");
+        assert_eq!(underruns, 0);
+    }
+
+    #[test]
+    fn pausing_fades_out_without_a_click_and_stops_consuming_the_queue() {
+        let (freq, amp) = (60.0, 0.8);
+        let mut q = Queue {
+            data: sine(freq, amp, BUF * 60),
+            at: 0,
+        };
+        let mut f = fader(1.0);
+        let (mut heard, _) = run(&mut q, &mut f, true, 3);
+        let (faded, _) = run(&mut q, &mut f, false, 3); // pause requested
+        heard.extend(faded);
+        assert!(
+            max_step(&heard) <= natural(freq, amp) * 1.05 + amp / (RATE * FADE_MS / 1000) as f32,
+            "pause stepped the signal by {}",
+            max_step(&heard)
+        );
+        assert!(f.is_silent());
+        let consumed = q.at;
+        let (silence, underruns) = run(&mut q, &mut f, false, 5);
+        assert!(silence.iter().all(|&s| s == 0.0));
+        assert_eq!(q.at, consumed, "paused: the queued audio is left alone");
+        assert_eq!(underruns, 0, "a pause is not an underrun");
+    }
+
+    #[test]
+    fn resuming_carries_on_where_it_stopped_and_fades_in() {
+        let (freq, amp) = (60.0, 0.8);
+        let all = sine(freq, amp, BUF * 60);
+        let mut q = Queue {
+            data: all.clone(),
+            at: 0,
+        };
+        let mut f = fader(1.0);
+        run(&mut q, &mut f, true, 3);
+        run(&mut q, &mut f, false, 3);
+        let resume_from = q.at;
+        let (out, _) = run(&mut q, &mut f, true, 4);
+        assert!(
+            out[0].abs() < 0.8 * 0.01,
+            "fades in from silence: {}",
+            out[0]
+        );
+        assert!(max_step(&out) <= natural(freq, amp) * 1.05 + amp / (RATE * FADE_MS / 1000) as f32);
+        // once the fade is done the audio is exactly the queue's next samples
+        let done = (RATE * FADE_MS / 1000) as usize * CH;
+        assert_eq!(
+            &out[done..],
+            &all[resume_from + done..resume_from + out.len()]
+        );
+    }
+
+    #[test]
+    fn a_stream_after_an_interruption_fades_in_and_after_a_clean_end_does_not() {
+        let src = sine(100.0, 0.6, BUF * 4);
+        let mut q = Queue {
+            data: src.clone(),
+            at: 0,
+        };
+        let (fresh, _) = run(&mut q, &mut fader(0.0), true, 2);
+        assert!(
+            fresh[0].abs() < 0.01
+                && max_step(&fresh)
+                    <= natural(100.0, 0.6) * 1.05 + 0.6 / (RATE * FADE_MS / 1000) as f32
+        );
+        let mut q2 = Queue {
+            data: src.clone(),
+            at: 0,
+        };
+        let (gapless, _) = run(&mut q2, &mut fader(1.0), true, 2);
+        assert_eq!(
+            gapless,
+            src[..BUF * CH * 2],
+            "a clean track change starts untouched"
+        );
+    }
+
+    #[test]
+    fn an_underrun_is_counted_and_faded_not_cut() {
+        let (freq, amp) = (60.0, 0.8);
+        // 1.4 buffers of audio: the second buffer runs dry part-way.
+        let mut q = Queue {
+            data: sine(freq, amp, BUF + BUF * 2 / 5),
+            at: 0,
+        };
+        let mut f = fader(1.0);
+        let (out, underruns) = run(&mut q, &mut f, true, 2);
+        assert_eq!(underruns, 1, "counted, never hidden");
+        assert!(max_step(&out) <= natural(freq, amp) * 1.05 + amp / (RATE * FADE_MS / 1000) as f32);
+        assert!(out[out.len() - 1].abs() < 1e-6, "ends in silence");
+        // audio returns: it fades back in rather than starting at full level
+        let mut q2 = Queue {
+            data: sine(freq, amp, BUF * 4),
+            at: 0,
+        };
+        let (back, _) = run(&mut q2, &mut f, true, 3);
+        assert!(back[0].abs() < 0.01);
+        assert!(
+            max_step(&back) <= natural(freq, amp) * 1.05 + amp / (RATE * FADE_MS / 1000) as f32
+        );
+    }
+
+    #[test]
+    fn an_idle_source_while_paused_is_not_an_underrun() {
+        let mut q = Queue {
+            data: Vec::new(),
+            at: 0,
+        };
+        let mut f = fader(1.0);
+        let (_, underruns) = run(&mut q, &mut f, false, 20);
+        assert_eq!(underruns, 0);
     }
 }
