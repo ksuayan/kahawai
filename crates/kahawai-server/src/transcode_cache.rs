@@ -1,5 +1,5 @@
 //! Seekable transcodes: a disk cache of fully rendered single-track
-//! transcodes. (docs/v2/kahawai-server-vlc-client-spec.md, D3.)
+//! transcodes. (docs/v1/kahawai-server-vlc-client-spec.md, D3.)
 //!
 //! A live transcode is chunked — no Content-Length, no byte ranges — so a
 //! player that seeks with HTTP Range (VLC) can neither seek it nor show its

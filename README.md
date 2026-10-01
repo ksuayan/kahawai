@@ -68,6 +68,7 @@ scripts/start-client.sh       # wait for the server, then open the player
 
 That's it. **Installing the beta from the disk image instead?** See
 [docs/Installation.md](docs/Installation.md): installation, troubleshooting and FAQ.
+To play the library in VLC instead, see [docs/VLC.md](docs/VLC.md).
 
 Day to day:
 

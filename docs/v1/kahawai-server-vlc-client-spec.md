@@ -1,5 +1,18 @@
 # Kahawai Server as a VLC client endpoint — spec (refined)
 
+## Status
+
+**Implemented** on the `vlc-server` branch: `export.rs` (D1), `stream_disposition` in `api.rs` with the header helper in `stream.rs` (D2), `transcode_cache.rs` plus `render_to_file` in `transcode.rs` (D3), and [docs/VLC.md](../VLC.md) (D4).
+
+Where it differs from the text below:
+
+- **D3 never waits for a render.** Measured on the real library, DSD64 to FLAC renders at about 1.5x realtime: *My Foolish Heart* (4:55) took 197 s in a release build. Rendering a whole track before the first byte would leave VLC (and the Player, whose last-in-queue and loudness-scan requests are single-track `?format=flac` too) waiting minutes. Instead, a miss starts the render in the background and the request streams the file as it grows: chunked, unseekable and without a duration, like today's live transcode, from the one decode. Every later play is the finished file, with `Content-Length`, `Accept-Ranges` and `206`. So the D3 acceptance holds from the second play of a DSD track, not the first. Pre-rendering an album or playlist when it's exported would close that gap; it isn't built.
+- **D3 scope:** besides `?next=`, requests with `?seek_ms=` keep the live path (the Player's transcode seeks). Cached FLAC gets its STREAMINFO rewritten with the real sample count and frame sizes, so players show the length. The cap is `transcode_cache_mb` in `config.toml` (default 8192; `0` turns the cache off), evicting least recently served first (a hit refreshes the file's mtime). The key also covers the source path and `RENDER_PARAMS`, the encoder settings. HEAD reports a finished render's length and ranges but never starts one.
+- **D1 URLs use the `Host` header as sent,** port included, rather than appending `:8080`: the entries point wherever the client reached the server. The Host value is checked (host name, IPv4, bracketed IPv6, optional port) before it is written into a playlist; anything else is a 400. HTTP/2's `:authority` works too.
+- **D1 extras:** `?format=` defaults to `m3u`. Entries outside the music roots count as missing. Album exports count the album's tracks flagged missing in `X-Export-Skipped`. No queue export: the queue lives in the Player (S11), as the spec allowed.
+- **D2** also sets the header on HEAD, on DoP responses (`.wav`) and on ranged responses. A non-ASCII name sends `filename="track-{id}.ext"` with the RFC 5987 `filename*` beside it. A track with a title but no artist is named `Title.ext`.
+- **D4** is [docs/VLC.md](../VLC.md), linked from the Installation guide's FAQ. The Player shows no playlist or album ids, so the guide finds them through `/api/playlists` and `/api/search`.
+
 Goal: any VLC (desktop 3.x) on the LAN can open a Kahawai playlist/album/queue
 export and play it with seeking and per-track metadata. No new auth, no TLS,
 no changes to the first-party player contract.

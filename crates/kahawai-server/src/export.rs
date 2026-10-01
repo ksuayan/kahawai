@@ -1,6 +1,6 @@
 //! Playlist exports for third-party players such as VLC: M3U, XSPF and
 //! PLS renderings of a playlist or album, one absolute `/stream` URL per
-//! track. (docs/v2/kahawai-server-vlc-client-spec.md, D1.)
+//! track. (docs/v1/kahawai-server-vlc-client-spec.md, D1.)
 //!
 //! Exports never use `?next=`: that is the first-party player's gapless
 //! contract, and VLC advances its own playlist. Each entry names a rendition
