@@ -97,11 +97,12 @@ fn hash_if_unchanged(p: &Pending) -> io::Result<Option<String>> {
     hash_file(&p.path).map(Some)
 }
 
-/// Hash every pending track, in id order. `on_progress(done, total)` fires
-/// once per file; `total` is the pending count when the run started.
+/// Hash every pending track, in id order. `on_progress(done, total, bytes)`
+/// fires once per file; `total` is the pending count when the run started
+/// and `bytes` the content hashed so far.
 pub async fn hash_pending(
     pool: &SqlitePool,
-    on_progress: impl Fn(u64, u64) + Send + Sync,
+    on_progress: impl Fn(u64, u64, u64) + Send + Sync,
 ) -> Result<HashReport, MusicError> {
     let start = Instant::now();
     let total = pending_count(pool).await?;
@@ -178,7 +179,7 @@ pub async fn hash_pending(
         } else {
             report.skipped += 1;
         }
-        on_progress(report.hashed + report.skipped, total);
+        on_progress(report.hashed + report.skipped, total, report.bytes);
         if last_log.elapsed() >= PROGRESS_LOG_INTERVAL {
             last_log = Instant::now();
             log_throughput("hash progress", &report, total, start.elapsed());
@@ -253,7 +254,7 @@ mod tests {
         let db_path = PathBuf::from(std::env::var("KAHAWAI_BENCH_DB").expect("KAHAWAI_BENCH_DB"));
         assert!(db_path.exists(), "{} does not exist", db_path.display());
         let pool = db::open(&db_path).await.unwrap();
-        let r = hash_pending(&pool, |_, _| {}).await.unwrap();
+        let r = hash_pending(&pool, |_, _, _| {}).await.unwrap();
         println!(
             "HASH RUN: {} hashed, {} skipped, {:.1} GB in {:.1} s ({:.1} MB/s)",
             r.hashed,
@@ -289,7 +290,7 @@ mod tests {
         assert_eq!(pending_count(&pool).await.unwrap(), ids.len() as u64);
 
         let ticks = std::sync::Mutex::new(Vec::new());
-        let r = hash_pending(&pool, |done, total| {
+        let r = hash_pending(&pool, |done, total, _| {
             ticks.lock().unwrap().push((done, total))
         })
         .await
@@ -332,7 +333,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let r = hash_pending(&pool, |_, _| {}).await.unwrap();
+        let r = hash_pending(&pool, |_, _, _| {}).await.unwrap();
         assert_eq!(r.hashed, 6, "only the unfinished rows");
         for id in &ids[..4] {
             assert_eq!(
@@ -370,7 +371,7 @@ mod tests {
             .await
             .unwrap();
 
-        let r = hash_pending(&pool, |_, _| {}).await.unwrap();
+        let r = hash_pending(&pool, |_, _, _| {}).await.unwrap();
         assert_eq!(
             (r.hashed, r.skipped),
             (1, 2),

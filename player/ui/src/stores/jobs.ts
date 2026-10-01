@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { ApiError, createJob, fetchJobs, triggerScan } from "../api";
-import { isJobActive, trackTitle, type JobInfo, type JobStatus, type Track } from "../types";
+import { isJobActive, jobFilesDetail, trackTitle, type JobInfo, type JobStatus, type Track } from "../types";
 import { useLibraryStore } from "./library";
 import { useToastsStore } from "./toasts";
 
@@ -64,6 +64,7 @@ export const useJobsStore = defineStore("jobs", () => {
         if (isJobActive(j)) {
           const toastId = toasts.push("progress", jobTitle(j, "started"), {
             progress: j.progress,
+            detail: jobFilesDetail(j),
           });
           seen.set(j.id, { status: j.status, toastId });
         } else {
@@ -74,10 +75,11 @@ export const useJobsStore = defineStore("jobs", () => {
       if (prev.status === j.status && !isJobActive(j)) continue;
       if (isJobActive(j)) {
         if (prev.toastId != null) {
-          toasts.update(prev.toastId, { progress: j.progress });
+          toasts.update(prev.toastId, { progress: j.progress, detail: jobFilesDetail(j) });
         } else {
           prev.toastId = toasts.push("progress", jobTitle(j, "started"), {
             progress: j.progress,
+            detail: jobFilesDetail(j),
           });
         }
       } else if (j.status === "done") {

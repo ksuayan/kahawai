@@ -791,6 +791,20 @@ export interface JobInfo {
   progress: number;
   status: JobStatus;
   message?: string | null;
+  /** Live file counts of a running scan (absent from older servers). */
+  files?: { done: number; total?: number | null; per_sec?: number | null; mb_per_sec?: number | null; eta_at?: number | null } | null;
+}
+
+/** "1,234 files scanned" on a first scan, "1,234 of about 5,000 files, done around 10:42 PM"
+ *  on a rescan; null before the server has reported any. */
+export function jobFilesDetail(j: JobInfo): string | null {
+  const f = j.files;
+  if (!f) return null;
+  const n = (v: number): string => Math.round(v).toLocaleString();
+  if (f.total == null) return `${n(f.done)} files scanned`;
+  const speed = f.mb_per_sec ? `, ${n(f.mb_per_sec)} MB/s` : "";
+  const eta = f.eta_at ? `, done around ${new Date(f.eta_at).toLocaleTimeString(undefined, { timeStyle: "short" })}` : "";
+  return `${n(f.done)} of about ${n(f.total)} files${speed}${eta}`;
 }
 
 /** A job is "active" while the client should keep polling for it. */

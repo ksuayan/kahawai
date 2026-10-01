@@ -412,6 +412,27 @@ pub fn setup_recent_scans(state: tauri::State<DesktopState>) -> Vec<kahawai_core
     jobs
 }
 
+/// The content-hashing job while it is queued or running, for the Status
+/// view's "Hashing…" box (files remaining, MB/s, ETA).
+#[tauri::command]
+pub fn setup_active_hash_job(state: tauri::State<DesktopState>) -> Option<kahawai_core::Job> {
+    let app_state = state.app_state.lock().unwrap().clone()?;
+    let mut jobs: Vec<kahawai_core::Job> = app_state
+        .jobs
+        .list()
+        .into_iter()
+        .filter(|j| {
+            j.kind == kahawai_core::JobKind::HashFiles
+                && matches!(
+                    j.status,
+                    kahawai_core::JobStatus::Queued | kahawai_core::JobStatus::Running
+                )
+        })
+        .collect();
+    jobs.sort_by(|a, b| b.id.cmp(&a.id));
+    jobs.into_iter().next()
+}
+
 /// Settings → Album info: whether online lookup is on, its threshold, how
 /// much of the library it covers, and the latest lookup job.
 #[derive(Serialize)]

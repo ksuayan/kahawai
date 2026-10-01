@@ -7,6 +7,7 @@ import {
   setupLiveScanStats,
   setupPickDirectory,
   setupQuit,
+  setupActiveHashJob,
   setupRecentScans,
   setupRestartServer,
   setupRevealConfig,
@@ -65,6 +66,8 @@ export const useSetupStore = defineStore("setup", () => {
   const applyError = ref<string | null>(null);
   const recentScans = ref<ScanJob[]>([]);
   const liveScanStats = ref<LiveScanStats | null>(null);
+  /** The content-hashing job a scan queues, while it is active. */
+  const hashJob = ref<ScanJob | null>(null);
   let scanPollTimer: number | undefined;
 
   const okDirCount = computed(
@@ -78,6 +81,8 @@ export const useSetupStore = defineStore("setup", () => {
    *  startup scan, anything) is queued or running. Drives the Status tab's
    *  live view independent of who triggered it. */
   const isScanning = computed(() => recentScans.value.some(isJobActive));
+  /** A scan or the hashing after it is active: keeps the Status tab polling. */
+  const isBusy = computed(() => isScanning.value || hashJob.value !== null);
 
   /** Called once on mount: decides wizard vs. status, prefills from any
    *  existing config. */
@@ -93,7 +98,7 @@ export const useSetupStore = defineStore("setup", () => {
       view.value = "status";
       serverStatus.value = (await setupServerStatus()) ?? null;
       await Promise.all([loadRunningConfig(), loadRecentScans()]);
-      if (isScanning.value) ensureScanPolling();
+      if (isBusy.value) ensureScanPolling();
     } else {
       view.value = "wizard";
       step.value = 0;
@@ -154,7 +159,7 @@ export const useSetupStore = defineStore("setup", () => {
   }
 
   async function loadRecentScans(): Promise<void> {
-    recentScans.value = await setupRecentScans();
+    [recentScans.value, hashJob.value] = await Promise.all([setupRecentScans(), setupActiveHashJob()]);
   }
 
   async function refreshLiveScanStats(): Promise<void> {
@@ -169,7 +174,7 @@ export const useSetupStore = defineStore("setup", () => {
     if (scanPollTimer !== undefined) return;
     scanPollTimer = window.setInterval(async () => {
       await Promise.all([loadRecentScans(), refreshLiveScanStats()]);
-      if (!isScanning.value) {
+      if (!isBusy.value) {
         window.clearInterval(scanPollTimer);
         scanPollTimer = undefined;
       }
@@ -214,7 +219,7 @@ export const useSetupStore = defineStore("setup", () => {
     try {
       serverStatus.value = await setupStopOtherServer();
       await Promise.all([loadRunningConfig(), loadRecentScans(), loadIdentity()]);
-      if (isScanning.value) ensureScanPolling();
+      if (isBusy.value) ensureScanPolling();
     } catch (err) {
       startError.value = String(err);
       serverStatus.value = (await setupServerStatus()) ?? serverStatus.value;
@@ -228,7 +233,7 @@ export const useSetupStore = defineStore("setup", () => {
     try {
       serverStatus.value = await setupRestartServer();
       await Promise.all([loadRunningConfig(), loadRecentScans(), loadIdentity()]);
-      if (isScanning.value) ensureScanPolling();
+      if (isBusy.value) ensureScanPolling();
     } catch (err) {
       startError.value = String(err);
       // Why it couldn't start, and who holds the port if that's why.
@@ -301,7 +306,7 @@ export const useSetupStore = defineStore("setup", () => {
       // the very folder(s) just set up in the wizard could be silently
       // dropped the first time someone added another one from Status.
       await Promise.all([loadRunningConfig(), loadRecentScans()]);
-      if (isScanning.value) ensureScanPolling();
+      if (isBusy.value) ensureScanPolling();
     } catch (err) {
       startError.value = String(err);
       serverStatus.value = (await setupServerStatus()) ?? serverStatus.value;
@@ -348,8 +353,10 @@ export const useSetupStore = defineStore("setup", () => {
     applyError,
     recentScans,
     liveScanStats,
+    hashJob,
     canApply,
     isScanning,
+    isBusy,
     init,
     addDirFromPicker,
     removeDir,
