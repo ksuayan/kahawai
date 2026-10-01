@@ -3501,7 +3501,6 @@ fn without_a_seekable_source_the_seek_falls_back_to_streaming_and_skipping() {
 // A stalled network must never freeze the controls
 // ---------------------------------------------------------------------------
 
-use kahawai_player_core::transport::StreamProgress;
 use kahawai_player_core::ReadAhead;
 use std::sync::atomic::AtomicBool;
 
