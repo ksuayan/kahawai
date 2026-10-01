@@ -8,6 +8,7 @@ import { trackTitle } from "../types";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
 import Artwork from "./Artwork.vue";
+import ConnectionGauge from "./ConnectionGauge.vue";
 import SeekBar from "./SeekBar.vue";
 import TrackMenu from "./TrackMenu.vue";
 import TransportControls from "./TransportControls.vue";
@@ -96,6 +97,7 @@ function goNowPlaying(): void {
 
       <!-- right: volume, extras -->
       <div class="flex items-center justify-end gap-2.5">
+        <ConnectionGauge />
         <VolumeSlider class="w-[100px]" />
         <UiButton variant="icon" title="Queue" aria-label="Queue" @click="nav.go('queue')"><ListOrdered /></UiButton>
         <TrackMenu v-if="track" :track="track" />

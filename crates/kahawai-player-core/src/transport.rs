@@ -11,6 +11,15 @@ use std::sync::{Arc, RwLock};
 
 use kahawai_core::{api::StreamFormat, MusicError};
 
+use crate::rangesource::{RangeSource, SeekableStream};
+use crate::readahead::{ReadAhead, ReadAheadStats};
+
+/// How far ahead of the playhead an HTTP stream is buffered, in bytes. About
+/// 28 s of the heaviest PCM we stream (24-bit / 192 kHz stereo, ~1.15 MB/s) and
+/// much longer for everything lighter, which is enough to ride out a Wi-Fi
+/// dropout without holding a whole album in memory. 0 turns read-ahead off.
+pub const DEFAULT_READ_AHEAD_BYTES: usize = 32 * 1024 * 1024;
+
 /// How to open one stream. Mirrors the server's `StreamQuery` (§3.4).
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
@@ -36,6 +45,8 @@ pub struct StreamProgress {
     pub content_length: Option<u64>,
     /// Byte offset this response starts at (HTTP Range resume), else 0.
     pub offset: u64,
+    /// Network speed and buffer fill, when the stream is read ahead.
+    pub stats: Option<Arc<ReadAheadStats>>,
 }
 
 impl StreamProgress {
@@ -52,9 +63,15 @@ impl StreamProgress {
 }
 
 /// Counts bytes as they pass through.
-struct CountingReader<R> {
+pub(crate) struct CountingReader<R> {
     inner: R,
     count: Arc<AtomicU64>,
+}
+
+impl<R> CountingReader<R> {
+    pub(crate) fn new(inner: R, count: Arc<AtomicU64>) -> Self {
+        Self { inner, count }
+    }
 }
 
 impl<R: Read> Read for CountingReader<R> {
@@ -86,6 +103,18 @@ pub struct StreamInfo {
 /// `Box<dyn Transport>`.
 pub trait Transport: Send {
     fn open_stream(&self, track_id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError>;
+
+    /// Open the track's untouched file bytes as a *seekable* source, so a
+    /// passthrough seek can jump to the right place instead of downloading
+    /// from the start. `Ok(None)` when this transport (or the server) cannot,
+    /// and the caller keeps to [`open_stream`](Self::open_stream).
+    fn open_seekable(
+        &self,
+        _track_id: i64,
+        _opts: &StreamOptions,
+    ) -> Result<Option<SeekableStream>, MusicError> {
+        Ok(None)
+    }
 }
 
 /// Live transport over HTTP. The base URL is behind a lock so the UI can
@@ -93,6 +122,8 @@ pub trait Transport: Send {
 pub struct HttpTransport {
     base_url: Arc<RwLock<String>>,
     agent: ureq::Agent,
+    /// Read-ahead buffer size per stream; 0 reads the body directly.
+    read_ahead_bytes: usize,
 }
 
 impl HttpTransport {
@@ -100,7 +131,14 @@ impl HttpTransport {
         Self {
             base_url: Arc::new(RwLock::new(base_url.into())),
             agent: ureq::Agent::new_with_defaults(),
+            read_ahead_bytes: DEFAULT_READ_AHEAD_BYTES,
         }
+    }
+
+    /// Set the per-stream read-ahead buffer (bytes; 0 = none).
+    pub fn with_read_ahead(mut self, bytes: usize) -> Self {
+        self.read_ahead_bytes = bytes;
+        self
     }
 
     /// Share ownership of the base URL with the engine, so a settings
@@ -109,6 +147,7 @@ impl HttpTransport {
         Self {
             base_url,
             agent: ureq::Agent::new_with_defaults(),
+            read_ahead_bytes: DEFAULT_READ_AHEAD_BYTES,
         }
     }
 
@@ -170,16 +209,24 @@ impl Transport for HttpTransport {
         let gapless_mode = header("x-gapless-mode");
         let content_length = header("content-length").and_then(|v| v.parse::<u64>().ok());
         let received = Arc::new(AtomicU64::new(0));
-        let reader = CountingReader {
-            inner: resp.into_body().into_reader(),
-            count: received.clone(),
+        // The counter sits on the network side, so with read-ahead `received`
+        // is what has been fetched (ahead of the playhead), which is exactly
+        // what the seek bar's buffered fill should show.
+        let counting = CountingReader::new(resp.into_body().into_reader(), received.clone());
+        let (reader, stats): (Box<dyn Read + Send>, _) = if self.read_ahead_bytes > 0 {
+            let ahead = ReadAhead::new(counting, self.read_ahead_bytes);
+            let stats = ahead.stats();
+            (Box::new(ahead), Some(stats))
+        } else {
+            (Box::new(counting), None)
         };
         Ok(StreamInfo {
-            reader: Box::new(reader),
+            reader,
             progress: Some(StreamProgress {
                 received,
                 content_length,
                 offset: opts.range_start.unwrap_or(0),
+                stats,
             }),
             content_type,
             chain,
@@ -187,9 +234,26 @@ impl Transport for HttpTransport {
             gapless_mode,
         })
     }
+
+    fn open_seekable(
+        &self,
+        track_id: i64,
+        opts: &StreamOptions,
+    ) -> Result<Option<SeekableStream>, MusicError> {
+        // Only the untouched file can be ranged; a live transcode cannot.
+        let _ = opts;
+        let url = self.stream_url(
+            track_id,
+            &StreamOptions {
+                format: Some(StreamFormat::Passthrough),
+                ..Default::default()
+            },
+        );
+        RangeSource::open(&self.agent, url, self.read_ahead_bytes, track_id)
+    }
 }
 
-fn map_ureq_error(e: ureq::Error, track_id: i64) -> MusicError {
+pub(crate) fn map_ureq_error(e: ureq::Error, track_id: i64) -> MusicError {
     match e {
         ureq::Error::StatusCode(code) => match code {
             404 => MusicError::NotFound(format!("track {track_id}")),
@@ -290,12 +354,13 @@ mod tests {
         );
     }
 
+    const TEN_BYTES: &str = "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789";
+
     #[test]
     fn progress_counts_bytes_read_against_content_length() {
-        let stub = Stub::serve_once(
-            "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
-        );
-        let t = HttpTransport::new(format!("http://{}", stub.addr));
+        // Without read-ahead the counter follows the consumer byte for byte.
+        let stub = Stub::serve_once(TEN_BYTES);
+        let t = HttpTransport::new(format!("http://{}", stub.addr)).with_read_ahead(0);
         let mut info = t.open_stream(1, &StreamOptions::default()).expect("open");
         let p = info
             .progress
@@ -312,11 +377,68 @@ mod tests {
     }
 
     #[test]
+    fn with_read_ahead_progress_is_what_was_fetched_not_what_was_played() {
+        // The buffer pulls the body off the network on its own, so the seek
+        // bar's fill runs ahead of the reader: here it is full before a byte
+        // has been consumed, and the bytes still arrive intact.
+        let stub = Stub::serve_once(TEN_BYTES);
+        let t = HttpTransport::new(format!("http://{}", stub.addr));
+        let mut info = t.open_stream(1, &StreamOptions::default()).expect("open");
+        let p = info.progress.clone().expect("progress");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while p.fraction() != Some(1.0) && std::time::Instant::now() < end {
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(p.fraction(), Some(1.0), "fetched ahead of the reader");
+        let mut body = Vec::new();
+        info.reader.read_to_end(&mut body).unwrap();
+        assert_eq!(body, b"0123456789");
+    }
+
+    #[test]
+    fn a_read_ahead_stream_reports_its_network_speed_and_fill() {
+        // A 3 MiB body is more than one speed sample, so a rate must appear;
+        // read ahead is on by default, and off (0) reports no stats at all.
+        let body = "x".repeat(3 * 1024 * 1024);
+        let response: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        );
+        let stub = Stub::serve_once(response);
+        let t = HttpTransport::new(format!("http://{}", stub.addr));
+        let mut info = t.open_stream(1, &StreamOptions::default()).expect("open");
+        let stats = info
+            .progress
+            .clone()
+            .unwrap()
+            .stats
+            .expect("read ahead reports stats");
+        assert_eq!(stats.capacity(), DEFAULT_READ_AHEAD_BYTES);
+        let mut all = Vec::new();
+        info.reader.read_to_end(&mut all).unwrap();
+        assert_eq!(all.len(), body.len());
+        assert!(stats.rate_bps().is_some(), "a speed was measured");
+        assert_eq!(stats.queued_bytes(), 0, "everything has been read");
+
+        let stub = Stub::serve_once(TEN_BYTES);
+        let t = HttpTransport::new(format!("http://{}", stub.addr)).with_read_ahead(0);
+        let info = t.open_stream(1, &StreamOptions::default()).expect("open");
+        assert!(
+            info.progress.unwrap().stats.is_none(),
+            "no read ahead, no stats"
+        );
+    }
+
+    #[test]
     fn progress_is_relative_to_the_whole_file_for_range_resumes() {
         let p = StreamProgress {
             received: Arc::new(AtomicU64::new(25)),
             content_length: Some(50),
             offset: 50,
+            stats: None,
         };
         assert_eq!(p.fraction(), Some(0.75)); // (50 + 25) / (50 + 50)
         let unknown = StreamProgress {

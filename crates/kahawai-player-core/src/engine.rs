@@ -44,7 +44,7 @@ use crate::quality::{
 use crate::queue::{Queue, RepeatMode};
 use crate::resample::CubicResampler;
 use crate::sink::{AudioSink, OutputPath, PcmChunk};
-use crate::transport::{HttpTransport, StreamOptions, StreamProgress, Transport};
+use crate::transport::{HttpTransport, StreamInfo, StreamOptions, StreamProgress, Transport};
 
 /// Frames decoded per pump iteration (~93 ms at 44.1 kHz).
 const CHUNK_FRAMES: usize = 4096;
@@ -176,6 +176,19 @@ pub struct PlayerSnapshot {
     /// (transcoded/chunked) or several tracks share one response.
     #[serde(default)]
     pub buffered_ms: Option<u64>,
+    /// How fast the network is delivering this stream, in bytes per second
+    /// (measured while fetching). `None` until enough has arrived to say, or
+    /// when the stream is not read ahead.
+    #[serde(default)]
+    pub download_bps: Option<u64>,
+    /// How many seconds of audio the read-ahead buffer holds beyond the
+    /// playhead (ms). `None` when unknowable yet.
+    #[serde(default)]
+    pub buffer_ahead_ms: Option<u64>,
+    /// The whole stream has been fetched, so a short buffer is just the end
+    /// of the track, not a slow connection.
+    #[serde(default)]
+    pub buffer_complete: bool,
     /// Sample rate of the audio reaching the output (after any resampling);
     /// the rate the EQ is designed at. `None` when idle.
     #[serde(default)]
@@ -225,6 +238,9 @@ impl Default for PlayerSnapshot {
             position_ms: 0,
             duration_ms: None,
             buffered_ms: None,
+            download_bps: None,
+            buffer_ahead_ms: None,
+            buffer_complete: false,
             output_rate_hz: None,
             analog_plan: None,
             analog_level: None,
@@ -419,6 +435,47 @@ impl ActiveStream {
             base_ms + ((duration.saturating_sub(base_ms)) as f64 * frac) as u64
         };
         Some(ms.clamp(position_ms.min(duration), duration))
+    }
+
+    /// Network speed (bytes/s), how much audio the read-ahead holds past the
+    /// playhead (ms) and whether the whole stream is already in, for the
+    /// connection gauge. The first two are `None` when unknown.
+    fn network(&self, position_ms: u64) -> (Option<u64>, Option<u64>, bool) {
+        let (progress, segments, base_ms) = match self {
+            ActiveStream::Pcm(a) => (
+                a.progress.as_ref(),
+                &a.segments,
+                a.base_frames * 1000 / a.sink_rate.max(1) as u64,
+            ),
+            ActiveStream::Dop(a) => (
+                a.progress.as_ref(),
+                &a.segments,
+                a.base_frames * 1000 / a.spec.dop_rate_hz.max(1) as u64,
+            ),
+        };
+        let Some(progress) = progress else {
+            return (None, None, false);
+        };
+        let Some(stats) = progress.stats.as_ref() else {
+            return (None, None, false);
+        };
+        let queued = stats.queued_bytes() as u64;
+        let received = progress.received.load(std::sync::atomic::Ordering::Relaxed);
+        // The whole file is the response plus whatever a Range resume skipped.
+        let whole = progress.content_length.map(|l| l + progress.offset);
+        let duration = if segments.len() == 1 {
+            segments[0].duration_ms
+        } else {
+            None
+        };
+        let ahead = estimate_ahead_ms(
+            queued,
+            whole,
+            duration,
+            received.saturating_sub(queued),
+            position_ms.saturating_sub(base_ms),
+        );
+        (stats.rate_bps(), ahead, stats.finished())
     }
 
     /// Sample rate of the audio the sink is receiving.
@@ -994,12 +1051,40 @@ impl Player {
     /// the server); passthrough restarts the byte stream and the engine
     /// skips decoded frames to the target (C1 limitation, documented).
     pub fn seek_ms(&mut self, ms: u64) {
-        if self.queue.current().is_none() {
+        let Some(duration) = self.queue.current().map(|t| t.duration_ms) else {
             return;
-        }
+        };
+        // A target on or past the end asks the server for a stream with no
+        // audio; land just inside it instead (the track then ends normally).
+        let target = match duration {
+            Some(d) if d > 0 && ms >= d => d.saturating_sub(SEEK_END_MARGIN_MS),
+            _ => ms,
+        };
         let paused = self.status == PlayerStatus::Paused;
+        let before = self.position_ms();
         self.error = None;
-        self.open_current(Some(ms));
+        self.open_current(Some(target));
+        // A seek that cannot be served (server hiccup, dropped connection)
+        // must not end the song: carry on from where it was, and say so.
+        if self.status == PlayerStatus::Stopped
+            && self.error.is_some()
+            && target != before
+            && self.queue.current().is_some()
+        {
+            let failure = self.error.take();
+            self.open_current(Some(before));
+            if self.error.is_none() {
+                let secs = before / 1000;
+                self.add_notice(format!(
+                    "Couldn't seek there; carried on from {}:{:02}.",
+                    secs / 60,
+                    secs % 60
+                ));
+            } else {
+                // Recovery failed too: the original failure is the reason.
+                self.error = failure;
+            }
+        }
         if paused && self.status == PlayerStatus::Playing {
             self.status = PlayerStatus::Paused;
             let _ = self.sink.pause();
@@ -1279,6 +1364,45 @@ impl Player {
         self.open_pcm(&track, seek, fmt);
     }
 
+    /// Open a passthrough track at `ms` through a seekable source, if the
+    /// transport offers one and the container can seek. `None` means "use the
+    /// forward-only path"; this never fails the track.
+    fn open_seeked_passthrough(
+        &self,
+        track: &Track,
+        opts: &StreamOptions,
+        ms: u64,
+    ) -> Option<(StreamInfo, StreamDecoder, u64)> {
+        let sk = match self.transport.open_seekable(track.id, opts) {
+            Ok(Some(sk)) => sk,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(error = %e, "seekable open failed; streaming from the start");
+                return None;
+            }
+        };
+        let (decoder, skip) = match StreamDecoder::new_seekable(sk.source, sk.byte_len, ms) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "seeking in the container failed; streaming from the start");
+                return None;
+            }
+        };
+        if let Some(control) = &sk.control {
+            control.warm();
+        }
+        let progress = sk.control.as_ref().and_then(|c| c.progress());
+        let info = StreamInfo {
+            reader: Box::new(std::io::empty()),
+            content_type: sk.content_type,
+            chain: sk.chain,
+            gapless_next: None,
+            gapless_mode: None,
+            progress,
+        };
+        Some((info, decoder, skip))
+    }
+
     /// Start DoP for `track`, or say why it cannot. On `Err` the sink has
     /// been released and nothing is playing.
     fn try_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
@@ -1426,8 +1550,9 @@ impl Player {
         };
         self.gain_ramp.retarget(loudness_gain_db);
 
-        // Passthrough seeks use Range + decode-skip; everything else uses
-        // the server's sample-exact ?seek_ms=.
+        // Passthrough seeks go through a seekable Range source (below), or
+        // failing that decode-skip from the start; everything else uses the
+        // server's sample-exact ?seek_ms=.
         let passthrough_seek = seek.is_some() && fmt == StreamFormat::Passthrough;
         let opts = StreamOptions {
             format: Some(fmt),
@@ -1435,25 +1560,39 @@ impl Player {
             next: next_id,
             range_start: None,
         };
-        let info = match self.transport.open_stream(track.id, &opts) {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::warn!(error = %e, "stream request failed");
-                self.fail("Couldn't get the stream from the server.");
-                return;
+        // A passthrough seek first tries a seekable (HTTP Range) source, so the
+        // container's own index finds the spot and only the bytes from there are
+        // fetched; failing that, the whole file streams and frames are skipped.
+        let seeked = match (passthrough_seek, seek) {
+            (true, Some(ms)) => self.open_seeked_passthrough(track, &opts, ms),
+            _ => None,
+        };
+        let (info, decoder, seek_skip_frames) = match seeked {
+            Some((info, decoder, skip)) => (info, decoder, Some(skip)),
+            None => {
+                let mut info = match self.transport.open_stream(track.id, &opts) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "stream request failed");
+                        self.fail("Couldn't get the stream from the server.");
+                        return;
+                    }
+                };
+                let expect_chained = info.gapless_mode.as_deref() == Some("chained");
+                let reader = std::mem::replace(&mut info.reader, Box::new(std::io::empty()));
+                let decoder = match StreamDecoder::new(reader, expect_chained) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "decode failed");
+                        self.fail("Couldn't decode this file.");
+                        return;
+                    }
+                };
+                (info, decoder, None)
             }
         };
         let gapless_mode = info.gapless_mode.clone();
         let progress = info.progress.clone();
-        let expect_chained = gapless_mode.as_deref() == Some("chained");
-        let decoder = match StreamDecoder::new(info.reader, expect_chained) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(error = %e, "decode failed");
-                self.fail("Couldn't decode this file.");
-                return;
-            }
-        };
         let spec = decoder.spec();
 
         // Segments: the server chained the next track's audio into this
@@ -1497,7 +1636,7 @@ impl Player {
             } else {
                 match self
                     .sink
-                    .open_exclusive_pcm(spec.sample_rate, spec.channels as u16)
+                    .open_exclusive_pcm(spec.sample_rate, spec.channels)
                 {
                     Ok(()) => bit_perfect = true,
                     Err(e) => {
@@ -1593,7 +1732,9 @@ impl Player {
         // after every scrub.)
         let base_frames = seek.unwrap_or(0) * sink_rate as u64 / 1000;
         let skip_frames = if passthrough_seek {
-            seek.unwrap_or(0) * spec.sample_rate as u64 / 1000
+            // A seekable open already jumped near the target and says how much
+            // is left to discard; the forward-only path discards all of it.
+            seek_skip_frames.unwrap_or(seek.unwrap_or(0) * spec.sample_rate as u64 / 1000)
         } else {
             0
         };
@@ -1933,7 +2074,7 @@ impl Player {
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
-        let (track, position_ms, duration_ms, buffered_ms, output_rate_hz, format, chain) =
+        let (track, position_ms, duration_ms, buffered_ms, net, output_rate_hz, format, chain) =
             match &self.active {
                 Some(a) => {
                     let t = a.display_track().clone();
@@ -1943,6 +2084,7 @@ impl Player {
                         pos,
                         t.duration_ms,
                         a.buffered_ms(pos),
+                        a.network(pos),
                         Some(a.output_rate_hz()),
                         Some(a.format_used()),
                         a.chain().clone(),
@@ -1953,7 +2095,7 @@ impl Player {
                     let t = self.queue.current().cloned();
                     let at = self.resume_at_ms.unwrap_or(0);
                     let dur = t.as_ref().and_then(|t| t.duration_ms).filter(|_| at > 0);
-                    (t, at, dur, None, None, None, None)
+                    (t, at, dur, None, (None, None, false), None, None, None)
                 }
             };
         PlayerSnapshot {
@@ -1965,6 +2107,9 @@ impl Player {
             position_ms,
             duration_ms,
             buffered_ms,
+            download_bps: net.0,
+            buffer_ahead_ms: net.1,
+            buffer_complete: net.2,
             output_rate_hz,
             analog_plan: if self.active.is_some() && self.output_path == OutputPath::Pcm {
                 self.analog.status().map(|s| s.describe())
@@ -2667,9 +2812,26 @@ fn playback_loop(
     let mut last_key = snapshot_key(&PlayerSnapshot::default());
 
     loop {
-        // Drain pending commands.
-        let mut shutdown = false;
+        // Gather everything pending (blocking briefly when idle so the thread
+        // sleeps instead of spinning), then apply it with seek bursts merged.
+        let mut batch: Vec<EngineCommand> = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
+            batch.push(cmd);
+        }
+        if batch.is_empty() && !player.wants_pump() {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(cmd) => {
+                    batch.push(cmd);
+                    while let Ok(more) = rx.try_recv() {
+                        batch.push(more);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let mut shutdown = false;
+        for cmd in coalesce_seeks(batch) {
             if matches!(cmd, EngineCommand::Shutdown) {
                 shutdown = true;
                 break;
@@ -2682,14 +2844,6 @@ fn playback_loop(
 
         if player.wants_pump() {
             player.pump();
-        } else {
-            // Idle: block briefly so the thread sleeps instead of spinning.
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(EngineCommand::Shutdown) => break,
-                Ok(cmd) => apply_command(&mut player, cmd),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
         }
 
         // Emit ~4 Hz while playing, immediately on track/state changes.
@@ -2727,6 +2881,46 @@ fn playback_loop(
 /// differs.) Exposed so tests can check that a change reaches the UI on its own.
 pub fn snapshot_key_differs(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
     snapshot_key(a) != snapshot_key(b)
+}
+
+/// Milliseconds of audio that `queued` buffered bytes represent. The byte rate
+/// of the stream comes from the file size and duration when both are known
+/// (exact for passthrough); otherwise from how many bytes have been consumed
+/// over how long they played, once there is enough of that (2 s) to trust.
+fn estimate_ahead_ms(
+    queued: u64,
+    whole_len: Option<u64>,
+    duration_ms: Option<u64>,
+    consumed: u64,
+    played_ms: u64,
+) -> Option<u64> {
+    let bytes_per_ms = match (whole_len, duration_ms) {
+        (Some(len), Some(d)) if len > 0 && d > 0 => len as f64 / d as f64,
+        _ if played_ms >= 2000 && consumed > 0 => consumed as f64 / played_ms as f64,
+        _ => return None,
+    };
+    Some((queued as f64 / bytes_per_ms) as u64)
+}
+
+/// How far inside the end a seek onto the end lands, in ms.
+const SEEK_END_MARGIN_MS: u64 = 500;
+
+/// Of each run of consecutive `Seek` commands only the last matters: every one
+/// reopens the stream, so a burst (a held arrow key on the seek slider, a
+/// scrub that commits often) would otherwise queue that many sequential
+/// network opens and leave the user waiting through all of them. Other
+/// commands, and their order, are untouched.
+fn coalesce_seeks(cmds: Vec<EngineCommand>) -> Vec<EngineCommand> {
+    let mut out: Vec<EngineCommand> = Vec::with_capacity(cmds.len());
+    for cmd in cmds {
+        if matches!(cmd, EngineCommand::Seek(_))
+            && matches!(out.last(), Some(EngineCommand::Seek(_)))
+        {
+            out.pop();
+        }
+        out.push(cmd);
+    }
+    out
 }
 
 /// Identity of the UI-visible parts of a [`PlayerSnapshot`]; see [`snapshot_key`].
@@ -2997,5 +3191,91 @@ mod can_chain_tests {
             StreamFormat::Opus
         ));
         assert!(can_chain(&a, &t(None, None), StreamFormat::Flac));
+    }
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    use super::*;
+
+    fn seeks(cmds: &[EngineCommand]) -> Vec<Option<u64>> {
+        cmds.iter()
+            .map(|c| match c {
+                EngineCommand::Seek(ms) => Some(*ms),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_burst_of_seeks_keeps_only_the_last() {
+        let out = coalesce_seeks(vec![
+            EngineCommand::Seek(1000),
+            EngineCommand::Seek(2000),
+            EngineCommand::Seek(3000),
+        ]);
+        assert_eq!(seeks(&out), vec![Some(3000)]);
+    }
+
+    #[test]
+    fn seeks_separated_by_another_command_are_both_kept_in_order() {
+        let out = coalesce_seeks(vec![
+            EngineCommand::Seek(1000),
+            EngineCommand::Pause,
+            EngineCommand::Seek(2000),
+            EngineCommand::Seek(2500),
+        ]);
+        assert_eq!(seeks(&out), vec![Some(1000), None, Some(2500)]);
+        assert!(matches!(out[1], EngineCommand::Pause));
+    }
+
+    #[test]
+    fn other_commands_pass_through_untouched() {
+        let out = coalesce_seeks(vec![
+            EngineCommand::Pause,
+            EngineCommand::Resume,
+            EngineCommand::Shutdown,
+        ]);
+        assert_eq!(out.len(), 3);
+        assert!(coalesce_seeks(Vec::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ahead_tests {
+    use super::*;
+
+    #[test]
+    fn a_known_file_size_and_duration_give_an_exact_byte_rate() {
+        // 1 MB/s over 100 s: 3 MB queued is 3 s ahead, whatever has been played.
+        assert_eq!(
+            estimate_ahead_ms(3_000_000, Some(100_000_000), Some(100_000), 0, 0),
+            Some(3000)
+        );
+    }
+
+    #[test]
+    fn a_chunked_stream_estimates_from_what_has_played_but_only_once_there_is_enough() {
+        // 500 B/ms consumed over 4 s => 2 MB queued is 4 s ahead.
+        assert_eq!(
+            estimate_ahead_ms(2_000_000, None, None, 2_000_000, 4000),
+            Some(4000)
+        );
+        assert_eq!(
+            estimate_ahead_ms(2_000_000, None, None, 400_000, 800),
+            None,
+            "under 2 s: not trusted yet"
+        );
+        assert_eq!(
+            estimate_ahead_ms(2_000_000, None, None, 0, 5000),
+            None,
+            "nothing consumed"
+        );
+    }
+
+    #[test]
+    fn degenerate_sizes_do_not_divide_by_zero() {
+        assert_eq!(estimate_ahead_ms(10, Some(0), Some(0), 0, 0), None);
+        assert_eq!(estimate_ahead_ms(0, Some(1000), Some(1000), 0, 0), Some(0));
     }
 }

@@ -162,6 +162,8 @@ struct StubTransport {
     /// `X-Transcode-Chain` value the stub reports (default "wav->passthrough").
     chain_label: Mutex<Option<String>>,
     opened: Mutex<Vec<(i64, StreamOptions)>>,
+    /// How many of the next `open_stream` calls fail (a server hiccup).
+    fail_opens: Mutex<u32>,
 }
 
 impl StubTransport {
@@ -172,7 +174,13 @@ impl StubTransport {
             chain_mode: chain_mode.map(|s| s.to_string()),
             chain_label: Mutex::new(None),
             opened: Mutex::new(Vec::new()),
+            fail_opens: Mutex::new(0),
         }
+    }
+
+    /// Make the next `n` opens fail with a server error.
+    fn fail_next_opens(&self, n: u32) {
+        *self.fail_opens.lock().unwrap() = n;
     }
 
     fn add(&self, id: i64, segments: &[(f32, usize)]) {
@@ -188,6 +196,13 @@ impl StubTransport {
 impl Transport for StubTransport {
     fn open_stream(&self, track_id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
         self.opened.lock().unwrap().push((track_id, opts.clone()));
+        {
+            let mut fails = self.fail_opens.lock().unwrap();
+            if *fails > 0 {
+                *fails -= 1;
+                return Err(MusicError::Http("stub: server error".into()));
+            }
+        }
         // ?next= with a pre-built body (single-session: one container).
         if opts.next.is_some() {
             if let Some(body) = self.next_body.lock().unwrap().get(&track_id).cloned() {
@@ -3172,6 +3187,310 @@ fn matching_rates_still_chain() {
     h.player
         .play_queue(vec![track_with(1, 96_000, 2), track_with(2, 96_000, 2)], 0);
     assert_eq!(requested_next(&h, 1), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// Scrubbing must be robust: a seek that cannot be served never ends the song
+// ---------------------------------------------------------------------------
+
+fn playing_ten_seconds() -> Harness {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 10)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
+    while h.player.snapshot().position_ms < 1000 {
+        h.player.pump();
+    }
+    h
+}
+
+#[test]
+fn a_failed_seek_carries_on_from_where_it_was() {
+    let mut h = playing_ten_seconds();
+    let before = h.player.snapshot().position_ms;
+    h.stub.fail_next_opens(1); // the seek's stream request fails; the recovery works
+    h.player.seek_ms(7000);
+    let s = h.player.snapshot();
+    assert_eq!(s.status, PlayerStatus::Playing, "the song did not stop");
+    assert!(s.error.is_none(), "no error: {:?}", s.error);
+    assert!(
+        s.position_ms.abs_diff(before) < 300,
+        "resumed near {before} ms, not at the failed 7000: {}",
+        s.position_ms
+    );
+    assert!(
+        s.notice
+            .as_deref()
+            .unwrap_or("")
+            .contains("Couldn't seek there"),
+        "says what happened: {:?}",
+        s.notice
+    );
+}
+
+#[test]
+fn if_the_recovery_fails_too_playback_stops_with_the_original_error() {
+    let mut h = playing_ten_seconds();
+    h.stub.fail_next_opens(2); // the server is really down
+    h.player.seek_ms(7000);
+    let s = h.player.snapshot();
+    assert_eq!(s.status, PlayerStatus::Stopped);
+    assert!(s.error.is_some(), "an honest error, not silence");
+}
+
+#[test]
+fn seeking_to_the_end_lands_just_inside_it() {
+    let mut h = playing_ten_seconds();
+    h.player.seek_ms(10_000); // the slider's right-hand end
+    let s = h.player.snapshot();
+    assert_eq!(
+        s.status,
+        PlayerStatus::Playing,
+        "an empty stream was not requested"
+    );
+    assert!(
+        (9000..10_000).contains(&s.position_ms),
+        "just before the end: {}",
+        s.position_ms
+    );
+    h.pump_until_done(5000);
+    assert_eq!(
+        h.player.status(),
+        PlayerStatus::Stopped,
+        "the track still ends normally"
+    );
+}
+
+#[test]
+fn seeking_while_paused_stays_paused_even_when_the_seek_fails() {
+    let mut h = playing_ten_seconds();
+    h.player.pause();
+    h.stub.fail_next_opens(1);
+    h.player.seek_ms(5000);
+    assert_eq!(h.player.status(), PlayerStatus::Paused);
+}
+
+// ---------------------------------------------------------------------------
+// Passthrough seeks use a seekable source instead of streaming from byte 0
+// ---------------------------------------------------------------------------
+
+use kahawai_player_core::SeekableStream;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+#[derive(Clone, Copy, PartialEq)]
+enum SeekOffer {
+    /// An in-memory seekable copy of the file.
+    Seekable,
+    /// The transport has no seekable source (the server ignores Range).
+    Unavailable,
+    /// Asking for one fails.
+    Errors,
+    /// The "seekable" bytes are not a container the decoder can read.
+    NotAudio,
+}
+
+/// Counts bytes read from an in-memory seekable file.
+struct CountingCursor {
+    inner: Cursor<Vec<u8>>,
+    read: Arc<AtomicU64>,
+}
+
+impl std::io::Read for CountingCursor {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read.fetch_add(n as u64, Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for CountingCursor {
+    fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(p)
+    }
+}
+
+/// [`StubTransport`] that can also offer the file as a seekable source.
+struct SeekStub {
+    stub: Arc<StubTransport>,
+    file: Vec<u8>,
+    offer: Mutex<SeekOffer>,
+    seekable_opens: AtomicUsize,
+    bytes_read: Arc<AtomicU64>,
+}
+
+struct SeekStubTransport(Arc<SeekStub>);
+
+impl Transport for SeekStubTransport {
+    fn open_stream(&self, id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+        self.0.stub.open_stream(id, opts)
+    }
+
+    fn open_seekable(
+        &self,
+        _id: i64,
+        _opts: &StreamOptions,
+    ) -> Result<Option<SeekableStream>, MusicError> {
+        let me = &self.0;
+        let offer = *me.offer.lock().unwrap();
+        match offer {
+            SeekOffer::Unavailable => return Ok(None),
+            SeekOffer::Errors => return Err(MusicError::Http("stub: range request failed".into())),
+            _ => {}
+        }
+        me.seekable_opens.fetch_add(1, Ordering::SeqCst);
+        let bytes = if offer == SeekOffer::NotAudio {
+            vec![7u8; 4000]
+        } else {
+            me.file.clone()
+        };
+        Ok(Some(SeekableStream {
+            byte_len: bytes.len() as u64,
+            source: Box::new(CountingCursor {
+                inner: Cursor::new(bytes),
+                read: me.bytes_read.clone(),
+            }),
+            content_type: "audio/wav".into(),
+            chain: Some("wav->passthrough".into()),
+            control: None,
+        }))
+    }
+}
+
+struct SeekHarness {
+    player: Player,
+    me: Arc<SeekStub>,
+    sink: SharedSink,
+}
+
+impl SeekHarness {
+    /// A 10 s, 440 Hz track playing, with the file offered the given way.
+    fn new(offer: SeekOffer) -> Self {
+        let stub = Arc::new(StubTransport::new(None));
+        stub.add(1, &[(440.0, 44100 * 10)]);
+        let me = Arc::new(SeekStub {
+            stub,
+            file: wav_bytes(440.0, 44100 * 10),
+            offer: Mutex::new(offer),
+            seekable_opens: AtomicUsize::new(0),
+            bytes_read: Arc::new(AtomicU64::new(0)),
+        });
+        let sink = SharedSink(Arc::new(Mutex::new(VecSink::new())));
+        let mut player = Player::new(
+            Box::new(sink.clone()),
+            Box::new(SeekStubTransport(me.clone())),
+        );
+        player.play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
+        for _ in 0..4 {
+            player.pump();
+        }
+        Self { player, me, sink }
+    }
+
+    fn stream_opens(&self) -> usize {
+        self.me.stub.opened.lock().unwrap().len()
+    }
+
+    /// Seek, then return the interleaved samples produced after the seek.
+    fn seek_and_listen(&mut self, ms: u64) -> Vec<f32> {
+        let before = self.sink.0.lock().unwrap().samples.len();
+        self.player.seek_ms(ms);
+        // The forward-only fallback decodes and discards everything before the
+        // target first, so give it as many pumps as that takes.
+        for _ in 0..800 {
+            self.player.pump();
+            if self.sink.0.lock().unwrap().samples.len() - before > 2 * 8000 {
+                break;
+            }
+        }
+        self.sink.0.lock().unwrap().samples[before..].to_vec()
+    }
+}
+
+/// 440 Hz at the file's 0.7 amplitude, `frames` frames into the track.
+fn tone_at(frame: usize) -> f32 {
+    0.7 * (2.0 * std::f32::consts::PI * 440.0 * frame as f32 / RATE as f32).sin()
+}
+
+/// Past the click-free fade-in, the first audio after a seek to `ms` is the
+/// file's audio from exactly there (right frequency and phase).
+fn assert_audio_is_from(heard: &[f32], ms: u64) {
+    let start_frame = (ms as usize) * RATE as usize / 1000;
+    assert!(
+        heard.len() > 2 * 6000,
+        "enough audio after the seek: {}",
+        heard.len()
+    );
+    for i in 3000..4000 {
+        let (have, want) = (heard[i * CHANNELS], tone_at(start_frame + i));
+        assert!(
+            (have - want).abs() < 0.02,
+            "frame {i} after {ms} ms: {have} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn a_passthrough_seek_uses_the_seekable_source_and_reads_little_before_the_target() {
+    let mut h = SeekHarness::new(SeekOffer::Seekable);
+    assert_eq!(
+        h.stream_opens(),
+        1,
+        "the track itself streamed from the start"
+    );
+    let heard = h.seek_and_listen(7000);
+    assert_eq!(
+        h.me.seekable_opens.load(Ordering::SeqCst),
+        1,
+        "the seek opened a seekable source"
+    );
+    assert_eq!(
+        h.stream_opens(),
+        1,
+        "and did not stream the whole file again"
+    );
+    assert_eq!(h.player.status(), PlayerStatus::Playing);
+    assert_audio_is_from(&heard, 7000);
+    let read = h.me.bytes_read.load(Ordering::SeqCst);
+    let file = h.me.file.len() as u64;
+    assert!(
+        read < file / 3,
+        "read {read} of {file} bytes: not the 70% before the target"
+    );
+}
+
+#[test]
+fn the_playhead_after_a_seekable_seek_is_the_target() {
+    let mut h = SeekHarness::new(SeekOffer::Seekable);
+    h.player.seek_ms(4000);
+    let pos = h.player.snapshot().position_ms;
+    assert!(
+        (4000..4100).contains(&pos),
+        "position {pos} ms is the 4 s target, not 0 or a frame off"
+    );
+    h.seek_and_listen(4000);
+    assert!(
+        h.player.snapshot().position_ms >= 4000,
+        "and it only moves forward from there"
+    );
+}
+
+#[test]
+fn without_a_seekable_source_the_seek_falls_back_to_streaming_and_skipping() {
+    for offer in [
+        SeekOffer::Unavailable,
+        SeekOffer::Errors,
+        SeekOffer::NotAudio,
+    ] {
+        let mut h = SeekHarness::new(offer);
+        let heard = h.seek_and_listen(7000);
+        assert_eq!(
+            h.stream_opens(),
+            2,
+            "streamed again from the start and skipped"
+        );
+        assert_eq!(h.player.status(), PlayerStatus::Playing);
+        assert_audio_is_from(&heard, 7000);
+    }
 }
 
 // ---------------------------------------------------------------------------

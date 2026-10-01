@@ -109,6 +109,12 @@ export interface PlayerState {
   duration_ms: number | null;
   /** How far the data received from the server reaches (ms); null when unknown. */
   buffered_ms?: number | null;
+  /** Network speed of the stream in bytes/s; null until measured or when not read ahead. */
+  download_bps?: number | null;
+  /** Audio buffered beyond the playhead (ms); null when unknown. */
+  buffer_ahead_ms?: number | null;
+  /** The whole stream is already fetched (so a short buffer is just the track's end). */
+  buffer_complete?: boolean;
   /** Rate of the audio reaching the output (what the EQ is designed at); null when idle. */
   output_rate_hz?: number | null;
   /** What the analog stage is doing (plan, latency); null when off. */
