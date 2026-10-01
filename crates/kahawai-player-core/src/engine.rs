@@ -994,12 +994,40 @@ impl Player {
     /// the server); passthrough restarts the byte stream and the engine
     /// skips decoded frames to the target (C1 limitation, documented).
     pub fn seek_ms(&mut self, ms: u64) {
-        if self.queue.current().is_none() {
+        let Some(duration) = self.queue.current().map(|t| t.duration_ms) else {
             return;
-        }
+        };
+        // A target on or past the end asks the server for a stream with no
+        // audio; land just inside it instead (the track then ends normally).
+        let target = match duration {
+            Some(d) if d > 0 && ms >= d => d.saturating_sub(SEEK_END_MARGIN_MS),
+            _ => ms,
+        };
         let paused = self.status == PlayerStatus::Paused;
+        let before = self.position_ms();
         self.error = None;
-        self.open_current(Some(ms));
+        self.open_current(Some(target));
+        // A seek that cannot be served (server hiccup, dropped connection)
+        // must not end the song: carry on from where it was, and say so.
+        if self.status == PlayerStatus::Stopped
+            && self.error.is_some()
+            && target != before
+            && self.queue.current().is_some()
+        {
+            let failure = self.error.take();
+            self.open_current(Some(before));
+            if self.error.is_none() {
+                let secs = before / 1000;
+                self.add_notice(format!(
+                    "Couldn't seek there; carried on from {}:{:02}.",
+                    secs / 60,
+                    secs % 60
+                ));
+            } else {
+                // Recovery failed too: the original failure is the reason.
+                self.error = failure;
+            }
+        }
         if paused && self.status == PlayerStatus::Playing {
             self.status = PlayerStatus::Paused;
             let _ = self.sink.pause();
@@ -2667,9 +2695,26 @@ fn playback_loop(
     let mut last_key = snapshot_key(&PlayerSnapshot::default());
 
     loop {
-        // Drain pending commands.
-        let mut shutdown = false;
+        // Gather everything pending (blocking briefly when idle so the thread
+        // sleeps instead of spinning), then apply it with seek bursts merged.
+        let mut batch: Vec<EngineCommand> = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
+            batch.push(cmd);
+        }
+        if batch.is_empty() && !player.wants_pump() {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(cmd) => {
+                    batch.push(cmd);
+                    while let Ok(more) = rx.try_recv() {
+                        batch.push(more);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let mut shutdown = false;
+        for cmd in coalesce_seeks(batch) {
             if matches!(cmd, EngineCommand::Shutdown) {
                 shutdown = true;
                 break;
@@ -2682,14 +2727,6 @@ fn playback_loop(
 
         if player.wants_pump() {
             player.pump();
-        } else {
-            // Idle: block briefly so the thread sleeps instead of spinning.
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(EngineCommand::Shutdown) => break,
-                Ok(cmd) => apply_command(&mut player, cmd),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
         }
 
         // Emit ~4 Hz while playing, immediately on track/state changes.
@@ -2727,6 +2764,27 @@ fn playback_loop(
 /// differs.) Exposed so tests can check that a change reaches the UI on its own.
 pub fn snapshot_key_differs(a: &PlayerSnapshot, b: &PlayerSnapshot) -> bool {
     snapshot_key(a) != snapshot_key(b)
+}
+
+/// How far inside the end a seek onto the end lands, in ms.
+const SEEK_END_MARGIN_MS: u64 = 500;
+
+/// Of each run of consecutive `Seek` commands only the last matters: every one
+/// reopens the stream, so a burst (a held arrow key on the seek slider, a
+/// scrub that commits often) would otherwise queue that many sequential
+/// network opens and leave the user waiting through all of them. Other
+/// commands, and their order, are untouched.
+fn coalesce_seeks(cmds: Vec<EngineCommand>) -> Vec<EngineCommand> {
+    let mut out: Vec<EngineCommand> = Vec::with_capacity(cmds.len());
+    for cmd in cmds {
+        if matches!(cmd, EngineCommand::Seek(_))
+            && matches!(out.last(), Some(EngineCommand::Seek(_)))
+        {
+            out.pop();
+        }
+        out.push(cmd);
+    }
+    out
 }
 
 /// Identity of the UI-visible parts of a [`PlayerSnapshot`]; see [`snapshot_key`].
@@ -2997,5 +3055,52 @@ mod can_chain_tests {
             StreamFormat::Opus
         ));
         assert!(can_chain(&a, &t(None, None), StreamFormat::Flac));
+    }
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    use super::*;
+
+    fn seeks(cmds: &[EngineCommand]) -> Vec<Option<u64>> {
+        cmds.iter()
+            .map(|c| match c {
+                EngineCommand::Seek(ms) => Some(*ms),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_burst_of_seeks_keeps_only_the_last() {
+        let out = coalesce_seeks(vec![
+            EngineCommand::Seek(1000),
+            EngineCommand::Seek(2000),
+            EngineCommand::Seek(3000),
+        ]);
+        assert_eq!(seeks(&out), vec![Some(3000)]);
+    }
+
+    #[test]
+    fn seeks_separated_by_another_command_are_both_kept_in_order() {
+        let out = coalesce_seeks(vec![
+            EngineCommand::Seek(1000),
+            EngineCommand::Pause,
+            EngineCommand::Seek(2000),
+            EngineCommand::Seek(2500),
+        ]);
+        assert_eq!(seeks(&out), vec![Some(1000), None, Some(2500)]);
+        assert!(matches!(out[1], EngineCommand::Pause));
+    }
+
+    #[test]
+    fn other_commands_pass_through_untouched() {
+        let out = coalesce_seeks(vec![
+            EngineCommand::Pause,
+            EngineCommand::Resume,
+            EngineCommand::Shutdown,
+        ]);
+        assert_eq!(out.len(), 3);
+        assert!(coalesce_seeks(Vec::new()).is_empty());
     }
 }

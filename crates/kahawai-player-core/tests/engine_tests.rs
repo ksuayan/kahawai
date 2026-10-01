@@ -162,6 +162,8 @@ struct StubTransport {
     /// `X-Transcode-Chain` value the stub reports (default "wav->passthrough").
     chain_label: Mutex<Option<String>>,
     opened: Mutex<Vec<(i64, StreamOptions)>>,
+    /// How many of the next `open_stream` calls fail (a server hiccup).
+    fail_opens: Mutex<u32>,
 }
 
 impl StubTransport {
@@ -172,7 +174,13 @@ impl StubTransport {
             chain_mode: chain_mode.map(|s| s.to_string()),
             chain_label: Mutex::new(None),
             opened: Mutex::new(Vec::new()),
+            fail_opens: Mutex::new(0),
         }
+    }
+
+    /// Make the next `n` opens fail with a server error.
+    fn fail_next_opens(&self, n: u32) {
+        *self.fail_opens.lock().unwrap() = n;
     }
 
     fn add(&self, id: i64, segments: &[(f32, usize)]) {
@@ -188,6 +196,13 @@ impl StubTransport {
 impl Transport for StubTransport {
     fn open_stream(&self, track_id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
         self.opened.lock().unwrap().push((track_id, opts.clone()));
+        {
+            let mut fails = self.fail_opens.lock().unwrap();
+            if *fails > 0 {
+                *fails -= 1;
+                return Err(MusicError::Http("stub: server error".into()));
+            }
+        }
         // ?next= with a pre-built body (single-session: one container).
         if opts.next.is_some() {
             if let Some(body) = self.next_body.lock().unwrap().get(&track_id).cloned() {
@@ -3172,6 +3187,87 @@ fn matching_rates_still_chain() {
     h.player
         .play_queue(vec![track_with(1, 96_000, 2), track_with(2, 96_000, 2)], 0);
     assert_eq!(requested_next(&h, 1), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// Scrubbing must be robust: a seek that cannot be served never ends the song
+// ---------------------------------------------------------------------------
+
+fn playing_ten_seconds() -> Harness {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 10)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
+    while h.player.snapshot().position_ms < 1000 {
+        h.player.pump();
+    }
+    h
+}
+
+#[test]
+fn a_failed_seek_carries_on_from_where_it_was() {
+    let mut h = playing_ten_seconds();
+    let before = h.player.snapshot().position_ms;
+    h.stub.fail_next_opens(1); // the seek's stream request fails; the recovery works
+    h.player.seek_ms(7000);
+    let s = h.player.snapshot();
+    assert_eq!(s.status, PlayerStatus::Playing, "the song did not stop");
+    assert!(s.error.is_none(), "no error: {:?}", s.error);
+    assert!(
+        s.position_ms.abs_diff(before) < 300,
+        "resumed near {before} ms, not at the failed 7000: {}",
+        s.position_ms
+    );
+    assert!(
+        s.notice
+            .as_deref()
+            .unwrap_or("")
+            .contains("Couldn't seek there"),
+        "says what happened: {:?}",
+        s.notice
+    );
+}
+
+#[test]
+fn if_the_recovery_fails_too_playback_stops_with_the_original_error() {
+    let mut h = playing_ten_seconds();
+    h.stub.fail_next_opens(2); // the server is really down
+    h.player.seek_ms(7000);
+    let s = h.player.snapshot();
+    assert_eq!(s.status, PlayerStatus::Stopped);
+    assert!(s.error.is_some(), "an honest error, not silence");
+}
+
+#[test]
+fn seeking_to_the_end_lands_just_inside_it() {
+    let mut h = playing_ten_seconds();
+    h.player.seek_ms(10_000); // the slider's right-hand end
+    let s = h.player.snapshot();
+    assert_eq!(
+        s.status,
+        PlayerStatus::Playing,
+        "an empty stream was not requested"
+    );
+    assert!(
+        (9000..10_000).contains(&s.position_ms),
+        "just before the end: {}",
+        s.position_ms
+    );
+    h.pump_until_done(5000);
+    assert_eq!(
+        h.player.status(),
+        PlayerStatus::Stopped,
+        "the track still ends normally"
+    );
+}
+
+#[test]
+fn seeking_while_paused_stays_paused_even_when_the_seek_fails() {
+    let mut h = playing_ten_seconds();
+    h.player.pause();
+    h.stub.fail_next_opens(1);
+    h.player.seek_ms(5000);
+    assert_eq!(h.player.status(), PlayerStatus::Paused);
 }
 
 // ---------------------------------------------------------------------------
