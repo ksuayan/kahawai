@@ -117,7 +117,7 @@ pub struct StreamInfo {
 
 /// Opens `/stream/:id` responses. Object-safe so the engine can hold
 /// `Box<dyn Transport>`.
-pub trait Transport: Send {
+pub trait Transport: Send + Sync {
     fn open_stream(&self, track_id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError>;
 
     /// Open the track's untouched file bytes as a *seekable* source, so a

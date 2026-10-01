@@ -772,6 +772,58 @@ fn dop_open_failure_falls_back_to_flac_and_releases_the_sink() {
 }
 
 #[test]
+fn a_slow_dop_open_loads_then_plays_natively() {
+    // The request is slower than the inline wait, so the player is Loading and
+    // the open is collected by later pumps; the controls are not held up.
+    let mut h = DopHarness::with_delay(Some(DOP_RATE), Duration::from_millis(400));
+    h.player.set_global_format(Some(StreamFormat::Dop));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(h.player.status(), PlayerStatus::Loading);
+    let mut spins = 0;
+    while h.player.status() == PlayerStatus::Loading && spins < 200 {
+        h.player.pump();
+        spins += 1;
+    }
+    let snap = h.player.snapshot();
+    assert_eq!(snap.status, PlayerStatus::Playing);
+    assert_eq!(snap.format, Some(StreamFormat::Dop));
+    assert!(snap.error.is_none());
+}
+
+#[test]
+fn a_slow_dop_open_that_cannot_start_falls_back_to_flac_with_the_reason() {
+    let mut h = DopHarness::with_delay(Some(DOP_RATE), Duration::from_millis(300));
+    h.sink.0.lock().unwrap().fail_open = true;
+    h.player.set_global_format(Some(StreamFormat::Dop));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    let mut spins = 0;
+    while spins < 400
+        && (h.player.status() == PlayerStatus::Loading
+            || h.player.snapshot().format != Some(StreamFormat::Flac))
+    {
+        h.player.pump();
+        spins += 1;
+    }
+    let snap = h.player.snapshot();
+    assert_eq!(
+        snap.status,
+        PlayerStatus::Playing,
+        "plays as PCM: {:?}",
+        snap.error
+    );
+    assert_eq!(snap.format, Some(StreamFormat::Flac));
+    assert_eq!(snap.output_path, OutputPath::Pcm);
+    assert!(
+        snap.notice
+            .as_deref()
+            .unwrap_or("")
+            .contains("couldn't be set up for native DSD"),
+        "notice: {:?}",
+        snap.notice
+    );
+}
+
+#[test]
 fn the_fallback_notice_clears_on_the_next_track() {
     let mut h = DopHarness::new(Some(DOP_RATE));
     h.sink.0.lock().unwrap().fail_open = true;
@@ -1205,6 +1257,11 @@ struct DopHarness {
 
 impl DopHarness {
     fn new(dop_rate: Option<u32>) -> Self {
+        Self::with_delay(dop_rate, Duration::ZERO)
+    }
+
+    /// Every stream request takes `delay` (a slow network).
+    fn with_delay(dop_rate: Option<u32>, delay: Duration) -> Self {
         let transport = Arc::new(DopTransport {
             wav: dop_wav_bytes(2000),
             opened: Mutex::new(Vec::new()),
@@ -1221,17 +1278,21 @@ impl DopHarness {
             external: true,
             fail_write: false,
         })));
-        struct Wrap(Arc<DopTransport>);
+        struct Wrap(Arc<DopTransport>, Duration);
         impl Transport for Wrap {
             fn open_stream(
                 &self,
                 track_id: i64,
                 opts: &StreamOptions,
             ) -> Result<StreamInfo, MusicError> {
+                std::thread::sleep(self.1);
                 self.0.open_stream(track_id, opts)
             }
         }
-        let player = Player::new(Box::new(sink.clone()), Box::new(Wrap(transport.clone())));
+        let player = Player::new(
+            Box::new(sink.clone()),
+            Box::new(Wrap(transport.clone(), delay)),
+        );
         Self {
             player,
             transport,
@@ -3655,6 +3716,233 @@ fn a_stream_that_never_comes_back_ends_with_a_clear_error_not_a_hang() {
         s.error
     );
     release.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
+// Opening a stream must never hold up the controls either
+// ---------------------------------------------------------------------------
+
+/// A transport whose stream requests can be slow, hang, or fail slowly.
+struct SlowOpen {
+    stub: Arc<StubTransport>,
+    /// Each open takes this long.
+    delay: Mutex<Duration>,
+    /// While true, opens hang (a dead network at connect or probe time).
+    hang: Arc<AtomicBool>,
+    /// The next opens fail (after the delay) instead of succeeding.
+    fail_next: Mutex<u32>,
+    opens: AtomicUsize,
+    /// Pace the stream like a real network (off for chained responses, which
+    /// are read in full before decoding starts).
+    paced: bool,
+}
+
+struct SlowOpenTransport(Arc<SlowOpen>);
+
+impl Transport for SlowOpenTransport {
+    fn open_stream(&self, id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+        let me = &self.0;
+        me.opens.fetch_add(1, Ordering::SeqCst);
+        while me.hang.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(*me.delay.lock().unwrap());
+        {
+            let mut fails = me.fail_next.lock().unwrap();
+            if *fails > 0 {
+                *fails -= 1;
+                return Err(MusicError::Http("stub: server error".into()));
+            }
+        }
+        // Paced like a real network, so a track does not finish in a flash.
+        let mut info = me.stub.open_stream(id, opts)?;
+        if me.paced {
+            info.reader = Box::new(Throttled(info.reader));
+        }
+        Ok(info)
+    }
+}
+
+fn slow_open_transport() -> Arc<SlowOpen> {
+    let stub = Arc::new(StubTransport::new(None));
+    stub.add(1, &[(440.0, 44100 * 30)]);
+    Arc::new(SlowOpen {
+        stub,
+        delay: Mutex::new(Duration::ZERO),
+        hang: Arc::new(AtomicBool::new(false)),
+        fail_next: Mutex::new(0),
+        opens: AtomicUsize::new(0),
+        paced: true,
+    })
+}
+
+fn controller_over(slow: &Arc<SlowOpen>, suffix: &str) -> EngineController {
+    let dir = std::env::temp_dir().join(format!("kahawai-player-core-{suffix}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(SlowOpenTransport(slow.clone())),
+        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
+        dir.join("settings.json"),
+    )
+}
+
+#[test]
+fn a_dead_network_while_opening_does_not_freeze_the_controls() {
+    let slow = slow_open_transport();
+    slow.hang.store(true, Ordering::SeqCst);
+    let ctl = controller_over(&slow, "open-hang");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    // Before the fix the playback thread sat inside the request, so none of
+    // these were ever processed.
+    ctl.next();
+    ctl.stop();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Stopped);
+    slow.hang.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn a_slow_open_plays_by_itself_once_the_stream_arrives() {
+    let slow = slow_open_transport();
+    *slow.delay.lock().unwrap() = Duration::from_millis(500); // well past the inline wait
+    let ctl = controller_over(&slow, "open-slow");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    wait_for(|| {
+        matches!(
+            ctl.snapshot().status,
+            PlayerStatus::Playing | PlayerStatus::Stopped
+        )
+    });
+    let s = ctl.snapshot();
+    assert!(s.error.is_none(), "no error: {:?}", s.error);
+    assert!(s.track.is_some());
+}
+
+#[test]
+fn a_slow_open_can_be_replaced_by_a_newer_one() {
+    // Scrubbing while a seek is still opening: only the latest open counts.
+    let slow = slow_open_transport();
+    let ctl = controller_over(&slow, "open-replace");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Playing);
+    *slow.delay.lock().unwrap() = Duration::from_millis(400);
+    ctl.seek_ms(1000);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    ctl.seek_ms(2500); // supersedes the open in flight
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Playing);
+    let pos = ctl.snapshot().position_ms;
+    assert!(
+        pos >= 2400,
+        "playing from the latest target, not the first: {pos}"
+    );
+}
+
+#[test]
+fn a_slow_failing_seek_still_carries_on_from_where_it_was() {
+    let slow = slow_open_transport();
+    let ctl = controller_over(&slow, "open-slow-fail");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| {
+        ctl.snapshot().status == PlayerStatus::Playing && ctl.snapshot().position_ms >= 300
+    });
+    *slow.delay.lock().unwrap() = Duration::from_millis(300);
+    *slow.fail_next.lock().unwrap() = 1; // the seek's open fails, slowly; the recovery works
+    ctl.seek_ms(3000);
+    wait_for(|| {
+        let s = ctl.snapshot();
+        s.status == PlayerStatus::Playing
+            && s.notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("Couldn't seek there")
+    });
+    assert!(ctl.snapshot().error.is_none());
+}
+
+#[test]
+fn reordering_the_queue_during_a_slow_open_does_not_leave_a_stale_chain() {
+    // The open asked the server to chain track 2 after track 1; by the time the
+    // stream arrives, track 3 is next. The stale chain is refreshed.
+    let stub = Arc::new(StubTransport::new(Some("chained")));
+    for id in 1..=3 {
+        stub.add(id, &[(440.0 + id as f32 * 110.0, 44100 * 30)]);
+    }
+    let slow = Arc::new(SlowOpen {
+        stub,
+        delay: Mutex::new(Duration::from_millis(400)),
+        hang: Arc::new(AtomicBool::new(false)),
+        fail_next: Mutex::new(0),
+        opens: AtomicUsize::new(0),
+        paced: false,
+    });
+    let ctl = controller_over(&slow, "open-reorder");
+    ctl.play_queue(
+        (1..=3)
+            .map(|id| track(id, AudioFormat::Wav, 30_000))
+            .collect(),
+        0,
+    );
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    ctl.move_queue_item(2, 1); // [1, 3, 2]: what follows track 1 changed
+    let chained_next = |want: i64| {
+        slow.stub
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, o)| *id == 1 && o.next == Some(want))
+    };
+    wait_for(|| chained_next(3));
+    assert!(chained_next(2), "the first open chained the old next track");
+}
+
+#[test]
+fn a_paused_player_stays_paused_through_a_slow_seek() {
+    let slow = slow_open_transport();
+    let ctl = controller_over(&slow, "open-slow-paused");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Playing);
+    ctl.pause();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Paused);
+    *slow.delay.lock().unwrap() = Duration::from_millis(400);
+    ctl.seek_ms(2000);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Paused);
+}
+
+#[test]
+fn an_open_that_never_completes_ends_with_a_clear_error() {
+    let slow = slow_open_transport();
+    slow.hang.store(true, Ordering::SeqCst);
+    let sink = SharedSink(Arc::new(Mutex::new(VecSink::new())));
+    let mut player = Player::new(Box::new(sink), Box::new(SlowOpenTransport(slow.clone())));
+    player.set_stall_timeout(Duration::from_millis(300));
+    player.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    let mut spins = 0;
+    while player.status() != PlayerStatus::Stopped && spins < 400 {
+        player.pump();
+        spins += 1;
+    }
+    let s = player.snapshot();
+    assert_eq!(s.status, PlayerStatus::Stopped);
+    assert_eq!(s.error.as_deref(), Some("Couldn't reach the server."));
+    slow.hang.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn the_loudness_pre_scan_does_not_hold_up_the_controls() {
+    // The pre-scan reads a whole track before playback starts; with a slow
+    // network that used to be seconds on the playback thread.
+    let slow = slow_open_transport();
+    *slow.delay.lock().unwrap() = Duration::from_millis(600);
+    let ctl = controller_over(&slow, "open-prescan");
+    ctl.set_loudness_enabled(true);
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    ctl.stop();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Stopped);
 }
 
 // ---------------------------------------------------------------------------
