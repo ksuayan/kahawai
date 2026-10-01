@@ -224,7 +224,8 @@ pub(crate) fn album_from_row(r: &sqlx::sqlite::SqliteRow, track_count: u64) -> A
 
 /// Present-track count of the album row `albums` / `a`, as `track_count`.
 const TRACK_COUNT: &str =
-    "(SELECT COUNT(*) FROM tracks t WHERE t.album_id = albums.id AND t.missing = 0) AS track_count";
+    "(SELECT COUNT(*) FROM tracks t WHERE t.album_id = albums.id AND t.missing = 0
+       AND t.duplicate_of IS NULL) AS track_count";
 
 pub(crate) const ALBUM_COLS: &str =
     "id, title, artist, year, artwork_hash, sort_title, sort_artist, mbid, artwork_source";
@@ -364,7 +365,8 @@ pub async fn get_artist(
     let album_rows = sqlx::query(
         "SELECT a.id, a.title, a.artist, a.year, a.artwork_hash, a.sort_title, a.sort_artist,
            a.mbid, a.artwork_source,
-           (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.missing = 0) AS track_count
+           (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.missing = 0
+             AND t.duplicate_of IS NULL) AS track_count
          FROM albums a JOIN album_artists aa ON aa.album_id = a.id
          WHERE aa.artist_id = ? ORDER BY COALESCE(a.sort_title, a.title)",
     )
@@ -409,9 +411,10 @@ pub async fn search(
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         let id: i64 = r.get(0);
-        // Missing tracks stay out of search results; get_track still serves them.
+        // Missing tracks and duplicate copies stay out of search results;
+        // get_track still serves them.
         if let Some(t) = db::get_track(&s.pool, id).await? {
-            if !t.missing {
+            if !t.missing && !db::is_duplicate(&s.pool, id).await? {
                 out.push(t);
             }
         }
@@ -663,12 +666,14 @@ pub async fn set_playlist_tracks(
     // Spec §3.8: expand album_ids in album track order, appended after track_ids.
     let mut track_ids = body.track_ids.clone();
     for album_id in &body.album_ids {
-        let rows =
-            sqlx::query("SELECT id FROM tracks WHERE album_id = ? ORDER BY disc_no, track_no, id")
-                .bind(album_id)
-                .fetch_all(&s.pool)
-                .await
-                .map_err(db::cvt)?;
+        let rows = sqlx::query(
+            "SELECT id FROM tracks WHERE album_id = ? AND duplicate_of IS NULL
+                 ORDER BY disc_no, track_no, id",
+        )
+        .bind(album_id)
+        .fetch_all(&s.pool)
+        .await
+        .map_err(db::cvt)?;
         track_ids.extend(rows.iter().map(|r| r.get::<i64, _>("id")));
     }
 
@@ -1579,6 +1584,25 @@ pub(crate) fn spawn_hash_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                 } else {
                     format!("hashed {} files", r.hashed)
                 };
+                // New hashes can reveal copies of the same file; genre
+                // links leave the copies out.
+                if r.hashed > 0 {
+                    let refreshed = async {
+                        let changed = db::refresh_duplicates(&s.pool).await?;
+                        if changed > 0 {
+                            crate::genre::refresh_genres(&s.pool).await?;
+                        }
+                        Ok::<_, MusicError>(changed)
+                    };
+                    match refreshed.await {
+                        // Connected players fetch the change.
+                        Ok(n) if n > 0 => {
+                            let _ = s.catalog_events.send(crate::ServerEvent::CatalogUpdated);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "could not refresh duplicate tracks"),
+                    }
+                }
                 jobs.finish(&job_id, true, Some(message)).await;
             }
             Err(e) => {

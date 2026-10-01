@@ -527,8 +527,15 @@ async fn spawn_and_check(
     let last_error = state.last_error.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::run_server_with_ready(config, Some(ready_tx)).await {
-            *last_error.lock().unwrap() = Some(e.to_string());
+        match crate::run_server_with_ready(config, Some(ready_tx)).await {
+            Err(e) => *last_error.lock().unwrap() = Some(e.to_string()),
+            // Stopped by the operating system (kill, Ctrl+C): the server
+            // has drained gracefully; now the app goes too.
+            Ok(()) if crate::SHUTDOWN_BY_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) => {
+                tracing::info!("terminated: exiting the app");
+                std::process::exit(0);
+            }
+            Ok(()) => {}
         }
     });
     // Capture the live AppState as soon as it exists (before bind/serve),
@@ -857,4 +864,42 @@ pub fn setup_app_ready(app: tauri::AppHandle) {
 #[tauri::command]
 pub fn setup_reveal_logs() {
     crate::logfile::reveal();
+}
+
+/// How long quitting waits for the server to stop gracefully.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The app is quitting: ask the running server to stop (the same graceful
+/// path as `POST /api/shutdown`: players are told, in-flight requests
+/// finish) and wait for it, at most EXIT_WAIT.
+pub fn stop_server_for_exit(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<DesktopState>() else {
+        return;
+    };
+    let running = state
+        .server_task
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|h| !h.inner().is_finished());
+    if !running {
+        return;
+    }
+    tracing::info!("quitting: stopping the server");
+    crate::SHUTDOWN.notify_waiters();
+    let until = std::time::Instant::now() + EXIT_WAIT;
+    while std::time::Instant::now() < until {
+        let done = state
+            .server_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|h| h.inner().is_finished());
+        if done {
+            tracing::info!("server stopped");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    tracing::warn!("server didn't stop within {EXIT_WAIT:?}; quitting anyway");
 }
