@@ -71,6 +71,15 @@ describe("jobs store: polling", () => {
     );
   });
 
+  it("adds the read speed to a hashing job's detail", async () => {
+    jobsFeed([job({ kind: "hash_files", label: "Content hashing", progress: 0.1, files: { done: 800, total: 8000, per_sec: 2, mb_per_sec: 112.4 } })]);
+    const jobs = useJobsStore();
+    const toasts = useToastsStore();
+    jobs.init();
+    await flushPromises();
+    expect(toasts.toasts[0].detail).toBe(`${(800).toLocaleString()} of about ${(8000).toLocaleString()} files, 112 MB/s`);
+  });
+
   it("reloads the library when a scan finishes, but not for other jobs or a still-running scan", async () => {
     const feed = jobsFeed([job()]);
     const jobs = useJobsStore();

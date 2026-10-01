@@ -1077,7 +1077,7 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                 if now - last_files >= 1000 {
                     last_files = now;
                     jobs2
-                        .set_files(&job_id2, rate.observe(now, done, estimate))
+                        .set_files(&job_id2, rate.observe(now, done, None, estimate))
                         .await;
                 }
                 // The total is only an estimate (last scan's count), so cap
@@ -1566,12 +1566,22 @@ pub(crate) fn spawn_hash_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
         let job_id = job.id.clone();
         jobs.set_status(&job_id, JobStatus::Running).await;
 
-        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64, u64)>();
         let jobs2 = jobs.clone();
         let job_id2 = job_id.clone();
         let fwd = tokio::spawn(async move {
             let mut last_written = -1.0f64;
-            while let Some((done, total)) = prx.recv().await {
+            let mut rate = crate::jobs::RateTracker::default();
+            let mut last_files = i64::MIN;
+            while let Some((done, total, bytes)) = prx.recv().await {
+                // Live counts, about once a second; the total is exact here.
+                let now = crate::jobs::now_ms();
+                if now - last_files >= 1000 {
+                    last_files = now;
+                    jobs2
+                        .set_files(&job_id2, rate.observe(now, done, Some(bytes), Some(total)))
+                        .await;
+                }
                 if total == 0 {
                     continue;
                 }
@@ -1582,8 +1592,8 @@ pub(crate) fn spawn_hash_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                 }
             }
         });
-        let report = crate::hashing::hash_pending(&s.pool, |done, total| {
-            let _ = ptx.send((done, total));
+        let report = crate::hashing::hash_pending(&s.pool, |done, total, bytes| {
+            let _ = ptx.send((done, total, bytes));
         })
         .await;
         drop(ptx);

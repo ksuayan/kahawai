@@ -314,6 +314,10 @@ pub struct FileProgress {
     /// Smoothed files per second.
     #[serde(default)]
     pub per_sec: Option<f32>,
+    /// Smoothed megabytes per second, for jobs that read file contents
+    /// (hashing); `None` for a scan.
+    #[serde(default)]
+    pub mb_per_sec: Option<f32>,
     /// Estimated finish, Unix milliseconds. Only with a total and a rate.
     #[serde(default)]
     pub eta_at: Option<i64>,
@@ -496,6 +500,7 @@ mod tests {
                 done: 10,
                 total: Some(40),
                 per_sec: Some(5.0),
+                mb_per_sec: Some(120.5),
                 eta_at: Some(1_790_000_006_000),
             }),
         };

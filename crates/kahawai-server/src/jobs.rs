@@ -132,8 +132,9 @@ fn stamp(job: &mut Job, to: JobStatus) {
 /// second, so a slow patch on a network share doesn't make the ETA jump.
 #[derive(Default)]
 pub(crate) struct RateTracker {
-    last: Option<(i64, u64)>,
+    last: Option<(i64, u64, u64)>,
     rate: Option<f64>,
+    byte_rate: Option<f64>,
 }
 
 impl RateTracker {
@@ -141,16 +142,35 @@ impl RateTracker {
     const NEW_WEIGHT: f64 = 0.3;
     const WINDOW_MS: i64 = 1000;
 
-    pub(crate) fn observe(&mut self, now: i64, done: u64, total: Option<u64>) -> FileProgress {
+    fn smooth(old: Option<f64>, instant: f64) -> f64 {
+        match old {
+            None => instant,
+            Some(r) => r * (1.0 - Self::NEW_WEIGHT) + instant * Self::NEW_WEIGHT,
+        }
+    }
+
+    /// `bytes` is the content read so far, for jobs that count it.
+    pub(crate) fn observe(
+        &mut self,
+        now: i64,
+        done: u64,
+        bytes: Option<u64>,
+        total: Option<u64>,
+    ) -> FileProgress {
+        let b = bytes.unwrap_or(0);
         match self.last {
-            None => self.last = Some((now, done)),
-            Some((t, d)) if now - t >= Self::WINDOW_MS => {
-                let instant = done.saturating_sub(d) as f64 * 1000.0 / (now - t) as f64;
-                self.rate = Some(match self.rate {
-                    None => instant,
-                    Some(r) => r * (1.0 - Self::NEW_WEIGHT) + instant * Self::NEW_WEIGHT,
-                });
-                self.last = Some((now, done));
+            None => self.last = Some((now, done, b)),
+            Some((t, d, bt)) if now - t >= Self::WINDOW_MS => {
+                let secs = (now - t) as f64 / 1000.0;
+                self.rate = Some(Self::smooth(
+                    self.rate,
+                    done.saturating_sub(d) as f64 / secs,
+                ));
+                if bytes.is_some() {
+                    let mbps = b.saturating_sub(bt) as f64 / 1e6 / secs;
+                    self.byte_rate = Some(Self::smooth(self.byte_rate, mbps));
+                }
+                self.last = Some((now, done, b));
             }
             Some(_) => {}
         }
@@ -165,6 +185,7 @@ impl RateTracker {
             done,
             total,
             per_sec: self.rate.map(|r| r as f32),
+            mb_per_sec: self.byte_rate.map(|r| r as f32),
             eta_at,
         }
     }
@@ -516,25 +537,41 @@ mod tests {
     fn rate_tracker_smooths_and_estimates_the_finish() {
         let mut t = RateTracker::default();
         // The first tick only starts the clock.
-        let p = t.observe(0, 0, Some(1000));
+        let p = t.observe(0, 0, None, Some(1000));
         assert_eq!((p.per_sec, p.eta_at), (None, None));
         // Under a second of data: still no rate.
-        assert_eq!(t.observe(500, 50, Some(1000)).per_sec, None);
+        assert_eq!(t.observe(500, 50, None, Some(1000)).per_sec, None);
         // 100 files in the first full second: 100/s, 900 left → 9 s.
-        let p = t.observe(1000, 100, Some(1000));
+        let p = t.observe(1000, 100, None, Some(1000));
         assert_eq!(p.per_sec, Some(100.0));
         assert_eq!(p.eta_at, Some(1000 + 9000));
         // A slow second (10/s) moves the rate only part of the way: 0.7·100 + 0.3·10.
-        let p = t.observe(2000, 110, Some(1000));
+        let p = t.observe(2000, 110, None, Some(1000));
         assert!((p.per_sec.unwrap() - 73.0).abs() < 0.01);
         assert_eq!(p.done, 110);
     }
 
     #[test]
+    fn rate_tracker_reports_megabytes_per_second_when_given_bytes() {
+        let mut t = RateTracker::default();
+        t.observe(0, 0, Some(0), Some(100));
+        // 10 files, 200 MB in one second.
+        let p = t.observe(1000, 10, Some(200_000_000), Some(100));
+        assert_eq!(p.mb_per_sec, Some(200.0));
+        // A slower second (50 MB) is smoothed: 0.7·200 + 0.3·50.
+        let p = t.observe(2000, 12, Some(250_000_000), Some(100));
+        assert!((p.mb_per_sec.unwrap() - 155.0).abs() < 0.01);
+        // A scan passes no bytes and so gets no MB/s.
+        let mut scan = RateTracker::default();
+        scan.observe(0, 0, None, None);
+        assert_eq!(scan.observe(1000, 9, None, None).mb_per_sec, None);
+    }
+
+    #[test]
     fn rate_tracker_has_no_eta_on_a_first_scan_or_past_the_estimate() {
         let mut t = RateTracker::default();
-        t.observe(0, 0, None);
-        let p = t.observe(1000, 50, None);
+        t.observe(0, 0, None, None);
+        let p = t.observe(1000, 50, None, None);
         assert_eq!(p.per_sec, Some(50.0), "the rate is still known");
         assert_eq!(
             (p.total, p.eta_at),
@@ -542,7 +579,7 @@ mod tests {
             "but there is nothing to finish against"
         );
         // More files than the last scan had: remaining clamps to 0, ETA is now.
-        let p = t.observe(2000, 150, Some(100));
+        let p = t.observe(2000, 150, None, Some(100));
         assert_eq!(p.eta_at, Some(2000));
     }
 
@@ -553,6 +590,7 @@ mod tests {
         let p = FileProgress {
             done: 3,
             total: None,
+            mb_per_sec: None,
             per_sec: None,
             eta_at: None,
         };

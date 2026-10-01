@@ -236,3 +236,34 @@ describe("StatusTab: scan file counts", () => {
     );
   });
 });
+
+describe("StatusTab: hashing", () => {
+  it("shows files remaining, MB/s and an ETA while the hashing job runs", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    const eta = Date.now() + 3 * 3600_000;
+    setup.hashJob = {
+      id: "job-2",
+      kind: "hash_files",
+      label: "Content hashing",
+      progress: 0.1,
+      status: "running",
+      files: { done: 800, total: 8000, per_sec: 1.5, mb_per_sec: 112.4, eta_at: eta },
+    } as never;
+    await settle();
+    expect(wrapper.get('[data-testid="hashing"]').text()).toContain("Hashing files…");
+    expect(wrapper.get('[data-testid="hash-remaining"]').text()).toBe((7200).toLocaleString());
+    expect(wrapper.get('[data-testid="hash-mbps"]').text()).toBe("112 MB/s");
+    expect(wrapper.get('[data-testid="hash-eta"]').text()).toBe(
+      new Date(eta).toLocaleTimeString(undefined, { timeStyle: "short" }),
+    );
+  });
+
+  it("is absent when no hashing job is active", async () => {
+    const { wrapper } = boot();
+    useSetupStore().serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    await settle();
+    expect(wrapper.find('[data-testid="hashing"]').exists()).toBe(false);
+  });
+});

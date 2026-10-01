@@ -90,6 +90,11 @@ export async function setupRecentScans(): Promise<ScanJob[]> {
   return (await cmd<ScanJob[]>("setup_recent_scans")) ?? [];
 }
 
+/** The content-hashing job while it is queued or running, else null. */
+export async function setupActiveHashJob(): Promise<ScanJob | null> {
+  return (await cmd<ScanJob | null>("setup_active_hash_job")) ?? null;
+}
+
 /** Live catalog counts, for the Status tab's tally while a scan runs. */
 export async function setupLiveScanStats(): Promise<LiveScanStats> {
   return (

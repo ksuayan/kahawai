@@ -123,7 +123,7 @@ export type JobStatus = "queued" | "running" | "done" | "failed" | "paused" | "c
 
 export interface ScanJob {
   id: string;
-  kind: "scan";
+  kind: "scan" | "hash_files";
   label: string;
   progress: number;
   status: JobStatus;
@@ -142,6 +142,8 @@ export interface FileProgress {
   /** The previous scan's count; absent on a first scan. */
   total?: number | null;
   per_sec?: number | null;
+  /** Megabytes per second, for hashing. */
+  mb_per_sec?: number | null;
   /** Estimated finish, Unix ms. */
   eta_at?: number | null;
 }
@@ -152,6 +154,7 @@ export function scanFiles(f: FileProgress, now: number): {
   processed: string;
   remaining: string | null;
   rate: string | null;
+  mbps: string | null;
   eta: string | null;
 } {
   const n = (v: number): string => Math.round(v).toLocaleString();
@@ -160,6 +163,7 @@ export function scanFiles(f: FileProgress, now: number): {
     processed: n(f.done),
     remaining: f.total != null ? n(Math.max(0, f.total - f.done)) : null,
     rate: f.per_sec != null ? `${f.per_sec >= 10 ? Math.round(f.per_sec) : f.per_sec.toFixed(1)} files/s` : null,
+    mbps: f.mb_per_sec != null ? `${f.mb_per_sec >= 10 ? Math.round(f.mb_per_sec) : f.mb_per_sec.toFixed(1)} MB/s` : null,
     eta:
       eta === null
         ? null
