@@ -103,8 +103,14 @@ pub struct EqBand {
     pub q: f32,
 }
 
-/// Maximum simultaneous bands (v1 design decision).
-pub const MAX_EQ_BANDS: usize = 8;
+/// Maximum simultaneous bands. Headphone-correction profiles (AutoEq) are
+/// usually ten filters, so this leaves room for those plus a couple of the
+/// user's own.
+pub const MAX_EQ_BANDS: usize = 12;
+
+/// Range of the EQ preamp, in dB. Correction profiles only ever cut (to leave
+/// headroom for their boosts); the top end allows a deliberate makeup gain.
+pub const EQ_PREAMP_RANGE_DB: (f32, f32) = (-24.0, 12.0);
 
 fn validate_band(b: &EqBand) -> Result<(), MusicError> {
     if !(10.0..=24_000.0).contains(&b.freq) || !b.freq.is_finite() {
@@ -1225,6 +1231,14 @@ impl GainRamp {
         }
     }
 
+    /// Jump to `db` at once (the start of a stream: nothing to smooth).
+    pub fn snap(&mut self, db: f32) {
+        let g = 10f32.powf(db / 20.0);
+        self.current = g;
+        self.target = g;
+        self.step = 0.0;
+    }
+
     pub fn retarget(&mut self, target_db: f32) {
         let target = 10f32.powf(target_db / 20.0);
         self.step = (target - self.current) / self.ramp_frames as f32;
@@ -1647,7 +1661,7 @@ mod tests {
                 freq: 1000.0,
                 gain_db: 0.0,
                 q: 1.0,
-            }; 9]
+            }; MAX_EQ_BANDS + 1]
         )
         .is_err());
         assert!(validate_bands(&[EqBand {

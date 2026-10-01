@@ -8,6 +8,7 @@ import {
   setOutputDevice,
   setEqBands,
   setEqEnabled,
+  setEqPreamp,
   setCrossfeed,
   setLimiterEnabled,
   setLoudnessEnabled,
@@ -18,6 +19,7 @@ import {
   clampCrossfeed,
   DEFAULT_CROSSFEED_SETTINGS,
   DEFAULT_DSP_SETTINGS,
+  EQ_PREAMP_RANGE_DB,
   type CrossfeedSettings,
   MAX_EQ_BANDS,
   type DopStatus,
@@ -33,8 +35,14 @@ const PRESETS_KEY = "kahawai-player.eq-user-presets";
 function loadUserPresets(): EqPreset[] {
   try {
     const raw = uiGet(PRESETS_KEY);
-    const list = raw ? (JSON.parse(raw) as { name: string; bands: EqBand[] }[]) : [];
-    return list.map((p) => ({ id: `user:${p.name}`, name: p.name, bands: p.bands, builtin: false }));
+    const list = raw ? (JSON.parse(raw) as { name: string; bands: EqBand[]; preamp_db?: number }[]) : [];
+    return list.map((p) => ({
+      id: `user:${p.name}`,
+      name: p.name,
+      bands: p.bands,
+      preamp_db: p.preamp_db ?? 0,
+      builtin: false,
+    }));
   } catch {
     return [];
   }
@@ -60,6 +68,8 @@ export function validateRow(r: EqBandRow): string | null {
 export const useDspStore = defineStore("dsp", () => {
   const rows = ref<EqBandRow[]>([]);
   const eqEnabled = ref(true);
+  /** Gain applied with the EQ (headroom for boosts / AutoEq preamp), dB. */
+  const eqPreamp = ref(0);
   const loudnessEnabled = ref(false);
   /** Clip protection on the shared path; off by default, like loudness. */
   const limiterEnabled = ref(false);
@@ -80,7 +90,10 @@ export const useDspStore = defineStore("dsp", () => {
   const presets = computed<EqPreset[]>(() => [...BUILTIN_PRESETS, ...userPresets.value]);
   /** The preset the enabled rows currently equal; null = a custom tuning. */
   const activePreset = computed<EqPreset | null>(
-    () => presets.value.find((p) => sameBands(p.bands, activeBands.value)) ?? null,
+    () =>
+      presets.value.find(
+        (p) => sameBands(p.bands, activeBands.value) && Math.abs((p.preamp_db ?? 0) - eqPreamp.value) < 0.05,
+      ) ?? null,
   );
   const canAddBand = computed(() => rows.value.length < MAX_EQ_BANDS);
 
@@ -107,6 +120,7 @@ export const useDspStore = defineStore("dsp", () => {
     ]);
     const dsp = s ?? DEFAULT_DSP_SETTINGS;
     eqEnabled.value = dsp.eq_enabled;
+    eqPreamp.value = dsp.eq_preamp_db ?? 0;
     loudnessEnabled.value = dsp.loudness_enabled;
     limiterEnabled.value = dsp.limiter_enabled ?? false;
     crossfeed.value = clampCrossfeed(dsp.crossfeed ?? DEFAULT_CROSSFEED_SETTINGS);
@@ -158,7 +172,9 @@ export const useDspStore = defineStore("dsp", () => {
     try {
       uiSet(
         PRESETS_KEY,
-        JSON.stringify(userPresets.value.map((p) => ({ name: p.name, bands: p.bands }))),
+        JSON.stringify(
+          userPresets.value.map((p) => ({ name: p.name, bands: p.bands, preamp_db: p.preamp_db ?? 0 })),
+        ),
       );
     } catch {
       /* storage unavailable — presets stay session-local */
@@ -172,6 +188,7 @@ export const useDspStore = defineStore("dsp", () => {
     rows.value = p.bands.map((b) => ({ ...b, enabled: true }));
     rowError.value = null;
     await pushBands();
+    await saveEqPreamp(p.preamp_db ?? 0);
     if (p.bands.length > 0 && !eqEnabled.value) await saveEqEnabled(true);
   }
 
@@ -183,6 +200,7 @@ export const useDspStore = defineStore("dsp", () => {
       id: `user:${clean}`,
       name: clean,
       bands: activeBands.value.map((b) => ({ ...b })),
+      preamp_db: eqPreamp.value,
       builtin: false,
     };
     userPresets.value = [...userPresets.value.filter((p) => p.id !== preset.id), preset];
@@ -195,15 +213,16 @@ export const useDspStore = defineStore("dsp", () => {
   }
 
   /** Capture the EQ state so an editor session can be cancelled. */
-  function snapshotEq(): { rows: EqBandRow[]; enabled: boolean } {
-    return { rows: rows.value.map((r) => ({ ...r })), enabled: eqEnabled.value };
+  function snapshotEq(): { rows: EqBandRow[]; enabled: boolean; preamp: number } {
+    return { rows: rows.value.map((r) => ({ ...r })), enabled: eqEnabled.value, preamp: eqPreamp.value };
   }
 
   /** Put back a state taken with `snapshotEq` (edits apply live, so Cancel = undo them). */
-  async function restoreEq(snap: { rows: EqBandRow[]; enabled: boolean }): Promise<void> {
+  async function restoreEq(snap: { rows: EqBandRow[]; enabled: boolean; preamp?: number }): Promise<void> {
     rows.value = snap.rows.map((r) => ({ ...r }));
     rowError.value = null;
     await pushBands();
+    await saveEqPreamp(snap.preamp ?? 0);
     if (eqEnabled.value !== snap.enabled) await saveEqEnabled(snap.enabled);
   }
 
@@ -248,6 +267,25 @@ export const useDspStore = defineStore("dsp", () => {
     await setEqEnabled(v);
   }
 
+  /** Set the EQ preamp (clamped to the engine's range). */
+  async function saveEqPreamp(db: number): Promise<void> {
+    const [lo, hi] = EQ_PREAMP_RANGE_DB;
+    eqPreamp.value = isFinite(db) ? Math.min(hi, Math.max(lo, db)) : 0;
+    await setEqPreamp(eqPreamp.value);
+  }
+
+  /**
+   * Replace the whole EQ with an imported profile (bands + preamp) and switch
+   * the EQ on. Bands beyond the cap are ignored; the caller has already warned.
+   */
+  async function importProfile(profile: { bands: EqBand[]; preamp_db: number }): Promise<void> {
+    rows.value = profile.bands.slice(0, MAX_EQ_BANDS).map((b) => ({ ...b, enabled: true }));
+    rowError.value = null;
+    await pushBands();
+    await saveEqPreamp(profile.preamp_db);
+    if (!eqEnabled.value) await saveEqEnabled(true);
+  }
+
   async function saveLoudnessEnabled(v: boolean): Promise<void> {
     loudnessEnabled.value = v;
     await setLoudnessEnabled(v);
@@ -274,6 +312,7 @@ export const useDspStore = defineStore("dsp", () => {
   return {
     rows,
     eqEnabled,
+    eqPreamp,
     loudnessEnabled,
     limiterEnabled,
     crossfeed,
@@ -302,6 +341,8 @@ export const useDspStore = defineStore("dsp", () => {
     toggleRow,
     updateRow,
     saveEqEnabled,
+    saveEqPreamp,
+    importProfile,
     saveLoudnessEnabled,
     saveLimiterEnabled,
     saveCrossfeed,

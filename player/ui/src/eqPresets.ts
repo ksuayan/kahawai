@@ -5,6 +5,8 @@ export interface EqPreset {
   id: string;
   name: string;
   bands: EqBand[];
+  /** Gain applied with the EQ, dB (headroom for its boosts). Absent = 0. */
+  preamp_db?: number;
   builtin: boolean;
 }
 

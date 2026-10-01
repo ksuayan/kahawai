@@ -90,7 +90,7 @@ describe("EQ rows", () => {
     expect(validateRow({ ...ok, q: NaN })).toMatch(/Q/);
   });
 
-  it("pushes only enabled bands to the core and caps at 8", async () => {
+  it("pushes only enabled bands to the core and caps at 12", async () => {
     bootTauri();
     const dsp = useDspStore();
     await dsp.init();
@@ -101,7 +101,36 @@ describe("EQ rows", () => {
     const last = tauri.callsTo("set_eq_bands").at(-1) as { bands: unknown[] };
     expect(last.bands).toHaveLength(1);
     for (let i = 0; i < 20; i++) dsp.addBand();
-    expect(dsp.rows.length).toBe(8);
+    expect(dsp.rows.length).toBe(12);
     expect(dsp.canAddBand).toBe(false);
+  });
+});
+
+describe("EQ preamp and profile import", () => {
+  it("applies a preset's preamp and pushes it to the engine", async () => {
+    bootTauri();
+    const dsp = useDspStore();
+    await dsp.init();
+    await dsp.importProfile({ bands: [{ band_type: "peaking", freq: 1000, gain_db: 4, q: 1 }], preamp_db: -4.5 });
+    expect(dsp.eqPreamp).toBe(-4.5);
+    expect(tauri.callsTo("set_eq_preamp").at(-1)).toEqual({ db: -4.5 });
+    dsp.saveUserPreset("Mine");
+    expect(dsp.userPresets[0].preamp_db).toBe(-4.5);
+    await dsp.applyPreset("builtin:flat");
+    expect(dsp.eqPreamp).toBe(0);
+    await dsp.applyPreset("user:Mine");
+    expect(dsp.eqPreamp).toBe(-4.5);
+    expect(dsp.activePreset?.id).toBe("user:Mine");
+  });
+
+  it("clamps the preamp and restores it from a snapshot", async () => {
+    bootTauri();
+    const dsp = useDspStore();
+    await dsp.init();
+    const snap = dsp.snapshotEq();
+    await dsp.saveEqPreamp(-99);
+    expect(dsp.eqPreamp).toBe(-24);
+    await dsp.restoreEq(snap);
+    expect(dsp.eqPreamp).toBe(0);
   });
 });

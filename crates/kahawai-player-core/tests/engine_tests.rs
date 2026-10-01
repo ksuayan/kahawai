@@ -3498,6 +3498,150 @@ fn without_a_seekable_source_the_seek_falls_back_to_streaming_and_skipping() {
 }
 
 // ---------------------------------------------------------------------------
+// EQ preamp (headroom for the EQ's boosts, as AutoEq profiles use) and 12 bands
+// ---------------------------------------------------------------------------
+
+/// Peak of the last `n` interleaved samples.
+fn tail_peak(samples: &[f32], n: usize) -> f32 {
+    samples[samples.len().saturating_sub(n)..]
+        .iter()
+        .fold(0.0f32, |m, s| m.max(s.abs()))
+}
+
+#[test]
+fn the_eq_preamp_lowers_the_level_while_the_eq_is_on_and_not_when_it_is_off() {
+    let play = |preamp: f32, eq_on: bool| {
+        let mut h = Harness::new(None);
+        h.player.set_eq_preamp(preamp);
+        h.player.set_eq_enabled(eq_on);
+        h.stub.add(1, &[(440.0, 44100)]);
+        h.player
+            .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+        h.pump_until_done(100);
+        tail_peak(&h.samples(), 4000)
+    };
+    let plain = play(0.0, true);
+    assert!((plain - 0.7).abs() < 0.02, "untouched at 0 dB: {plain}");
+    let down = play(-6.0, true);
+    assert!(
+        (down / plain - 0.501).abs() < 0.02,
+        "-6 dB is x0.5: {}",
+        down / plain
+    );
+    let off = play(-6.0, false);
+    assert!(
+        (off / plain - 1.0).abs() < 0.01,
+        "a bypassed EQ does not apply its preamp: {}",
+        off / plain
+    );
+}
+
+#[test]
+fn changing_the_preamp_during_playback_does_not_step_the_signal() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 10)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
+    for _ in 0..6 {
+        h.player.pump();
+    }
+    h.player.set_eq_preamp(-12.0); // a big cut, mid-waveform
+    for _ in 0..12 {
+        h.player.pump();
+    }
+    let left: Vec<f32> = h.samples().iter().step_by(CHANNELS).copied().collect();
+    let step = left
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0f32, f32::max);
+    let natural = 0.7 * 2.0 * std::f32::consts::PI * 440.0 / RATE as f32;
+    assert!(
+        step <= natural * 1.15,
+        "preamp change stepped the signal: {step} (a clean tone steps {natural})"
+    );
+}
+
+#[test]
+fn the_preamp_is_clamped_and_saved_with_the_dsp_settings() {
+    let mut h = Harness::new(None);
+    h.player.set_eq_preamp(-100.0);
+    assert_eq!(h.player.dsp_settings().eq_preamp_db, -24.0);
+    h.player.set_eq_preamp(100.0);
+    assert_eq!(h.player.dsp_settings().eq_preamp_db, 12.0);
+    h.player.set_eq_preamp(f32::NAN);
+    assert_eq!(h.player.dsp_settings().eq_preamp_db, 0.0);
+    h.player.set_eq_preamp(-6.2);
+    assert_eq!(h.player.dsp_settings().eq_preamp_db, -6.2);
+
+    // The controller persists it, and an old settings file (no preamp) reads as 0.
+    let dir = std::env::temp_dir().join("kahawai-player-core-test-preamp-settings");
+    let _ = std::fs::remove_dir_all(&dir);
+    let settings_path = dir.join("settings.json");
+    let ctl = EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(StubTransport::new(None)),
+        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
+        settings_path.clone(),
+    );
+    ctl.set_eq_preamp(-4.5);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert_eq!(v["dsp"]["eq_preamp_db"], -4.5);
+    let old =
+        r#"{"eq_bands":[],"eq_enabled":true,"loudness_enabled":false,"loudness_target":-14.0}"#;
+    let dsp: kahawai_player_core::DspSettings =
+        serde_json::from_str(old).expect("old dsp block parses");
+    assert_eq!(dsp.eq_preamp_db, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_preamp_alone_holds_best_quality_back_like_any_other_eq() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.player.set_eq_preamp(-3.0);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    let snap = h.player.snapshot();
+    assert_eq!(
+        snap.output_path,
+        OutputPath::Pcm,
+        "the preamp changes the samples"
+    );
+    assert!(
+        snap.exclusive_blockers.iter().any(|b| b == "EQ"),
+        "{:?}",
+        snap.exclusive_blockers
+    );
+
+    let mut flat = best_harness(kahawai_player_core::QualityMode::Best, true);
+    flat.player.set_eq_preamp(0.0);
+    flat.stub.add(1, &[(440.0, 4410)]);
+    flat.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    assert!(
+        flat.player.snapshot().exclusive_blockers.is_empty(),
+        "0 dB is no processing"
+    );
+}
+
+#[test]
+fn the_eq_takes_twelve_bands_and_rejects_a_thirteenth() {
+    let band = |i: usize| EqBand {
+        band_type: EqBandType::Peaking,
+        freq: 100.0 * (i as f32 + 1.0),
+        gain_db: 1.0,
+        q: 1.0,
+    };
+    let mut h = Harness::new(None);
+    assert!(
+        h.player.set_eq_bands((0..12).map(band).collect()).is_ok(),
+        "an AutoEq profile (10) plus two of your own"
+    );
+    assert!(h.player.set_eq_bands((0..13).map(band).collect()).is_err());
+}
+
+// ---------------------------------------------------------------------------
 // Turning off the last thing that holds Best quality back engages it now
 // ---------------------------------------------------------------------------
 

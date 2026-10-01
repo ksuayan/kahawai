@@ -35,7 +35,7 @@ use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
 use crate::dsp::{
     headroom_guard, scan_track_levels, DspStage, EqBand, GainRamp, LookaheadLimiter, LoudnessMeter,
-    LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
+    LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET, EQ_PREAMP_RANGE_DB,
 };
 use crate::quality::{
     QualityMode, BLOCKER_ANALOG, BLOCKER_CROSSFEED, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS,
@@ -265,6 +265,11 @@ impl Default for PlayerSnapshot {
 pub struct DspSettings {
     pub eq_bands: Vec<EqBand>,
     pub eq_enabled: bool,
+    /// Gain applied with the EQ, in dB (headroom for its boosts: AutoEq
+    /// profiles start with a negative one). Only in effect while the EQ is on.
+    /// Older settings files have none: it defaults to 0.
+    #[serde(default)]
+    pub eq_preamp_db: f32,
     pub loudness_enabled: bool,
     pub loudness_target: f32,
     /// Analog character stage (tube / transistor warmth). Older settings
@@ -287,6 +292,7 @@ impl Default for DspSettings {
         Self {
             eq_bands: Vec::new(),
             eq_enabled: true,
+            eq_preamp_db: 0.0,
             loudness_enabled: false,
             loudness_target: DEFAULT_LOUDNESS_TARGET,
             analog: AnalogSettings::default(),
@@ -599,6 +605,10 @@ pub struct Player {
     bit_perfect: BitPerfect,
     track_formats: HashMap<i64, StreamFormat>,
     volume: f32,
+    /// The EQ's preamp in dB, and the ramp that applies it (see
+    /// [`Player::set_eq_preamp`]).
+    eq_preamp_db: f32,
+    preamp_ramp: GainRamp,
     active: Option<ActiveStream>,
     error: Option<String>,
     notice: Option<String>,
@@ -663,6 +673,8 @@ impl Player {
             bit_perfect: BitPerfect::default(),
             track_formats: HashMap::new(),
             volume: 1.0,
+            eq_preamp_db: 0.0,
+            preamp_ramp: GainRamp::new(2205),
             active: None,
             error: None,
             notice: None,
@@ -830,7 +842,10 @@ impl Player {
         }
         // An enabled EQ with only flat bands changes nothing, so it does not
         // count.
-        if self.eq.enabled() && self.eq.bands().iter().any(|band| band.gain_db.abs() > 0.05) {
+        if self.eq.enabled()
+            && (self.eq.bands().iter().any(|band| band.gain_db.abs() > 0.05)
+                || self.eq_preamp_db.abs() > 0.05)
+        {
             b.push(BLOCKER_EQ);
         }
         if self.loudness.enabled() {
@@ -1247,6 +1262,38 @@ impl Player {
         self.reconsider_exclusive();
     }
 
+    /// The EQ's preamp, in dB (clamped to [`EQ_PREAMP_RANGE_DB`]). It leaves
+    /// headroom for the EQ's boosts, so it is in effect only while the EQ is
+    /// on, and it moves smoothly like the loudness gain.
+    pub fn set_eq_preamp(&mut self, db: f32) {
+        let (lo, hi) = EQ_PREAMP_RANGE_DB;
+        self.eq_preamp_db = if db.is_finite() {
+            db.clamp(lo, hi)
+        } else {
+            0.0
+        };
+        self.reconsider_exclusive();
+    }
+
+    /// The preamp in dB as it applies right now: 0 unless the EQ is on.
+    fn preamp_db_in_effect(&self) -> f32 {
+        if self.eq.enabled() {
+            self.eq_preamp_db
+        } else {
+            0.0
+        }
+    }
+
+    /// Worst-case boost of the EQ including its preamp, which is what the
+    /// loudness gain has to leave room for (never below 0).
+    fn eq_boost_db(&self) -> f32 {
+        if self.eq.enabled() {
+            (self.eq.max_boost_db() + self.eq_preamp_db).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Analog character stage (PCM shared path only; DoP and bit-perfect
     /// never call it).
     pub fn set_analog(&mut self, settings: AnalogSettings) {
@@ -1317,6 +1364,7 @@ impl Player {
         DspSettings {
             eq_bands: self.eq.bands().to_vec(),
             eq_enabled: self.eq.enabled(),
+            eq_preamp_db: self.eq_preamp_db,
             loudness_enabled: self.loudness.enabled(),
             loudness_target: self.loudness.target(),
             analog: self.analog.settings(),
@@ -1561,7 +1609,7 @@ impl Player {
             let transport = &*self.transport;
             // Plan the gain against the track's peak and the EQ's worst-case
             // boost, so the result cannot clip at the output.
-            let eq_boost = self.eq.max_boost_db();
+            let eq_boost = self.eq_boost_db();
             self.loudness.gain_for_levels(track_id, fmt, eq_boost, || {
                 scan_track_levels(transport, track_id, fmt)
             })
@@ -1737,6 +1785,7 @@ impl Player {
 
         // The EQ runs on what the sink receives (after any resampling), so
         // it is designed at the sink rate, not the file's.
+        self.preamp_ramp.snap(self.preamp_db_in_effect());
         self.eq.set_sample_rate(sink_rate);
         self.crossfeed.prepare(sink_rate);
         self.crossfeed.reset();
@@ -1839,6 +1888,7 @@ impl Player {
             return;
         }
         self.empty_streak = 0;
+        let preamp_db = self.preamp_db_in_effect();
         let active = match self.active.as_mut() {
             Some(ActiveStream::Pcm(a)) => a,
             _ => return,
@@ -1890,6 +1940,10 @@ impl Player {
         let mut chunk: Vec<f32> = out.to_vec();
         self.crossfeed.process(&mut chunk, channels);
         self.eq.process(&mut chunk, channels);
+        // The EQ's preamp (headroom for its boosts), ramped so a change, or
+        // switching the EQ, never steps the signal. Exact no-op at 0 dB.
+        self.preamp_ramp.retarget(preamp_db);
+        self.preamp_ramp.apply(&mut chunk);
         // Meter continuously, dry or wet: A/B level-matching needs a reading
         // on the dry slot too, not just while the stage is processing.
         // "Settled" excludes only the fade transition itself, on either side.
@@ -2267,6 +2321,7 @@ pub enum EngineCommand {
     SetEqBands(Vec<EqBand>),
     /// PCM only.
     SetEqEnabled(bool),
+    SetEqPreamp(f32),
     SetAnalog(AnalogSettings),
     /// Target integrated loudness in LUFS (e.g. -14.0). PCM only.
     SetLoudnessTarget(f32),
@@ -2433,6 +2488,7 @@ impl EngineController {
         let dsp = &settings.dsp;
         ctrl.send(EngineCommand::SetEqBands(dsp.eq_bands.clone()));
         ctrl.send(EngineCommand::SetEqEnabled(dsp.eq_enabled));
+        ctrl.send(EngineCommand::SetEqPreamp(dsp.eq_preamp_db));
         ctrl.send(EngineCommand::SetAnalog(dsp.analog));
         ctrl.send(EngineCommand::SetLoudnessTarget(dsp.loudness_target));
         ctrl.send(EngineCommand::SetLoudnessEnabled(dsp.loudness_enabled));
@@ -2699,6 +2755,18 @@ impl EngineController {
     pub fn set_eq_enabled(&self, enabled: bool) {
         self.update_dsp_settings(|dsp| dsp.eq_enabled = enabled);
         self.send(EngineCommand::SetEqEnabled(enabled));
+    }
+
+    /// The EQ's preamp in dB, clamped to its range. Persisted.
+    pub fn set_eq_preamp(&self, db: f32) {
+        let (lo, hi) = EQ_PREAMP_RANGE_DB;
+        let db = if db.is_finite() {
+            db.clamp(lo, hi)
+        } else {
+            0.0
+        };
+        self.update_dsp_settings(|dsp| dsp.eq_preamp_db = db);
+        self.send(EngineCommand::SetEqPreamp(db));
     }
     /// Analog character (tube / transistor warmth). Values are clamped to
     /// their ranges; the result is saved and applied live.
@@ -3023,6 +3091,7 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
             }
         }
         EngineCommand::SetEqEnabled(b) => player.set_eq_enabled(b),
+        EngineCommand::SetEqPreamp(db) => player.set_eq_preamp(db),
         EngineCommand::SetAnalog(a) => player.set_analog(a),
         EngineCommand::SetLoudnessTarget(t) => player.set_loudness_target(t),
         EngineCommand::SetLoudnessEnabled(b) => player.set_loudness_enabled(b),
@@ -3297,5 +3366,47 @@ mod ahead_tests {
     fn degenerate_sizes_do_not_divide_by_zero() {
         assert_eq!(estimate_ahead_ms(10, Some(0), Some(0), 0, 0), None);
         assert_eq!(estimate_ahead_ms(0, Some(1000), Some(1000), 0, 0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod preamp_tests {
+    use super::*;
+    use crate::dsp::{EqBand, EqBandType};
+    use crate::sink::NullSink;
+
+    fn player() -> Player {
+        Player::new(
+            Box::new(NullSink::default()),
+            Box::new(HttpTransport::new("http://127.0.0.1:9")),
+        )
+    }
+
+    fn boost(db: f32) -> Vec<EqBand> {
+        vec![EqBand {
+            band_type: EqBandType::Peaking,
+            freq: 1000.0,
+            gain_db: db,
+            q: 1.0,
+        }]
+    }
+
+    #[test]
+    fn the_preamp_offsets_the_boost_the_loudness_gain_must_leave_room_for() {
+        let mut p = player();
+        p.set_eq_bands(boost(9.0)).unwrap();
+        let raw = p.eq_boost_db();
+        assert!((raw - 9.0).abs() < 0.3, "a +9 dB peak: {raw}");
+        p.set_eq_preamp(-9.0);
+        assert!(
+            p.eq_boost_db() < 0.3,
+            "a -9 dB preamp cancels it: {}",
+            p.eq_boost_db()
+        );
+        p.set_eq_preamp(-20.0);
+        assert_eq!(p.eq_boost_db(), 0.0, "never below zero");
+        p.set_eq_enabled(false);
+        p.set_eq_preamp(6.0);
+        assert_eq!(p.eq_boost_db(), 0.0, "a bypassed EQ leaves no boost");
     }
 }

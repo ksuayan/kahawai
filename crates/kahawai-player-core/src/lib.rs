@@ -38,7 +38,8 @@ pub use dsp::{
     headroom_guard, integrated_lufs, max_boost_db, plan_gain_db, scan_track_levels,
     scan_track_lufs, usable_freq, validate_bands, DspStage, EqBand, EqBandType, GainRamp,
     LookaheadLimiter, LoudnessMeter, LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET,
-    LIMITER_CEILING, MAX_EQ_BANDS, MAX_LOUDNESS_GAIN_DB, MIN_LOUDNESS_GAIN_DB, NYQUIST_FRACTION,
+    EQ_PREAMP_RANGE_DB, LIMITER_CEILING, MAX_EQ_BANDS, MAX_LOUDNESS_GAIN_DB, MIN_LOUDNESS_GAIN_DB,
+    NYQUIST_FRACTION,
 };
 pub use engine::{
     resolve_format, snapshot_key_differs, valid_formats, AnalogLevel, DsdStory, DspSettings,

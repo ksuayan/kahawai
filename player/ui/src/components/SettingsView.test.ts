@@ -482,11 +482,11 @@ describe("Settings: EQ and loudness", () => {
     expect(w.findAll('[data-testid="eq-node"]')).toHaveLength(1);
   });
 
-  it("disables Add band at the eight-band limit", async () => {
+  it("disables Add band at the twelve-band limit", async () => {
     const w = await mountSettings();
-    for (let i = 0; i < 10; i++) useDspStore().addBand();
+    for (let i = 0; i < 20; i++) useDspStore().addBand();
     await settle();
-    expect(useDspStore().rows.length).toBe(8);
+    expect(useDspStore().rows.length).toBe(12);
     expect(button(w, /Add band/).attributes("disabled")).toBeDefined();
   });
 
