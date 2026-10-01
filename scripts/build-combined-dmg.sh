@@ -55,7 +55,7 @@ rm -f "${COMBINED_DMG}"
 hdiutil create -volname "Kahawai" -srcfolder "${STAGE}" -ov -format UDZO "${COMBINED_DMG}"
 
 echo
-echo "Combined image ready (unsigned, unnotarized): ${COMBINED_DMG}"
+echo "Combined image ready (ad-hoc signed, not notarized): ${COMBINED_DMG}"
 echo "Opens to Kahawai Player.app, Kahawai Server.app, and an Applications shortcut."
 echo "Sign/notarize each .app separately first (see build-client-universal.sh /"
 echo "build-server-app.sh) if this DMG will be distributed outside your own Macs."

@@ -206,3 +206,11 @@ describe("SettingsTab: music folders", () => {
   });
 });
 
+describe("SettingsTab: logs", () => {
+  it("reveals the log folder in Finder", async () => {
+    const { wrapper } = boot();
+    await wrapper.get('[data-testid="reveal-logs"]').trigger("click");
+    expect(tauri.callsTo("setup_reveal_logs")).toHaveLength(1);
+  });
+});
+

@@ -18,6 +18,8 @@ runs quietly in the background.
   shows each scan as it runs, when it ran and how long it took.
 - **Big libraries, fast:** a first scan of a large network drive reads tags first and
   fingerprints files afterwards in the background; rescans pick up only what changed.
+- **No doubles:** the same album in two folders (a folder and its backup copy) shows once;
+  identical copies of its tracks are combined once they're fingerprinted.
 - **Almost any format:** FLAC, ALAC, AAC, MP3, Ogg Vorbis, Opus, WAV, AIFF, and DSD (DSF
   and DFF). MQA files are detected.
 - **Streams what each player needs:** the original file, or converted on the fly; DSD as
@@ -27,6 +29,8 @@ runs quietly in the background.
 - **Album info, if you want it:** looks up missing years and covers at MusicBrainz and the
   Cover Art Archive. Off until you turn it on.
 - **Playlists,** including importing M3U files.
+- **A good neighbour:** quitting the app stops the server cleanly and tells connected
+  players; logs are one click away for bug reports.
 
 ## Kahawai Player
 
@@ -62,7 +66,11 @@ scripts/start-server.sh -d    # start the server in the background (builds it th
 scripts/start-client.sh       # wait for the server, then open the player
 ```
 
-That's it. Day to day:
+That's it. **Installing the beta from the disk image instead?** See
+[docs/Installation.md](docs/Installation.md): installation, troubleshooting and FAQ.
+To play the library in VLC instead, see [docs/VLC.md](docs/VLC.md).
+
+Day to day:
 
 | Script | What it does |
 |---|---|
@@ -71,29 +79,41 @@ That's it. Day to day:
 | `scripts/start-client.sh` | Opens the player once the server answers. `--url http://host:8080` points it at another server; `--dev` runs the development build instead. |
 | `scripts/build-server-universal.sh` | Universal (Intel + Apple Silicon) server binary → `dist/kahawai-server`. |
 | `scripts/build-client-universal.sh` | Universal player → `dist/Kahawai Player.app` and `.dmg`. |
-| `scripts/build-combined-dmg.sh` | Both Mac apps, universal, in one disk image → `dist/Kahawai.dmg` (Kahawai Player, Kahawai Server and an Applications shortcut), for running both on the same Mac. Also leaves each app's own `.app` and `.dmg` in `dist/`. Unsigned; see the script for signing. |
+| `scripts/build-combined-dmg.sh` | Both Mac apps, universal, in one disk image → `dist/Kahawai.dmg` (Kahawai Player, Kahawai Server and an Applications shortcut), for running both on the same Mac. Also leaves each app's own `.app` and `.dmg` in `dist/`. Ad-hoc signed (verified with `codesign`), not notarized: see [docs/Installation.md](docs/Installation.md) for opening it the first time. |
+| `scripts/build-server-app.sh` | The Server desktop app alone, universal → `dist/` (`.app` and `.dmg`). |
+| `scripts/cleanup.sh` | Stops running apps and servers, unmounts leftover DMG volumes and removes build output (`--quick` keeps `target/`, `--dry-run` shows what it would do). Never touches your config or library database. |
 | `scripts/start-dev-combined.sh` | Development: runs the Server app and the Player together in Tauri dev mode (both UIs hot-reload, debug Rust builds); the Player starts once the server answers. Ctrl+C stops both. macOS only. |
 
 A universal build is one command but two compiles (one per architecture, merged into a single binary); the frontend is built once.
 
 ## Status
 
-v1 is code-complete: server (147 tests at last server gate) + macOS client (C1–C3, 207 tests workspace-wide at last gate), clippy-clean, zero warnings. What remains is Mac-gated: first `cargo tauri build`, CoreAudio runtime validation on a real DAC, universal bundle, signing/notarization — checklist in `player/README.md`.
+**Beta.** Both Mac apps build universal and ad-hoc signed into one disk image, and run on a
+fresh account. v1 is complete, and so are the first v2 features: genre normalization,
+MusicBrainz album info (off by default), the player's local catalog cache, list and grid
+views with sorting and virtualized lists, the item menu and Info, persisted view state,
+duplicate-copy collapsing, splash screens, log files and the About pages. Every gate is
+green: workspace tests, clippy with `-D warnings`, `cargo fmt`, and both UIs' Vitest suites
+and type checks (counts under [Tests](#tests)). Not yet done: notarization with a paid Apple
+developer certificate, and authentication/TLS (v2, see `docs/Roadmap.md`). Open items are
+in `docs/Backlog.md`.
 
 ## Documentation map
 
 Docs live under `docs/`, split by audience and by how settled the material is:
 
 - **`docs/v1/`** — design & feature docs for what's actually built and shipped. Read these before touching code.
-- **`docs/v2/`** — upcoming specs; nothing in here has been started yet (see `docs/Backlog.md` for how these map to tracked work).
+- **`docs/v2/`** — v2 feature specs. The three here are built; `docs/Backlog.md` tracks what's left of each.
 - **`docs/users/`** — non-technical, general-audience material (press release, background articles). No code references, nothing here assumes you're a contributor.
 - **`docs/Backlog.md`** / **`docs/Roadmap.md`** — cross-cutting planning docs, not tied to a single version.
+- **`docs/Installation.md`** — for beta testers: installing the disk image, troubleshooting, FAQ.
 
 New here? Read top to bottom. Already know the codebase? Jump to whichever group you need.
 
 **Start here**
 
 - `docs/users/kahawai-press-release.md` — the pitch: what Kahawai is and why it exists, written for someone seeing the project for the first time.
+- `docs/Installation.md` — installing and running the beta, troubleshooting, FAQ.
 
 **Design & architecture** (`docs/v1/`) — the durable "why it's shaped this way" docs, read before touching code
 
@@ -112,11 +132,12 @@ New here? Read top to bottom. Already know the codebase? Jump to whichever group
 - `docs/users/Euphonics-Vacuum-Tube-Primer.md` — background primer on why tube gear sounds the way it does; companion reading for Analog Emulation, written for a general audience.
 - `docs/v1/SACD-Extraction.md` — a scope decision, not a roadmap item: why SACD ISO decoding is permanently out of scope.
 
-**Upcoming work** (`docs/v2/`) — specs for features not yet started; also tracked in `docs/Backlog.md`
+**v2 features** (`docs/v2/`) — built; follow-ups tracked in `docs/Backlog.md`
 
 - `docs/v2/kahawai-genre-normalization-spec.md` — genre normalization + browse/search.
-- `docs/v2/kahawai-metadata-enrichment-spec.md` — metadata remapping & external enrichment (Phase C).
-- `docs/v2/kahawai-player-catalog-cache-spec.md` — local catalog cache so the player doesn't re-pull everything on restart.
+- `docs/v2/kahawai-metadata-enrichment-spec.md` — metadata remapping & external enrichment (Phase C: MusicBrainz and the Cover Art Archive, off by default).
+- `docs/v2/kahawai-player-catalog-cache-spec.md` — the player's local catalog cache: a snapshot, then only what changed (catalog revisions and deltas).
+- `player/DATABASE.md` — the player's schema, its key queries (its own and the server's), the indexes that serve them, and best practices.
 
 **Planning & scope**
 
@@ -130,36 +151,44 @@ Outside `docs/`: `player/README.md` (the desktop client's own setup/build README
 | Crate / dir | What |
 |---|---|
 | `crates/kahawai-core` (`kahawai-core`) | Shared types: API models, `AudioFormat` + transcode ladder, `dsd_story` resolution, TOML config, errors. No I/O deps — compiles anywhere. |
-| `crates/kahawai-server` (`kahawai-server`) | Axum binary: scanner, SQLite catalog, browse API, `/stream/:id`, playlists, persistent jobs, hardening. |
-| `crates/kahawai-player-core` | Platform-independent playback engine: state machine, queue/shuffle/repeat, HTTP transport, symphonia decode, DSP (EQ + loudness), `AudioSink` trait. **Zero Tauri, zero platform imports** — the crate the future iOS/Android shells will reuse. |
+| `crates/kahawai-server` (`kahawai-server`) | Axum server: scanner, SQLite catalog (migrations in `migrations/`), browse and catalog APIs, genres, album info lookup, `/stream/:id`, playlists, persistent jobs, hardening. On macOS the same binary is the Kahawai Server desktop app (Tauri 2, UI in `ui/`), with the server running inside it. |
+| `crates/kahawai-player-core` | Platform-independent playback engine: state machine, queue/shuffle/repeat, HTTP transport, symphonia decode, DSP (EQ, loudness, crossfeed, analog warmth), the local catalog cache (SQLite), `AudioSink` trait. **Zero Tauri, zero platform imports** — the crate the future iOS/Android shells will reuse. |
 | `crates/kahawai-player-api` | Async `reqwest` client covering every server endpoint; reuses `kahawai-core` API types. |
 | `crates/kahawai-player-audio` | Real OS audio sinks: `CpalSink` (shared-mode PCM, all OSes) and `CoreAudioDopSink` (macOS-only exclusive hog-mode DoP). |
 | `player/` | Tauri 2 desktop client: `src-tauri/` (thin shell, excluded from the Cargo workspace — see below) + `ui/` (Vue 3 + Vite + Pinia + strict TypeScript). |
-| `scripts/` | `setup.sh` · `start-server.sh` · `start-client.sh` · `start-dev-combined.sh` · `build-server-universal.sh` · `build-client-universal.sh` · `build-combined-dmg.sh` |
+| `scripts/` | `setup.sh` · `start-server.sh` · `start-client.sh` · `start-dev-combined.sh` · `build-server-universal.sh` · `build-server-app.sh` · `build-client-universal.sh` · `build-combined-dmg.sh` · `cleanup.sh` · `gen-notices.py` (the open-source notices in both apps' About) |
 
 `player/src-tauri` is deliberately **excluded** from the Cargo workspace: it needs system WebKit/GTK dev libraries absent from some build machines. It path-depends on the four workspace crates, so all logic stays shared — only the thin shell builds separately, on the Mac.
 
 ## Development
 
-`cargo test --workspace` for the Rust crates and `npm test` in `player/ui` for the client. The tests use temp dirs and a temp SQLite database: nothing touches your network or your real files.
+`cargo test --workspace` for the Rust crates, and `npm test` in `player/ui` (the Player) and `crates/kahawai-server/ui` (the Server app). The tests use temp dirs and a temp SQLite database: nothing touches your network or your real files.
 
-## API (v1)
+## API
 
 | Method & path | Notes |
 |---|---|
 | `GET /api/health` | `{"status":"ok","version":"…"}` |
-| `GET /api/albums` · `GET /api/albums/:id` | paginated; detail carries ordered `track_ids` |
+| `GET /api/identity` | proof that an address is a Kahawai server, and which one: `service`, name, version, build, `catalog_id`, `started_at`, `source_url` (AGPL source) |
+| `POST /api/shutdown` | stops this server gracefully (`202`); only over loopback, never from a web page (no `Origin`), and only with `x-kahawai-shutdown: yes`. Used by the Server app to stop another copy holding its port |
+| `GET /api/catalog` · `GET /api/catalog/delta?since=&catalog_id=` | the player's cache: a full snapshot with its revision, then only what changed (or `full_resync`) |
+| `GET /api/albums` · `GET /api/albums/:id` | paginated; detail carries the album's tracks in play order |
 | `GET /api/artists` · `GET /api/artists/:id` | |
 | `GET /api/tracks/:id` | |
-| `GET /api/search?q=` | FTS5 over title/album/artist |
+| `GET /api/search?q=` | FTS5 over title/album/artist/genre |
+| `GET /api/genres` · `GET /api/genres/:name/tracks` | canonical genres with track counts; a genre's tracks, paged and sorted |
+| `GET /api/genres/report` | how raw genre tags were mapped (alias, keyword, unmapped, ignored) |
+| `GET /api/enrichment/coverage` | album info lookup: how many albums have IDs, years and covers, and what's pending |
 | `GET /api/artwork/:hash` | ETag/`304` aware; hash must be hex |
 | `GET/POST /api/playlists` | `POST` accepts `track_ids` or `from_queue` + `queue_track_ids` |
 | `PUT /api/playlists/:id/tracks` | `{track_ids, album_ids, mode: append\|replace}`; albums expand in disc/track order |
 | `PATCH /api/playlists/:id` | rename |
 | `DELETE /api/playlists/:id` | |
 | `POST /api/playlists/import` | m3u/m3u8 (path or multipart upload); reports matched + unmatched entries |
-| `GET /api/jobs` · `POST /api/jobs` · `GET /api/jobs/:id` | persistent jobs (scan, ISO extract) |
+| `GET /api/jobs` · `POST /api/jobs` · `GET /api/jobs/:id` | persistent jobs (scan, content hashing, album info lookup, ISO extract), with start and finish times |
+| `POST /api/jobs/:id/pause` · `…/resume` · `…/cancel` | control a running job |
 | `POST /api/scan` | `202` starts a scan job; `409` if one is already running |
+| `GET /api/events` | server-sent events: `catalog-updated` (players fetch the change) and `server-shutting-down` |
 | `GET /stream/:id` · `HEAD /stream/:id` | Range streaming + `?format=` `?seek_ms=` `?next=` (below) |
 
 ### Streaming
@@ -205,15 +234,19 @@ Every dependency below was chosen for a specific problem. The bias throughout: p
 
 ## Tests
 
-`cargo test --workspace` (207 at the last gate; hermetic — temp dirs, temp SQLite, no network):
+At the last gate: **543 Rust tests** (`cargo test --workspace`: 220 server, 164 player
+core, 104 player API client, 27 player audio, 24 core, 4 others), **736 Player UI tests**
+and **69 Server UI tests** (Vitest). All hermetic: temp dirs, temp SQLite, no network.
 
 - `kahawai-core`: extension → `AudioFormat` mapping, streamable set, transcode-ladder decisions, `dsd_story` resolution, TOML config round-trip, API-model JSON round-trips.
-- server: Range parsing (`200`/`206`/`416`/suffix/open-ended), scanner (incremental rescan, missing-flag, artwork dedup, FTS5, artist splitting), DSF/DFF bit-exact decode incl. non-symmetric patterns, FIR decimator properties, sample-exact DSD seek, transcode chains (`X-Transcode-Chain`, Opus granule pre-skip), DoP packing (markers, WAV header, bit-exact seeks), gapless `?next=` (single-session sample counts, chained mode, 404), m3u import (matched/unmatched), playlist album expansion + append/replace, job persistence + restart recovery, traversal/symlink rejection, body-limit and timeout behavior.
-- `kahawai-player-core`: queue model, playback engine through a recording `VecSink` (sample-exact gapless, both seek paths, format resolution, clean DoP rejection), DSP (biquad transparency/boost, loudness math), DoP client parsing incl. headerless seek continuation.
+- server: Range parsing (`200`/`206`/`416`/suffix/open-ended), scanner (incremental rescan, missing-flag, artwork dedup, FTS5, artist splitting, album grouping), duplicate copies collapsing and being promoted again, DSF/DFF bit-exact decode incl. non-symmetric patterns, FIR decimator properties, sample-exact DSD seek, transcode chains (`X-Transcode-Chain`, Opus granule pre-skip), DoP packing (markers, WAV header, bit-exact seeks), gapless `?next=` (single-session sample counts, chained mode, 404), m3u import (matched/unmatched), playlist album expansion + append/replace, job persistence + restart recovery and timing, catalog snapshots and deltas, genre normalization, MusicBrainz matching (against a stub, no network), identity and the shutdown guard, migrations from every earlier schema, query plans that must use their indexes, traversal/symlink rejection, body-limit and timeout behavior.
+- `kahawai-player-core`: queue model, playback engine through a recording `VecSink` (sample-exact gapless, both seek paths, format resolution, clean DoP rejection), DSP (biquad transparency/boost, loudness math, crossfeed, analog warmth), DoP client parsing incl. headerless seek continuation, the catalog cache (snapshot, deltas, resync).
 - `kahawai-player-api` / `kahawai-player-audio`: contract and sink unit tests.
+- Player UI: stores (queue, library, settings, analog, blind test), views and components (lists and grids, sorting, virtualization, menus, Info, settings), persisted view state, offline handling.
+- Server UI: the setup wizard, Status and Settings tabs, the port-conflict panel, About.
 - `--features encode-opus` / `--features encode-mp3` suites also green.
 
-Gates for every phase: `cargo check` zero warnings, full suite green, `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt`.
+Gates for every change: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` clean, the full Rust suite, `cargo check` in `player/src-tauri`, and in both UIs `npm test` and `vue-tsc`.
 
 ## v1 scope notes
 

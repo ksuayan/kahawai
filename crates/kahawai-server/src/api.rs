@@ -17,7 +17,7 @@ use kahawai_core::{
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-use crate::{db, jobs, scanner, stream, transcode, AppState};
+use crate::{db, jobs, scanner, stream, transcode, transcode_cache, AppState};
 
 /// Newtype so internal errors become JSON without leaking details.
 pub struct ApiError(MusicError);
@@ -68,7 +68,10 @@ impl IntoResponse for ApiError {
 /// 404s, not 403s, to avoid leaking which paths exist. There is
 /// deliberately no empty-roots bypass: serving a file with no configured
 /// music root is a misconfiguration, not a default-open server.
-fn ensure_within_roots(path: &std::path::Path, roots: &[PathBuf]) -> Result<PathBuf, MusicError> {
+pub(crate) fn ensure_within_roots(
+    path: &std::path::Path,
+    roots: &[PathBuf],
+) -> Result<PathBuf, MusicError> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|_| MusicError::NotFound("track file missing".into()))?;
     for root in roots {
@@ -224,7 +227,8 @@ pub(crate) fn album_from_row(r: &sqlx::sqlite::SqliteRow, track_count: u64) -> A
 
 /// Present-track count of the album row `albums` / `a`, as `track_count`.
 const TRACK_COUNT: &str =
-    "(SELECT COUNT(*) FROM tracks t WHERE t.album_id = albums.id AND t.missing = 0) AS track_count";
+    "(SELECT COUNT(*) FROM tracks t WHERE t.album_id = albums.id AND t.missing = 0
+       AND t.duplicate_of IS NULL) AS track_count";
 
 pub(crate) const ALBUM_COLS: &str =
     "id, title, artist, year, artwork_hash, sort_title, sort_artist, mbid, artwork_source";
@@ -364,7 +368,8 @@ pub async fn get_artist(
     let album_rows = sqlx::query(
         "SELECT a.id, a.title, a.artist, a.year, a.artwork_hash, a.sort_title, a.sort_artist,
            a.mbid, a.artwork_source,
-           (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.missing = 0) AS track_count
+           (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id AND t.missing = 0
+             AND t.duplicate_of IS NULL) AS track_count
          FROM albums a JOIN album_artists aa ON aa.album_id = a.id
          WHERE aa.artist_id = ? ORDER BY COALESCE(a.sort_title, a.title)",
     )
@@ -409,9 +414,10 @@ pub async fn search(
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         let id: i64 = r.get(0);
-        // Missing tracks stay out of search results; get_track still serves them.
+        // Missing tracks and duplicate copies stay out of search results;
+        // get_track still serves them.
         if let Some(t) = db::get_track(&s.pool, id).await? {
-            if !t.missing {
+            if !t.missing && !db::is_duplicate(&s.pool, id).await? {
                 out.push(t);
             }
         }
@@ -663,12 +669,14 @@ pub async fn set_playlist_tracks(
     // Spec §3.8: expand album_ids in album track order, appended after track_ids.
     let mut track_ids = body.track_ids.clone();
     for album_id in &body.album_ids {
-        let rows =
-            sqlx::query("SELECT id FROM tracks WHERE album_id = ? ORDER BY disc_no, track_no, id")
-                .bind(album_id)
-                .fetch_all(&s.pool)
-                .await
-                .map_err(db::cvt)?;
+        let rows = sqlx::query(
+            "SELECT id FROM tracks WHERE album_id = ? AND duplicate_of IS NULL
+                 ORDER BY disc_no, track_no, id",
+        )
+        .bind(album_id)
+        .fetch_all(&s.pool)
+        .await
+        .map_err(db::cvt)?;
         track_ids.extend(rows.iter().map(|r| r.get::<i64, _>("id")));
     }
 
@@ -1579,6 +1587,25 @@ pub(crate) fn spawn_hash_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                 } else {
                     format!("hashed {} files", r.hashed)
                 };
+                // New hashes can reveal copies of the same file; genre
+                // links leave the copies out.
+                if r.hashed > 0 {
+                    let refreshed = async {
+                        let changed = db::refresh_duplicates(&s.pool).await?;
+                        if changed > 0 {
+                            crate::genre::refresh_genres(&s.pool).await?;
+                        }
+                        Ok::<_, MusicError>(changed)
+                    };
+                    match refreshed.await {
+                        // Connected players fetch the change.
+                        Ok(n) if n > 0 => {
+                            let _ = s.catalog_events.send(crate::ServerEvent::CatalogUpdated);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "could not refresh duplicate tracks"),
+                    }
+                }
                 jobs.finish(&job_id, true, Some(message)).await;
             }
             Err(e) => {
@@ -1654,13 +1681,136 @@ pub async fn stream_track(
         q.seek_ms,
     )?;
 
-    match plan {
+    let disposition = stream_disposition(&track, &path, plan.as_ref().map(|p| p.target));
+    let mut res = match plan {
         // `path` was canonicalized + root-checked above; the passthrough
         // open reuses it rather than re-reading the DB string.
         None => stream_passthrough(&track, fmt, &path, headers, next_track.map(|t| t.id)).await,
         Some(plan) if plan.target == StreamFormat::Dop => stream_dop(&s, plan, next_track).await,
+        // D3: one whole track (no chain, no seek_ms) is rendered once and
+        // served as a file, with Content-Length and byte ranges.
+        Some(plan)
+            if next_track.is_none() && plan.seek_ms.is_none() && s.transcode_cache.enabled() =>
+        {
+            stream_cached(&s, track.id, plan, &headers).await
+        }
         Some(plan) => stream_transcode(&s, plan, next_track).await,
+    }?;
+    res.headers_mut()
+        .insert(header::CONTENT_DISPOSITION, disposition);
+    Ok(res)
+}
+
+/// A whole-track transcode through the transcode cache (D3). A finished
+/// render is served like a passthrough file: Content-Length,
+/// `Accept-Ranges`, `206` for ranges. On a miss the render starts in the
+/// background and this response streams it as it grows — chunked, like a
+/// live transcode, without waiting for the whole track.
+async fn stream_cached(
+    s: &AppState,
+    track_id: i64,
+    plan: transcode::TranscodePlan,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let mime = plan.target.mime_type();
+    match s.transcode_cache.serve(track_id, plan.clone()).await? {
+        transcode_cache::Served::File { path, chain } => {
+            let chain = match chain {
+                Some(c) => c,
+                None => cached_chain(plan).await?,
+            };
+            let file = tokio::fs::File::open(&path)
+                .await
+                .map_err(MusicError::from)?;
+            let mut res = serve_ranged(file, headers, mime).await?;
+            insert_chain(&mut res, &chain);
+            Ok(res)
+        }
+        transcode_cache::Served::Growing { chain, body } => {
+            let mut res = Response::builder()
+                .header(header::CONTENT_TYPE, mime)
+                .body(body)
+                .map_err(|e| ApiError(MusicError::Http(e.to_string())))?;
+            insert_chain(&mut res, &chain);
+            Ok(res)
+        }
     }
+}
+
+/// `X-Transcode-Chain` for a cache hit: read from the source's headers,
+/// without rendering.
+async fn cached_chain(plan: transcode::TranscodePlan) -> Result<String, ApiError> {
+    let (chain, _, _) = tokio::task::spawn_blocking(move || transcode::head_transcode_meta(&plan))
+        .await
+        .map_err(|e| MusicError::Http(format!("transcode meta panicked: {e}")))??;
+    Ok(chain)
+}
+
+/// Serve an open file honoring the request's `Range`: `200` whole, `206`
+/// for a satisfiable single range, `416` with `Content-Range: bytes
+/// */{total}` otherwise.
+async fn serve_ranged(
+    file: tokio::fs::File,
+    headers: &HeaderMap,
+    content_type: &'static str,
+) -> Result<Response, ApiError> {
+    let total = file.metadata().await.map_err(MusicError::from)?.len();
+    let range = match headers.get(header::RANGE) {
+        Some(v) => {
+            let v = v.to_str().map_err(|_| MusicError::BadRange)?;
+            match stream::parse_range(v, total) {
+                Ok(r) => Some(r),
+                Err(_) => {
+                    let mut res = (
+                        StatusCode::RANGE_NOT_SATISFIABLE,
+                        Json(serde_json::json!({ "error": "unsatisfiable byte range" })),
+                    )
+                        .into_response();
+                    res.headers_mut().insert(
+                        header::CONTENT_RANGE,
+                        format!("bytes */{total}").parse().unwrap(),
+                    );
+                    return Ok(res);
+                }
+            }
+        }
+        None => None,
+    };
+    Ok(stream::serve_file(file, total, range, content_type).await?)
+}
+
+/// `Content-Disposition: inline; filename="Artist - Title.ext"` for a
+/// stream, so players that show the URL's filename (VLC) show the track
+/// instead of `/stream/123`. The extension is the rendition's: the source
+/// file's own for passthrough (`target` = `None`), the encoder's for a
+/// transcode, `.wav` for DoP. Falls back to `track-{id}.{ext}` without a
+/// title.
+fn stream_disposition(
+    track: &Track,
+    path: &std::path::Path,
+    target: Option<StreamFormat>,
+) -> header::HeaderValue {
+    let ext = match target {
+        None | Some(StreamFormat::Passthrough) => path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_else(|| track.format.wire_name().to_string()),
+        Some(StreamFormat::Flac) => "flac".into(),
+        Some(StreamFormat::Opus) => "opus".into(),
+        Some(StreamFormat::Mp3) => "mp3".into(),
+        Some(StreamFormat::Dop) => "wav".into(),
+    };
+    let name = match (present(&track.artist), present(&track.title)) {
+        (Some(artist), Some(title)) => format!("{artist} - {title}.{ext}"),
+        (None, Some(title)) => format!("{title}.{ext}"),
+        (_, None) => String::new(),
+    };
+    stream::content_disposition("inline", &name, &format!("track-{}.{ext}", track.id))
+}
+
+/// A tag value with content, trimmed.
+fn present(s: &Option<String>) -> Option<&str> {
+    s.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
 /// Byte-for-byte passthrough with full HTTP Range support (S3, S4).
@@ -1681,32 +1831,6 @@ async fn stream_passthrough(
         }
         Err(e) => return Err(MusicError::Io(e).into()),
     };
-    let total = file.metadata().await.map_err(MusicError::from)?.len();
-
-    let range = match headers.get(header::RANGE) {
-        Some(v) => {
-            let v = v.to_str().map_err(|_| MusicError::BadRange)?;
-            match stream::parse_range(v, total) {
-                Ok(r) => Some(r),
-                Err(_) => {
-                    // 416 with the required Content-Range: bytes */total.
-                    let mut res = (
-                        StatusCode::RANGE_NOT_SATISFIABLE,
-                        Json(serde_json::json!({ "error": "unsatisfiable byte range" })),
-                    )
-                        .into_response();
-                    res.headers_mut().insert(
-                        header::CONTENT_RANGE,
-                        format!("bytes */{total}").parse().unwrap(),
-                    );
-                    insert_chain(&mut res, &transcode::passthrough_chain(fmt));
-                    insert_gapless_next(&mut res, next);
-                    return Ok(res);
-                }
-            }
-        }
-        None => None,
-    };
 
     // Sanity: only serve formats we know are streamable as passthrough.
     // (The DB only contains scanned audio; this guards hand-inserted rows.)
@@ -1715,7 +1839,7 @@ async fn stream_passthrough(
         return Err(MusicError::UnsupportedFormat(format!("{fmt:?}")).into());
     }
 
-    let mut res = stream::serve_file(file, total, range, fmt.mime_type()).await?;
+    let mut res = serve_ranged(file, &headers, fmt.mime_type()).await?;
     insert_chain(&mut res, &transcode::passthrough_chain(fmt));
     insert_gapless_next(&mut res, next);
     Ok(res)
@@ -1935,7 +2059,8 @@ pub async fn stream_head(
         q.seek_ms,
     )?;
 
-    match plan {
+    let disposition = stream_disposition(&track, &path, plan.as_ref().map(|p| p.target));
+    let mut res = match plan {
         None => {
             let total = tokio::fs::metadata(&path)
                 .await
@@ -1954,9 +2079,21 @@ pub async fn stream_head(
                 .body(axum::body::Body::empty())
                 .map_err(|e| ApiError(MusicError::Http(e.to_string())))?;
             insert_chain(&mut res, &transcode::passthrough_chain(fmt));
-            Ok(res)
+            res
         }
         Some(plan) => {
+            // D3: an already-rendered whole track reports what GET will
+            // serve — its real length and byte ranges. HEAD never renders:
+            // before the first GET it describes the live transcode.
+            let cached = if q.next.is_none() && plan.seek_ms.is_none() {
+                s.transcode_cache.lookup(track.id, &plan).await
+            } else {
+                None
+            };
+            let cached_len = match cached {
+                Some(p) => tokio::fs::metadata(&p).await.ok().map(|m| m.len()),
+                None => None,
+            };
             // Mirror GET's metadata minus the body: target MIME, no
             // Accept-Ranges. DoP reports the real Content-Length (known up
             // front, S5b); a live PCM transcode has none (unknown until
@@ -1969,14 +2106,21 @@ pub async fn stream_head(
                         MusicError::Http(format!("head transcode meta panicked: {e}"))
                     })??;
             let mut builder = Response::builder().header(header::CONTENT_TYPE, content_type);
-            if let Some(len) = content_len {
+            if let Some(len) = cached_len {
+                builder = builder
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .header(header::CONTENT_LENGTH, len);
+            } else if let Some(len) = content_len {
                 builder = builder.header(header::CONTENT_LENGTH, len);
             }
             let mut res = builder
                 .body(axum::body::Body::empty())
                 .map_err(|e| ApiError(MusicError::Http(e.to_string())))?;
             insert_chain(&mut res, &chain);
-            Ok(res)
+            res
         }
-    }
+    };
+    res.headers_mut()
+        .insert(header::CONTENT_DISPOSITION, disposition);
+    Ok(res)
 }

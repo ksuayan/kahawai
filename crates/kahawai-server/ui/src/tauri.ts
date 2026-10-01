@@ -153,3 +153,8 @@ export async function onMenuAction(cb: (id: string) => void): Promise<UnlistenFn
     return null;
   }
 }
+
+/** Show the log folder (~/Library/Logs/Kahawai Server) in Finder. */
+export async function setupRevealLogs(): Promise<void> {
+  await cmd("setup_reveal_logs");
+}

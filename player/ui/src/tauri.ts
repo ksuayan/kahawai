@@ -368,3 +368,8 @@ export async function setUiState(key: string, value: string | null): Promise<voi
 export async function appReady(): Promise<void> {
   if (inTauri()) await cmd("app_ready");
 }
+
+/** Show the log folder (~/Library/Logs/Kahawai Player) in Finder. */
+export async function revealLogs(): Promise<void> {
+  if (inTauri()) await cmd("reveal_logs");
+}

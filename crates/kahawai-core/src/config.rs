@@ -60,6 +60,17 @@ pub struct ServerConfig {
     /// Below it the album is left unmatched: a wrong ID is worse than none.
     #[serde(default = "default_min_confidence")]
     pub enrichment_min_confidence: f32,
+    /// Size cap of the transcode cache in MiB: single-track transcodes are
+    /// rendered once to `<data>/transcode-cache/` (next to the database) and
+    /// served from there with Content-Length and byte ranges, so players
+    /// like VLC can seek them. Oldest renders are evicted past the cap.
+    /// 0 turns the cache off (every transcode is streamed live).
+    #[serde(default = "default_transcode_cache_mb")]
+    pub transcode_cache_mb: u64,
+}
+
+fn default_transcode_cache_mb() -> u64 {
+    8 * 1024
 }
 
 fn default_min_confidence() -> f32 {
@@ -150,6 +161,7 @@ impl Default for ServerConfig {
             scan_on_startup: false,
             enrichment_enabled: false,
             enrichment_min_confidence: default_min_confidence(),
+            transcode_cache_mb: default_transcode_cache_mb(),
         }
     }
 }
@@ -188,6 +200,7 @@ mod tests {
         );
         assert_eq!(cfg.dsd_story, DsdStory::Native);
         assert!(cfg.scan_on_startup);
+        assert_eq!(cfg.transcode_cache_mb, 8192, "absent → the 8 GiB default");
 
         // And back to TOML without loss.
         let ser = toml::to_string(&cfg).expect("serialize");

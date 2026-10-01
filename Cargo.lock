@@ -2225,6 +2225,7 @@ dependencies = [
  "bytes",
  "flacenc",
  "kahawai-core",
+ "libc",
  "lofty",
  "mp3lame-sys",
  "opusic-sys",

@@ -527,8 +527,15 @@ async fn spawn_and_check(
     let last_error = state.last_error.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::run_server_with_ready(config, Some(ready_tx)).await {
-            *last_error.lock().unwrap() = Some(e.to_string());
+        match crate::run_server_with_ready(config, Some(ready_tx)).await {
+            Err(e) => *last_error.lock().unwrap() = Some(e.to_string()),
+            // Stopped by the operating system (kill, Ctrl+C): the server
+            // has drained gracefully; now the app goes too.
+            Ok(()) if crate::SHUTDOWN_BY_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) => {
+                tracing::info!("terminated: exiting the app");
+                std::process::exit(0);
+            }
+            Ok(()) => {}
         }
     });
     // Capture the live AppState as soon as it exists (before bind/serve),
@@ -728,13 +735,20 @@ pub fn autostart(app: &tauri::App) {
 
 // --- Splash window ------------------------------------------------------------
 
-/// Shown at least this long, so it never just flashes.
-const SPLASH_MIN: std::time::Duration = std::time::Duration::from_millis(1200);
+/// Shown at least this long once it has actually appeared (its page reports
+/// that: `splash_shown`), so it never just flashes.
+const SPLASH_MIN: std::time::Duration = std::time::Duration::from_millis(1500);
+/// How long to wait for the splash page to report it has appeared before
+/// counting SPLASH_MIN from the window's creation instead. A release app's
+/// first webview paint on a cold start can take about a second.
+const SPLASH_PAINT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Closed after this long even if the UI never says it's ready.
 const SPLASH_MAX: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub struct SplashState {
-    shown_at: std::time::Instant,
+    created_at: std::time::Instant,
+    /// When the splash page reported its artwork on screen.
+    shown_at: std::sync::Mutex<Option<std::time::Instant>>,
     done: std::sync::atomic::AtomicBool,
 }
 
@@ -769,7 +783,8 @@ pub fn open_windows(app: &tauri::App) -> tauri::Result<()> {
         .skip_taskbar(true)
         .build()?;
     app.manage(SplashState {
-        shown_at: std::time::Instant::now(),
+        created_at: std::time::Instant::now(),
+        shown_at: std::sync::Mutex::new(None),
         done: std::sync::atomic::AtomicBool::new(false),
     });
     let config = app
@@ -791,7 +806,8 @@ pub fn open_windows(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Show the main window and close the splash, once: after SPLASH_MIN.
+/// Show the main window and close the splash, once: SPLASH_MIN after the
+/// splash has appeared.
 fn finish_splash(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<SplashState>() else {
         return;
@@ -799,10 +815,18 @@ fn finish_splash(app: &tauri::AppHandle) {
     if state.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let wait = SPLASH_MIN.saturating_sub(state.shown_at.elapsed());
     let app = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(wait);
+        // The splash must have been seen: wait for its page to report it has
+        // appeared (at most SPLASH_PAINT_WAIT), then keep it up SPLASH_MIN.
+        let state = app.state::<SplashState>();
+        while state.shown_at.lock().unwrap().is_none()
+            && state.created_at.elapsed() < SPLASH_PAINT_WAIT
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let since = state.shown_at.lock().unwrap().unwrap_or(state.created_at);
+        std::thread::sleep(SPLASH_MIN.saturating_sub(since.elapsed()));
         let app2 = app.clone();
         let _ = app.run_on_main_thread(move || {
             if let Some(main) = app2.get_webview_window("main") {
@@ -816,9 +840,66 @@ fn finish_splash(app: &tauri::AppHandle) {
     });
 }
 
+/// The splash page has its artwork on screen: the minimum display time
+/// starts now.
+#[tauri::command]
+pub fn splash_shown(app: tauri::AppHandle) {
+    if let Some(state) = app.try_state::<SplashState>() {
+        state
+            .shown_at
+            .lock()
+            .unwrap()
+            .get_or_insert_with(std::time::Instant::now);
+    }
+}
+
 /// The UI is up (the wizard, or the status view with the server running):
 /// swap the splash for the main window.
 #[tauri::command]
 pub fn setup_app_ready(app: tauri::AppHandle) {
     finish_splash(&app);
+}
+
+/// Settings → Advanced: show the log folder (~/Library/Logs/Kahawai Server).
+#[tauri::command]
+pub fn setup_reveal_logs() {
+    crate::logfile::reveal();
+}
+
+/// How long quitting waits for the server to stop gracefully.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The app is quitting: ask the running server to stop (the same graceful
+/// path as `POST /api/shutdown`: players are told, in-flight requests
+/// finish) and wait for it, at most EXIT_WAIT.
+pub fn stop_server_for_exit(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<DesktopState>() else {
+        return;
+    };
+    let running = state
+        .server_task
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|h| !h.inner().is_finished());
+    if !running {
+        return;
+    }
+    tracing::info!("quitting: stopping the server");
+    crate::SHUTDOWN.notify_waiters();
+    let until = std::time::Instant::now() + EXIT_WAIT;
+    while std::time::Instant::now() < until {
+        let done = state
+            .server_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|h| h.inner().is_finished());
+        if done {
+            tracing::info!("server stopped");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    tracing::warn!("server didn't stop within {EXIT_WAIT:?}; quitting anyway");
 }

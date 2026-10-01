@@ -105,6 +105,23 @@ async fn tombstones(
     )
 }
 
+/// Tracks deleted after `since`, and tracks that became duplicate copies
+/// (migration 013): to a player both are gone.
+async fn removed_tracks(conn: &mut SqliteConnection, since: i64) -> Result<Vec<i64>, MusicError> {
+    let mut ids = tombstones(conn, "track", since).await?;
+    ids.extend(
+        sqlx::query("SELECT id FROM tracks WHERE rev > ? AND duplicate_of IS NOT NULL")
+            .bind(since)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db::cvt)?
+            .iter()
+            .map(|r| r.get::<i64, _>(0)),
+    );
+    ids.sort_unstable();
+    Ok(ids)
+}
+
 /// This database's catalog id (random per database, migration 010).
 pub async fn catalog_id(pool: &SqlitePool) -> Result<String, MusicError> {
     let mut conn = pool.acquire().await.map_err(db::cvt)?;
@@ -116,7 +133,7 @@ pub async fn catalog_id(pool: &SqlitePool) -> Result<String, MusicError> {
 pub async fn snapshot(pool: &SqlitePool) -> Result<CatalogSnapshot, MusicError> {
     let mut tx = pool.begin().await.map_err(db::cvt)?;
     let (catalog_id, rev) = current(&mut tx).await?;
-    let tracks = db::tracks_where(&mut tx, "missing = ?", 0).await?;
+    let tracks = db::tracks_where(&mut tx, "missing = ? AND duplicate_of IS NULL", 0).await?;
     let albums = albums_where(&mut tx, "1 = ?", 1).await?;
     let artists = artists_where(&mut tx, "1 = ?", 1).await?;
     tx.commit().await.map_err(db::cvt)?;
@@ -164,7 +181,12 @@ pub async fn delta(
         + scalar(&mut tx, "SELECT COUNT(*) FROM albums WHERE rev > ?", since).await?
         + scalar(&mut tx, "SELECT COUNT(*) FROM artists WHERE rev > ?", since).await?;
     if changed > 0 {
-        let total = scalar(&mut tx, "SELECT COUNT(*) FROM tracks WHERE missing = ?", 0).await?
+        let total = scalar(
+            &mut tx,
+            "SELECT COUNT(*) FROM tracks WHERE missing = ? AND duplicate_of IS NULL",
+            0,
+        )
+        .await?
             + scalar(&mut tx, "SELECT COUNT(*) FROM albums WHERE 1 = ?", 1).await?
             + scalar(&mut tx, "SELECT COUNT(*) FROM artists WHERE 1 = ?", 1).await?;
         if changed as f64 > FULL_RESYNC_SHARE * total.max(1) as f64 {
@@ -175,10 +197,10 @@ pub async fn delta(
         catalog_id: id,
         rev,
         full_resync: false,
-        tracks: db::tracks_where(&mut tx, "rev > ?", since).await?,
+        tracks: db::tracks_where(&mut tx, "rev > ? AND duplicate_of IS NULL", since).await?,
         albums: albums_where(&mut tx, "rev > ?", since).await?,
         artists: artists_where(&mut tx, "rev > ?", since).await?,
-        removed_tracks: tombstones(&mut tx, "track", since).await?,
+        removed_tracks: removed_tracks(&mut tx, since).await?,
         removed_albums: tombstones(&mut tx, "album", since).await?,
         removed_artists: tombstones(&mut tx, "artist", since).await?,
         genres: Vec::new(),

@@ -2,15 +2,7 @@
 import { RefreshCw } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { checkServer, describeServer, type ServerCheck } from "../api";
-import {
-  artworkCacheStats,
-  clearArtworkCache,
-  dopStatus,
-  inTauri,
-  setArtworkCacheMaxBytes,
-  setDsdDeviceConfirmed,
-  type ArtworkCacheStats,
-} from "../tauri";
+import { artworkCacheStats, clearArtworkCache, dopStatus, inTauri, revealLogs, setArtworkCacheMaxBytes, setDsdDeviceConfirmed, type ArtworkCacheStats } from "../tauri";
 import { useAnalogStore } from "../stores/analog";
 import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
@@ -582,6 +574,14 @@ const dopRates = computed(() =>
           <span>{{ desc }}</span>
         </li>
       </ul>
+    </SettingsSection>
+
+    <SettingsSection v-if="inTauri()" title="Logs">
+      <UiHint>
+        If something goes wrong, the log shows what happened. Attach it (kahawai-player.log) when you
+        report a problem.
+      </UiHint>
+      <UiButton data-testid="reveal-logs" @click="revealLogs()">Reveal Logs in Finder</UiButton>
     </SettingsSection>
 
     <SettingsSection v-if="inTauri()" title="Developer tools">

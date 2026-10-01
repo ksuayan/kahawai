@@ -43,10 +43,22 @@ command -v cargo-tauri >/dev/null 2>&1 || {
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLAYER="${ROOT}/player"
 
-if [[ ! -d "${PLAYER}/ui/node_modules" ]]; then
-  echo "error: player/ui/node_modules missing. Run 'npm install' in player/ui first." >&2
-  exit 1
-fi
+# Install a UI's npm dependencies when they're missing or out of date:
+# package.json or package-lock.json changed since the last install (a merge
+# that added a dependency, say). node_modules/.package-lock.json is npm's
+# record of the last install; it's touched afterwards so an install with
+# nothing to do doesn't repeat on every run.
+ensure_npm_deps() {
+  local ui="$1"
+  local stamp="${ui}/node_modules/.package-lock.json"
+  if [[ ! -f "${stamp}" || "${ui}/package.json" -nt "${stamp}" || "${ui}/package-lock.json" -nt "${stamp}" ]]; then
+    echo "==> npm install in ${ui#"${ROOT}"/} (dependencies missing or changed)…"
+    (cd "${ui}" && npm install --no-audit --no-fund)
+    touch "${stamp}"
+  fi
+}
+
+ensure_npm_deps "${PLAYER}/ui"
 
 APP_NAME="Kahawai Player"  # must match productName in player/src-tauri/tauri.conf.json
 EXE_NAME="kahawai-player"  # the Cargo bin name inside Contents/MacOS (not the product name)
@@ -85,10 +97,18 @@ case "${archs}" in
   *) echo "error: ${BIN_OUT} is not universal (${archs})." >&2; exit 1 ;;
 esac
 file "${BIN_OUT}"
+# The bundle must carry a valid (ad-hoc) signature: on Apple Silicon a
+# downloaded app with an unsigned bundle is refused as "damaged". Tauri signs
+# it (bundle.macOS.signingIdentity "-" in tauri.conf.json).
+if ! codesign --verify --deep --strict "${OUT}/${APP_NAME}.app"; then
+  echo "error: ${APP_NAME}.app is not properly signed (see signingIdentity in tauri.conf.json)." >&2
+  exit 1
+fi
+codesign -dv "${OUT}/${APP_NAME}.app" 2>&1 | grep -E "^Signature=" || true
 
 cat <<'EOF2'
 
-Universal bundle is ready (unsigned, unnotarized).
+Universal bundle is ready (ad-hoc signed, not notarized).
 
 Manual signing & notarization (requires a paid Apple Developer identity;
 NOT attempted here):

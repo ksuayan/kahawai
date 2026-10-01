@@ -284,10 +284,23 @@ const dimmed = computed(() => unsupported.value || !analog.masterOn);
           />
         </label>
         <UiButton variant="primary" :disabled="!canStartBlind" data-testid="blind-start-button" @click="abx.start(trialCount)">Start blind test</UiButton>
-        <label v-if="abx.slotsDiffer && !abx.levelMatched" class="flex items-center gap-2 text-xs text-dim">
-          <input v-model="startAnyway" type="checkbox" data-testid="blind-anyway" /> Start anyway (results will be unreliable)
+        <!-- Always there (its space never comes and goes): dimmed and disabled
+             when it isn't needed. -->
+        <label
+          class="flex items-center gap-2 text-xs text-dim transition-opacity duration-200"
+          :class="abx.slotsDiffer && !abx.levelMatched ? 'opacity-100' : 'pointer-events-none opacity-40'"
+          :aria-disabled="!(abx.slotsDiffer && !abx.levelMatched)"
+        >
+          <input
+            v-model="startAnyway"
+            type="checkbox"
+            :disabled="!(abx.slotsDiffer && !abx.levelMatched)"
+            data-testid="blind-anyway"
+          />
+          Start anyway (results will be unreliable)
         </label>
-        <p class="m-0 w-full text-xs text-dim" data-testid="blind-check">
+        <!-- Two lines reserved: the message changes length with the state. -->
+        <p class="m-0 min-h-[2.6em] w-full text-xs text-dim" data-testid="blind-check">
           <template v-if="!abx.slotsDiffer">A and B are identical: change one of them first.</template>
           <template v-else-if="abx.levelDifference === null">Measure both slots first (play music with A, then with B) so the levels can be matched.</template>
           <template v-else-if="!abx.levelMatched"
