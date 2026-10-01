@@ -772,6 +772,58 @@ fn dop_open_failure_falls_back_to_flac_and_releases_the_sink() {
 }
 
 #[test]
+fn a_slow_dop_open_loads_then_plays_natively() {
+    // The request is slower than the inline wait, so the player is Loading and
+    // the open is collected by later pumps; the controls are not held up.
+    let mut h = DopHarness::with_delay(Some(DOP_RATE), Duration::from_millis(400));
+    h.player.set_global_format(Some(StreamFormat::Dop));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    assert_eq!(h.player.status(), PlayerStatus::Loading);
+    let mut spins = 0;
+    while h.player.status() == PlayerStatus::Loading && spins < 200 {
+        h.player.pump();
+        spins += 1;
+    }
+    let snap = h.player.snapshot();
+    assert_eq!(snap.status, PlayerStatus::Playing);
+    assert_eq!(snap.format, Some(StreamFormat::Dop));
+    assert!(snap.error.is_none());
+}
+
+#[test]
+fn a_slow_dop_open_that_cannot_start_falls_back_to_flac_with_the_reason() {
+    let mut h = DopHarness::with_delay(Some(DOP_RATE), Duration::from_millis(300));
+    h.sink.0.lock().unwrap().fail_open = true;
+    h.player.set_global_format(Some(StreamFormat::Dop));
+    h.player.play_queue(vec![dsd_track(1, DSD64, 1000)], 0);
+    let mut spins = 0;
+    while spins < 400
+        && (h.player.status() == PlayerStatus::Loading
+            || h.player.snapshot().format != Some(StreamFormat::Flac))
+    {
+        h.player.pump();
+        spins += 1;
+    }
+    let snap = h.player.snapshot();
+    assert_eq!(
+        snap.status,
+        PlayerStatus::Playing,
+        "plays as PCM: {:?}",
+        snap.error
+    );
+    assert_eq!(snap.format, Some(StreamFormat::Flac));
+    assert_eq!(snap.output_path, OutputPath::Pcm);
+    assert!(
+        snap.notice
+            .as_deref()
+            .unwrap_or("")
+            .contains("couldn't be set up for native DSD"),
+        "notice: {:?}",
+        snap.notice
+    );
+}
+
+#[test]
 fn the_fallback_notice_clears_on_the_next_track() {
     let mut h = DopHarness::new(Some(DOP_RATE));
     h.sink.0.lock().unwrap().fail_open = true;
@@ -1205,6 +1257,11 @@ struct DopHarness {
 
 impl DopHarness {
     fn new(dop_rate: Option<u32>) -> Self {
+        Self::with_delay(dop_rate, Duration::ZERO)
+    }
+
+    /// Every stream request takes `delay` (a slow network).
+    fn with_delay(dop_rate: Option<u32>, delay: Duration) -> Self {
         let transport = Arc::new(DopTransport {
             wav: dop_wav_bytes(2000),
             opened: Mutex::new(Vec::new()),
@@ -1221,17 +1278,21 @@ impl DopHarness {
             external: true,
             fail_write: false,
         })));
-        struct Wrap(Arc<DopTransport>);
+        struct Wrap(Arc<DopTransport>, Duration);
         impl Transport for Wrap {
             fn open_stream(
                 &self,
                 track_id: i64,
                 opts: &StreamOptions,
             ) -> Result<StreamInfo, MusicError> {
+                std::thread::sleep(self.1);
                 self.0.open_stream(track_id, opts)
             }
         }
-        let player = Player::new(Box::new(sink.clone()), Box::new(Wrap(transport.clone())));
+        let player = Player::new(
+            Box::new(sink.clone()),
+            Box::new(Wrap(transport.clone(), delay)),
+        );
         Self {
             player,
             transport,
@@ -3498,46 +3559,406 @@ fn without_a_seekable_source_the_seek_falls_back_to_streaming_and_skipping() {
 }
 
 // ---------------------------------------------------------------------------
-// EQ preamp (headroom for the EQ's boosts, as AutoEq profiles use) and 12 bands
+// A stalled network must never freeze the controls
 // ---------------------------------------------------------------------------
 
-/// Peak of the last `n` interleaved samples.
-fn tail_peak(samples: &[f32], n: usize) -> f32 {
-    samples[samples.len().saturating_sub(n)..]
-        .iter()
-        .fold(0.0f32, |m, s| m.max(s.abs()))
+use kahawai_player_core::ReadAhead;
+use std::sync::atomic::AtomicBool;
+
+/// Serves some chunks, then goes dead until released, then serves the rest.
+struct DeadThenAlive {
+    before: Vec<u8>,
+    after: Vec<u8>,
+    at: usize,
+    release: Arc<AtomicBool>,
+}
+
+impl std::io::Read for DeadThenAlive {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n_before = self.before.len();
+        if self.at < n_before {
+            let n = buf.len().min(n_before - self.at).min(4096);
+            buf[..n].copy_from_slice(&self.before[self.at..self.at + n]);
+            self.at += n;
+            return Ok(n);
+        }
+        while !self.release.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let off = self.at - n_before;
+        if off >= self.after.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(self.after.len() - off).min(4096);
+        buf[..n].copy_from_slice(&self.after[off..off + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// A 2 s track whose network delivers the first 0.5 s, dies, and (when
+/// released) delivers the rest. Read ahead, as the real transport does.
+struct DyingNetwork {
+    release: Arc<AtomicBool>,
+}
+
+impl Transport for DyingNetwork {
+    fn open_stream(&self, _id: i64, _opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+        let whole = wav_bytes(440.0, 44100 * 2);
+        let half = 44 + 44100 * 4 / 2; // header + 0.5 s of 16-bit stereo
+        let ahead = ReadAhead::new(
+            DeadThenAlive {
+                before: whole[..half].to_vec(),
+                after: whole[half..].to_vec(),
+                at: 0,
+                release: self.release.clone(),
+            },
+            1 << 20,
+        );
+        let stats = ahead.stats();
+        Ok(StreamInfo {
+            reader: Box::new(ahead),
+            content_type: "audio/wav".into(),
+            chain: None,
+            gapless_next: None,
+            gapless_mode: None,
+            progress: Some(StreamProgress {
+                received: Arc::new(AtomicU64::new(0)),
+                content_length: None,
+                offset: 0,
+                stats: Some(stats),
+            }),
+        })
+    }
+}
+
+fn dying_network_controller(suffix: &str) -> (EngineController, Arc<AtomicBool>) {
+    let release = Arc::new(AtomicBool::new(false));
+    let dir = std::env::temp_dir().join(format!("kahawai-player-core-{suffix}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ctl = EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(DyingNetwork {
+            release: release.clone(),
+        }),
+        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
+        dir.join("settings.json"),
+    );
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 2_000)], 0);
+    (ctl, release)
 }
 
 #[test]
-fn the_eq_preamp_lowers_the_level_while_the_eq_is_on_and_not_when_it_is_off() {
-    let play = |preamp: f32, eq_on: bool| {
-        let mut h = Harness::new(None);
-        h.player.set_eq_preamp(preamp);
-        h.player.set_eq_enabled(eq_on);
-        h.stub.add(1, &[(440.0, 44100)]);
-        h.player
-            .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
-        h.pump_until_done(100);
-        tail_peak(&h.samples(), 4000)
+fn the_controls_still_answer_while_the_network_is_stalled() {
+    let (ctl, release) = dying_network_controller("stall-controls");
+    wait_for(|| ctl.snapshot().buffering);
+    assert_eq!(
+        ctl.snapshot().status,
+        PlayerStatus::Playing,
+        "still the playing track, just buffering"
+    );
+    // Before the fix this pause was never processed: the playback thread sat
+    // blocked in the network read.
+    ctl.pause();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Paused);
+    assert!(
+        !ctl.snapshot().buffering,
+        "a paused player is not buffering"
+    );
+    ctl.stop();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Stopped);
+    release.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn playback_resumes_by_itself_when_the_network_comes_back() {
+    let (ctl, release) = dying_network_controller("stall-resume");
+    wait_for(|| ctl.snapshot().buffering);
+    assert_eq!(ctl.snapshot().status, PlayerStatus::Playing);
+    release.store(true, Ordering::SeqCst);
+    // It plays on to the end of the track by itself: finished, with no error
+    // and no one having touched the controls.
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Stopped);
+    let s = ctl.snapshot();
+    assert!(s.error.is_none(), "completed cleanly: {:?}", s.error);
+    assert!(!s.buffering);
+}
+
+#[test]
+fn a_stream_that_never_comes_back_ends_with_a_clear_error_not_a_hang() {
+    let release = Arc::new(AtomicBool::new(false));
+    let sink = SharedSink(Arc::new(Mutex::new(VecSink::new())));
+    let mut player = Player::new(
+        Box::new(sink),
+        Box::new(DyingNetwork {
+            release: release.clone(),
+        }),
+    );
+    player.set_stall_timeout(Duration::from_millis(250));
+    player.play_queue(vec![track(1, AudioFormat::Wav, 2_000)], 0);
+    let mut waited = 0;
+    while player.status() == PlayerStatus::Playing && waited < 600 {
+        player.pump();
+        waited += 1;
+    }
+    let s = player.snapshot();
+    assert_eq!(
+        s.status,
+        PlayerStatus::Stopped,
+        "gave up instead of hanging"
+    );
+    assert!(
+        s.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("connection to the server was lost"),
+        "says why: {:?}",
+        s.error
+    );
+    release.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
+// Opening a stream must never hold up the controls either
+// ---------------------------------------------------------------------------
+
+/// A transport whose stream requests can be slow, hang, or fail slowly.
+struct SlowOpen {
+    stub: Arc<StubTransport>,
+    /// Each open takes this long.
+    delay: Mutex<Duration>,
+    /// While true, opens hang (a dead network at connect or probe time).
+    hang: Arc<AtomicBool>,
+    /// The next opens fail (after the delay) instead of succeeding.
+    fail_next: Mutex<u32>,
+    opens: AtomicUsize,
+    /// Pace the stream like a real network (off for chained responses, which
+    /// are read in full before decoding starts).
+    paced: bool,
+}
+
+struct SlowOpenTransport(Arc<SlowOpen>);
+
+impl Transport for SlowOpenTransport {
+    fn open_stream(&self, id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+        let me = &self.0;
+        me.opens.fetch_add(1, Ordering::SeqCst);
+        while me.hang.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(*me.delay.lock().unwrap());
+        {
+            let mut fails = me.fail_next.lock().unwrap();
+            if *fails > 0 {
+                *fails -= 1;
+                return Err(MusicError::Http("stub: server error".into()));
+            }
+        }
+        // Paced like a real network, so a track does not finish in a flash.
+        let mut info = me.stub.open_stream(id, opts)?;
+        if me.paced {
+            info.reader = Box::new(Throttled(info.reader));
+        }
+        Ok(info)
+    }
+}
+
+fn slow_open_transport() -> Arc<SlowOpen> {
+    let stub = Arc::new(StubTransport::new(None));
+    stub.add(1, &[(440.0, 44100 * 30)]);
+    Arc::new(SlowOpen {
+        stub,
+        delay: Mutex::new(Duration::ZERO),
+        hang: Arc::new(AtomicBool::new(false)),
+        fail_next: Mutex::new(0),
+        opens: AtomicUsize::new(0),
+        paced: true,
+    })
+}
+
+fn controller_over(slow: &Arc<SlowOpen>, suffix: &str) -> EngineController {
+    let dir = std::env::temp_dir().join(format!("kahawai-player-core-{suffix}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(SlowOpenTransport(slow.clone())),
+        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
+        dir.join("settings.json"),
+    )
+}
+
+#[test]
+fn a_dead_network_while_opening_does_not_freeze_the_controls() {
+    let slow = slow_open_transport();
+    slow.hang.store(true, Ordering::SeqCst);
+    let ctl = controller_over(&slow, "open-hang");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    // Before the fix the playback thread sat inside the request, so none of
+    // these were ever processed.
+    ctl.next();
+    ctl.stop();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Stopped);
+    slow.hang.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn a_slow_open_plays_by_itself_once_the_stream_arrives() {
+    let slow = slow_open_transport();
+    *slow.delay.lock().unwrap() = Duration::from_millis(500); // well past the inline wait
+    let ctl = controller_over(&slow, "open-slow");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    wait_for(|| {
+        matches!(
+            ctl.snapshot().status,
+            PlayerStatus::Playing | PlayerStatus::Stopped
+        )
+    });
+    let s = ctl.snapshot();
+    assert!(s.error.is_none(), "no error: {:?}", s.error);
+    assert!(s.track.is_some());
+}
+
+#[test]
+fn a_slow_open_can_be_replaced_by_a_newer_one() {
+    // Scrubbing while a seek is still opening: only the latest open counts.
+    let slow = slow_open_transport();
+    let ctl = controller_over(&slow, "open-replace");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Playing);
+    *slow.delay.lock().unwrap() = Duration::from_millis(400);
+    ctl.seek_ms(1000);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    ctl.seek_ms(2500); // supersedes the open in flight
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Playing);
+    let pos = ctl.snapshot().position_ms;
+    assert!(
+        pos >= 2400,
+        "playing from the latest target, not the first: {pos}"
+    );
+}
+
+#[test]
+fn a_slow_failing_seek_still_carries_on_from_where_it_was() {
+    let slow = slow_open_transport();
+    let ctl = controller_over(&slow, "open-slow-fail");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| {
+        ctl.snapshot().status == PlayerStatus::Playing && ctl.snapshot().position_ms >= 300
+    });
+    *slow.delay.lock().unwrap() = Duration::from_millis(300);
+    *slow.fail_next.lock().unwrap() = 1; // the seek's open fails, slowly; the recovery works
+    ctl.seek_ms(3000);
+    wait_for(|| {
+        let s = ctl.snapshot();
+        s.status == PlayerStatus::Playing
+            && s.notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("Couldn't seek there")
+    });
+    assert!(ctl.snapshot().error.is_none());
+}
+
+#[test]
+fn reordering_the_queue_during_a_slow_open_does_not_leave_a_stale_chain() {
+    // The open asked the server to chain track 2 after track 1; by the time the
+    // stream arrives, track 3 is next. The stale chain is refreshed.
+    let stub = Arc::new(StubTransport::new(Some("chained")));
+    for id in 1..=3 {
+        stub.add(id, &[(440.0 + id as f32 * 110.0, 44100 * 30)]);
+    }
+    let slow = Arc::new(SlowOpen {
+        stub,
+        delay: Mutex::new(Duration::from_millis(400)),
+        hang: Arc::new(AtomicBool::new(false)),
+        fail_next: Mutex::new(0),
+        opens: AtomicUsize::new(0),
+        paced: false,
+    });
+    let ctl = controller_over(&slow, "open-reorder");
+    ctl.play_queue(
+        (1..=3)
+            .map(|id| track(id, AudioFormat::Wav, 30_000))
+            .collect(),
+        0,
+    );
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    ctl.move_queue_item(2, 1); // [1, 3, 2]: what follows track 1 changed
+    let chained_next = |want: i64| {
+        slow.stub
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, o)| *id == 1 && o.next == Some(want))
     };
-    let plain = play(0.0, true);
-    assert!((plain - 0.7).abs() < 0.02, "untouched at 0 dB: {plain}");
-    let down = play(-6.0, true);
-    assert!(
-        (down / plain - 0.501).abs() < 0.02,
-        "-6 dB is x0.5: {}",
-        down / plain
-    );
-    let off = play(-6.0, false);
-    assert!(
-        (off / plain - 1.0).abs() < 0.01,
-        "a bypassed EQ does not apply its preamp: {}",
-        off / plain
-    );
+    wait_for(|| chained_next(3));
+    assert!(chained_next(2), "the first open chained the old next track");
 }
 
 #[test]
-fn changing_the_preamp_during_playback_does_not_step_the_signal() {
+fn a_paused_player_stays_paused_through_a_slow_seek() {
+    let slow = slow_open_transport();
+    let ctl = controller_over(&slow, "open-slow-paused");
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Playing);
+    ctl.pause();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Paused);
+    *slow.delay.lock().unwrap() = Duration::from_millis(400);
+    ctl.seek_ms(2000);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Paused);
+}
+
+#[test]
+fn an_open_that_never_completes_ends_with_a_clear_error() {
+    let slow = slow_open_transport();
+    slow.hang.store(true, Ordering::SeqCst);
+    let sink = SharedSink(Arc::new(Mutex::new(VecSink::new())));
+    let mut player = Player::new(Box::new(sink), Box::new(SlowOpenTransport(slow.clone())));
+    player.set_stall_timeout(Duration::from_millis(300));
+    player.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    let mut spins = 0;
+    while player.status() != PlayerStatus::Stopped && spins < 400 {
+        player.pump();
+        spins += 1;
+    }
+    let s = player.snapshot();
+    assert_eq!(s.status, PlayerStatus::Stopped);
+    assert_eq!(s.error.as_deref(), Some("Couldn't reach the server."));
+    slow.hang.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn the_loudness_pre_scan_does_not_hold_up_the_controls() {
+    // The pre-scan reads a whole track before playback starts; with a slow
+    // network that used to be seconds on the playback thread.
+    let slow = slow_open_transport();
+    *slow.delay.lock().unwrap() = Duration::from_millis(600);
+    let ctl = controller_over(&slow, "open-prescan");
+    ctl.set_loudness_enabled(true);
+    ctl.play_queue(vec![track(1, AudioFormat::Wav, 30_000)], 0);
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Loading);
+    ctl.stop();
+    wait_for(|| ctl.snapshot().status == PlayerStatus::Stopped);
+}
+
+// ---------------------------------------------------------------------------
+// Volume changes must not click or zipper
+// ---------------------------------------------------------------------------
+
+/// Largest jump between consecutive frames (left channel) of the recorded output.
+fn max_frame_step(samples: &[f32]) -> f32 {
+    let left: Vec<f32> = samples.iter().step_by(CHANNELS).copied().collect();
+    left.windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max)
+}
+
+#[test]
+fn a_volume_change_during_playback_does_not_step_the_signal() {
     let mut h = Harness::new(None);
     h.stub.add(1, &[(440.0, 44100 * 10)]);
     h.player
@@ -3545,100 +3966,47 @@ fn changing_the_preamp_during_playback_does_not_step_the_signal() {
     for _ in 0..6 {
         h.player.pump();
     }
-    h.player.set_eq_preamp(-12.0); // a big cut, mid-waveform
+    h.player.set_volume(0.2); // a big drop, mid-waveform
     for _ in 0..12 {
         h.player.pump();
     }
-    let left: Vec<f32> = h.samples().iter().step_by(CHANNELS).copied().collect();
-    let step = left
-        .windows(2)
-        .map(|w| (w[1] - w[0]).abs())
-        .fold(0.0f32, f32::max);
+    let heard = h.samples();
+    // A clean 440 Hz tone at 0.7 never steps more than this between frames;
+    // a whole-chunk volume multiply stepped by up to 0.8 of the signal.
     let natural = 0.7 * 2.0 * std::f32::consts::PI * 440.0 / RATE as f32;
+    let step = max_frame_step(&heard);
     assert!(
-        step <= natural * 1.15,
-        "preamp change stepped the signal: {step} (a clean tone steps {natural})"
+        step <= natural * 1.1 + 0.7 / 441.0,
+        "volume change stepped the signal: {step} (a clean tone steps {natural})"
+    );
+    // ...and the change did take effect.
+    let tail = &heard[heard.len() - 2 * 2000..];
+    let peak = tail.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(
+        (peak - 0.7 * 0.2).abs() < 0.02,
+        "settled at the new volume: {peak}"
     );
 }
 
 #[test]
-fn the_preamp_is_clamped_and_saved_with_the_dsp_settings() {
+fn full_volume_still_passes_the_signal_through_unchanged() {
     let mut h = Harness::new(None);
-    h.player.set_eq_preamp(-100.0);
-    assert_eq!(h.player.dsp_settings().eq_preamp_db, -24.0);
-    h.player.set_eq_preamp(100.0);
-    assert_eq!(h.player.dsp_settings().eq_preamp_db, 12.0);
-    h.player.set_eq_preamp(f32::NAN);
-    assert_eq!(h.player.dsp_settings().eq_preamp_db, 0.0);
-    h.player.set_eq_preamp(-6.2);
-    assert_eq!(h.player.dsp_settings().eq_preamp_db, -6.2);
-
-    // The controller persists it, and an old settings file (no preamp) reads as 0.
-    let dir = std::env::temp_dir().join("kahawai-player-core-test-preamp-settings");
-    let _ = std::fs::remove_dir_all(&dir);
-    let settings_path = dir.join("settings.json");
-    let ctl = EngineController::with_transport(
-        Box::new(VecSink::new()),
-        Box::new(StubTransport::new(None)),
-        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
-        settings_path.clone(),
-    );
-    ctl.set_eq_preamp(-4.5);
-    let v: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert_eq!(v["dsp"]["eq_preamp_db"], -4.5);
-    let old =
-        r#"{"eq_bands":[],"eq_enabled":true,"loudness_enabled":false,"loudness_target":-14.0}"#;
-    let dsp: kahawai_player_core::DspSettings =
-        serde_json::from_str(old).expect("old dsp block parses");
-    assert_eq!(dsp.eq_preamp_db, 0.0);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_preamp_alone_holds_best_quality_back_like_any_other_eq() {
-    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
-    h.player.set_eq_preamp(-3.0);
-    h.stub.add(1, &[(440.0, 4410)]);
+    h.stub.add(1, &[(440.0, 44100)]);
     h.player
-        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
-    let snap = h.player.snapshot();
-    assert_eq!(
-        snap.output_path,
-        OutputPath::Pcm,
-        "the preamp changes the samples"
-    );
+        .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+    h.pump_until_done(60);
+    let heard = h.samples();
+    let want = wav_bytes(440.0, 44100);
+    // the first decoded sample of the 16-bit fixture, scaled to f32
+    let first = i16::from_le_bytes([
+        want[44 + 2 * CHANNELS * 100],
+        want[44 + 2 * CHANNELS * 100 + 1],
+    ]) as f32
+        / 32768.0;
     assert!(
-        snap.exclusive_blockers.iter().any(|b| b == "EQ"),
-        "{:?}",
-        snap.exclusive_blockers
+        (heard[100 * CHANNELS] - first).abs() < 1e-6,
+        "bit-transparent at unity volume"
     );
-
-    let mut flat = best_harness(kahawai_player_core::QualityMode::Best, true);
-    flat.player.set_eq_preamp(0.0);
-    flat.stub.add(1, &[(440.0, 4410)]);
-    flat.player
-        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
-    assert!(
-        flat.player.snapshot().exclusive_blockers.is_empty(),
-        "0 dB is no processing"
-    );
-}
-
-#[test]
-fn the_eq_takes_twelve_bands_and_rejects_a_thirteenth() {
-    let band = |i: usize| EqBand {
-        band_type: EqBandType::Peaking,
-        freq: 100.0 * (i as f32 + 1.0),
-        gain_db: 1.0,
-        q: 1.0,
-    };
-    let mut h = Harness::new(None);
-    assert!(
-        h.player.set_eq_bands((0..12).map(band).collect()).is_ok(),
-        "an AutoEq profile (10) plus two of your own"
-    );
-    assert!(h.player.set_eq_bands((0..13).map(band).collect()).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -3881,4 +4249,148 @@ fn the_buffered_fill_follows_the_seekable_sources_current_download() {
         done >= 9900,
         "{done} ms: the new download finished the file"
     );
+}
+
+// ---------------------------------------------------------------------------
+// EQ preamp (headroom for the EQ's boosts, as AutoEq profiles use) and 12 bands
+// ---------------------------------------------------------------------------
+
+/// Peak of the last `n` interleaved samples.
+fn tail_peak(samples: &[f32], n: usize) -> f32 {
+    samples[samples.len().saturating_sub(n)..]
+        .iter()
+        .fold(0.0f32, |m, s| m.max(s.abs()))
+}
+
+#[test]
+fn the_eq_preamp_lowers_the_level_while_the_eq_is_on_and_not_when_it_is_off() {
+    let play = |preamp: f32, eq_on: bool| {
+        let mut h = Harness::new(None);
+        h.player.set_eq_preamp(preamp);
+        h.player.set_eq_enabled(eq_on);
+        h.stub.add(1, &[(440.0, 44100)]);
+        h.player
+            .play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+        h.pump_until_done(100);
+        tail_peak(&h.samples(), 4000)
+    };
+    let plain = play(0.0, true);
+    assert!((plain - 0.7).abs() < 0.02, "untouched at 0 dB: {plain}");
+    let down = play(-6.0, true);
+    assert!(
+        (down / plain - 0.501).abs() < 0.02,
+        "-6 dB is x0.5: {}",
+        down / plain
+    );
+    let off = play(-6.0, false);
+    assert!(
+        (off / plain - 1.0).abs() < 0.01,
+        "a bypassed EQ does not apply its preamp: {}",
+        off / plain
+    );
+}
+
+#[test]
+fn changing_the_preamp_during_playback_does_not_step_the_signal() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, 44100 * 10)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 10_000)], 0);
+    for _ in 0..6 {
+        h.player.pump();
+    }
+    h.player.set_eq_preamp(-12.0); // a big cut, mid-waveform
+    for _ in 0..12 {
+        h.player.pump();
+    }
+    let left: Vec<f32> = h.samples().iter().step_by(CHANNELS).copied().collect();
+    let step = left
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0f32, f32::max);
+    let natural = 0.7 * 2.0 * std::f32::consts::PI * 440.0 / RATE as f32;
+    assert!(
+        step <= natural * 1.15,
+        "preamp change stepped the signal: {step} (a clean tone steps {natural})"
+    );
+}
+
+#[test]
+fn the_preamp_is_clamped_and_saved_with_the_dsp_settings() {
+    let mut h = Harness::new(None);
+    h.player.set_eq_preamp(-100.0);
+    assert_eq!(h.player.dsp_settings().eq_preamp_db, -24.0);
+    h.player.set_eq_preamp(100.0);
+    assert_eq!(h.player.dsp_settings().eq_preamp_db, 12.0);
+    h.player.set_eq_preamp(f32::NAN);
+    assert_eq!(h.player.dsp_settings().eq_preamp_db, 0.0);
+    h.player.set_eq_preamp(-6.2);
+    assert_eq!(h.player.dsp_settings().eq_preamp_db, -6.2);
+
+    // The controller persists it, and an old settings file (no preamp) reads as 0.
+    let dir = std::env::temp_dir().join("kahawai-player-core-test-preamp-settings");
+    let _ = std::fs::remove_dir_all(&dir);
+    let settings_path = dir.join("settings.json");
+    let ctl = EngineController::with_transport(
+        Box::new(VecSink::new()),
+        Box::new(StubTransport::new(None)),
+        Arc::new(std::sync::RwLock::new("http://stub".to_string())),
+        settings_path.clone(),
+    );
+    ctl.set_eq_preamp(-4.5);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert_eq!(v["dsp"]["eq_preamp_db"], -4.5);
+    let old =
+        r#"{"eq_bands":[],"eq_enabled":true,"loudness_enabled":false,"loudness_target":-14.0}"#;
+    let dsp: kahawai_player_core::DspSettings =
+        serde_json::from_str(old).expect("old dsp block parses");
+    assert_eq!(dsp.eq_preamp_db, 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_preamp_alone_holds_best_quality_back_like_any_other_eq() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.player.set_eq_preamp(-3.0);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    let snap = h.player.snapshot();
+    assert_eq!(
+        snap.output_path,
+        OutputPath::Pcm,
+        "the preamp changes the samples"
+    );
+    assert!(
+        snap.exclusive_blockers.iter().any(|b| b == "EQ"),
+        "{:?}",
+        snap.exclusive_blockers
+    );
+
+    let mut flat = best_harness(kahawai_player_core::QualityMode::Best, true);
+    flat.player.set_eq_preamp(0.0);
+    flat.stub.add(1, &[(440.0, 4410)]);
+    flat.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    assert!(
+        flat.player.snapshot().exclusive_blockers.is_empty(),
+        "0 dB is no processing"
+    );
+}
+
+#[test]
+fn the_eq_takes_twelve_bands_and_rejects_a_thirteenth() {
+    let band = |i: usize| EqBand {
+        band_type: EqBandType::Peaking,
+        freq: 100.0 * (i as f32 + 1.0),
+        gain_db: 1.0,
+        q: 1.0,
+    };
+    let mut h = Harness::new(None);
+    assert!(
+        h.player.set_eq_bands((0..12).map(band).collect()).is_ok(),
+        "an AutoEq profile (10) plus two of your own"
+    );
+    assert!(h.player.set_eq_bands((0..13).map(band).collect()).is_err());
 }

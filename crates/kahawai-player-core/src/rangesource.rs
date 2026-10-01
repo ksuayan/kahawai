@@ -62,6 +62,11 @@ struct Live {
     progress: StreamProgress,
 }
 
+/// The current download's progress, behind its own lock. [`Inner`]'s lock is
+/// held across blocking network reads, so anything the playback thread needs
+/// on every snapshot (this) must not live behind it.
+type ProgressCell = Arc<Mutex<Option<StreamProgress>>>;
+
 struct Inner {
     agent: ureq::Agent,
     url: String,
@@ -69,6 +74,8 @@ struct Inner {
     pos: u64,
     head: Vec<u8>,
     live: Option<Live>,
+    /// Mirror of `live`'s progress for [`RangeControl::progress`].
+    progress: ProgressCell,
     read_ahead_bytes: usize,
 }
 
@@ -76,7 +83,10 @@ struct Inner {
 pub struct RangeSource(Arc<Mutex<Inner>>);
 
 /// The side channel for the same source.
-struct RangeControl(Arc<Mutex<Inner>>);
+struct RangeControl {
+    inner: Arc<Mutex<Inner>>,
+    progress: ProgressCell,
+}
 
 fn io_err(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
@@ -127,6 +137,7 @@ impl RangeSource {
             .take(HEAD_BYTES)
             .read_to_end(&mut head)
             .map_err(MusicError::Io)?;
+        let progress: ProgressCell = Arc::default();
         let inner = Arc::new(Mutex::new(Inner {
             agent: agent.clone(),
             url,
@@ -134,6 +145,7 @@ impl RangeSource {
             pos: 0,
             head,
             live: None,
+            progress: progress.clone(),
             read_ahead_bytes,
         }));
         Ok(Some(SeekableStream {
@@ -141,7 +153,7 @@ impl RangeSource {
             byte_len: total,
             content_type,
             chain,
-            control: Some(Arc::new(RangeControl(inner))),
+            control: Some(Arc::new(RangeControl { inner, progress })),
         }))
     }
 }
@@ -185,6 +197,12 @@ impl Inner {
         })
     }
 
+    /// Replace (or drop) the sequential download and publish its progress.
+    fn set_live(&mut self, live: Option<Live>) {
+        *self.progress.lock().expect("progress lock") = live.as_ref().map(|l| l.progress.clone());
+        self.live = live; // dropping the old download cancels its read-ahead
+    }
+
     /// Get the sequential download to sit exactly at `self.pos`.
     fn align(&mut self) -> io::Result<()> {
         if let Some(live) = self.live.as_mut() {
@@ -206,8 +224,9 @@ impl Inner {
                 }
             }
         }
-        self.live = None; // dropping the old download cancels its read-ahead
-        self.live = Some(self.open_at(self.pos)?);
+        self.set_live(None);
+        let live = self.open_at(self.pos)?;
+        self.set_live(Some(live));
         Ok(())
     }
 }
@@ -262,26 +281,24 @@ impl Seek for RangeSource {
 
 impl SeekableControl for RangeControl {
     fn warm(&self) {
-        let mut inner = self.0.lock().expect("range source lock");
+        // Called once, right after the open and before decoding moves to its
+        // worker thread, so taking the source's lock cannot wait on a read.
+        let mut inner = self.inner.lock().expect("range source lock");
         if inner.live.is_some() {
             return;
         }
         let at = inner.pos.max(inner.head.len() as u64);
         if at < inner.total {
             match inner.open_at(at) {
-                Ok(live) => inner.live = Some(live),
+                Ok(live) => inner.set_live(Some(live)),
                 Err(e) => tracing::warn!(error = %e, "could not prefetch after the seek"),
             }
         }
     }
 
     fn progress(&self) -> Option<StreamProgress> {
-        self.0
-            .lock()
-            .expect("range source lock")
-            .live
-            .as_ref()
-            .map(|l| l.progress.clone())
+        // Never the source's own lock: that is held across network reads.
+        self.progress.lock().expect("progress lock").clone()
     }
 }
 
@@ -290,7 +307,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -304,8 +321,21 @@ mod tests {
         requests: Requests,
     }
 
+    /// After this many body bytes, a streaming request goes silent until released.
+    type Stall = Option<(usize, Arc<AtomicBool>)>;
+
     impl RangeServer {
         fn start(body: Vec<u8>, honour_range: bool) -> Self {
+            Self::start_with(body, honour_range, None)
+        }
+
+        /// A server whose streaming downloads (not the head) stall mid-body
+        /// until `release` is set: a network that dies.
+        fn start_stalling(body: Vec<u8>, after: usize, release: Arc<AtomicBool>) -> Self {
+            Self::start_with(body, true, Some((after, release)))
+        }
+
+        fn start_with(body: Vec<u8>, honour_range: bool, stall: Stall) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
             let addr = listener.local_addr().unwrap();
             let requests: Requests = Arc::default();
@@ -313,8 +343,8 @@ mod tests {
             thread::spawn(move || {
                 for conn in listener.incoming() {
                     let Ok(sock) = conn else { break };
-                    let (reqs, body) = (reqs.clone(), body.clone());
-                    thread::spawn(move || serve(sock, &body, honour_range, &reqs));
+                    let (reqs, body, stall) = (reqs.clone(), body.clone(), stall.clone());
+                    thread::spawn(move || serve(sock, &body, honour_range, &reqs, &stall));
                 }
             });
             Self { addr, requests }
@@ -350,6 +380,7 @@ mod tests {
         body: &[u8],
         honour_range: bool,
         reqs: &Mutex<Vec<(u64, Arc<AtomicUsize>)>>,
+        stall: &Stall,
     ) {
         let mut buf = [0u8; 4096];
         let n = sock.read(&mut buf).unwrap_or(0);
@@ -386,6 +417,13 @@ mod tests {
             return;
         }
         for chunk in slice.chunks(16 * 1024) {
+            if let Some((after, release)) = stall {
+                if from > 0 && sent.load(Ordering::SeqCst) >= *after {
+                    while !release.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(5)); // the network is down
+                    }
+                }
+            }
             if sock.write_all(chunk).is_err() {
                 return; // the client went away
             }
@@ -622,5 +660,40 @@ mod tests {
             .progress()
             .map(|p| p.offset > 0 && p.offset + p.content_length.unwrap_or(0) == total)
             .unwrap_or(false)
+    }
+
+    #[test]
+    fn progress_can_be_asked_for_while_a_read_is_stuck_on_a_dead_network() {
+        // The decode worker sits inside `read` while the network is down. The
+        // playback thread asks for progress on every snapshot; if that waited
+        // for the same lock the read holds, the stall would freeze the
+        // controls again (the very bug the decode worker exists to prevent).
+        let release = Arc::new(AtomicBool::new(false));
+        let server = RangeServer::start_stalling(file(2_000_000), 50_000, release.clone());
+        let sk = open(&server, 1 << 20).expect("seekable");
+        let control = sk.control.clone().expect("control");
+        let mut source = sk.source;
+        source.seek(SeekFrom::Start(HEAD_BYTES)).unwrap();
+        let reader = thread::spawn(move || {
+            let mut buf = vec![0u8; 400_000]; // more than the 50 KB that arrives
+            source.read_exact(&mut buf)
+        });
+        control.warm();
+        thread::sleep(Duration::from_millis(300)); // the reader is now blocked
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = control.clone();
+        thread::spawn(move || {
+            let _ = tx.send(c.progress().is_some());
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Ok(true),
+            "progress() was not blocked behind the stuck read"
+        );
+        release.store(true, Ordering::SeqCst);
+        reader
+            .join()
+            .unwrap()
+            .expect("the read completes once the network is back");
     }
 }

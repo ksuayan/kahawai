@@ -65,4 +65,18 @@ describe("ConnectionGauge", () => {
     expect(w.get('[data-testid="connection-gauge"]').attributes("data-health")).toBe("low");
     expect(w.get('[data-testid="connection-rate"]').text()).toBe("2.4 Mbit/s");
   });
+
+  it("says buffering, red and empty, when playback has run out of audio and is waiting on the network", async () => {
+    const w = await boot({ download_bps: 4_000_000, buffer_ahead_ms: 0, buffering: true });
+    const g = w.get('[data-testid="connection-gauge"]');
+    expect(g.attributes("data-health")).toBe("low");
+    expect(w.get('[data-testid="connection-rate"]').text()).toBe("Buffering…");
+    expect(w.get('[data-testid="connection-fill"]').attributes("style")).toContain("width: 0%");
+    expect(g.attributes("aria-label")).toBe("Connection: buffering, waiting for the server");
+  });
+
+  it("still shows while buffering even if no speed or buffer figure is known", async () => {
+    const w = await boot({ download_bps: null, buffer_ahead_ms: null, buffering: true });
+    expect(w.find('[data-testid="connection-gauge"]').exists()).toBe(true);
+  });
 });

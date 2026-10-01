@@ -1045,6 +1045,12 @@ impl LoudnessNorm {
 
     /// Gain in dB for this track: cached, else `scan()` once and cache.
     /// A failed or silent scan yields 0 dB (never blocks playback).
+    /// Whether this (track, format)'s levels are already cached, so no
+    /// pre-scan is needed.
+    pub fn has_levels(&self, track_id: i64, fmt: StreamFormat) -> bool {
+        self.levels.contains_key(&(track_id, fmt))
+    }
+
     /// The gain for a track, planned against its real peak and the EQ's
     /// worst-case boost so the result cannot clip. `scan` runs at most once
     /// per (track, format); the levels are cached, the gain is re-planned.

@@ -115,6 +115,8 @@ export interface PlayerState {
   buffer_ahead_ms?: number | null;
   /** The whole stream is already fetched (so a short buffer is just the track's end). */
   buffer_complete?: boolean;
+  /** Playback ran out of buffered audio and is waiting for the network. */
+  buffering?: boolean;
   /** Rate of the audio reaching the output (what the EQ is designed at); null when idle. */
   output_rate_hz?: number | null;
   /** What the analog stage is doing (plan, latency); null when off. */

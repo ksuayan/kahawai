@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -37,6 +38,7 @@ use crate::dsp::{
     headroom_guard, scan_track_levels, DspStage, EqBand, GainRamp, LookaheadLimiter, LoudnessMeter,
     LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET, EQ_PREAMP_RANGE_DB,
 };
+use crate::fader::AmpRamp;
 use crate::quality::{
     QualityMode, BLOCKER_ANALOG, BLOCKER_CROSSFEED, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS,
     BLOCKER_VOLUME,
@@ -46,6 +48,7 @@ use crate::rangesource::SeekableControl;
 use crate::resample::CubicResampler;
 use crate::sink::{AudioSink, OutputPath, PcmChunk};
 use crate::transport::{HttpTransport, StreamInfo, StreamOptions, StreamProgress, Transport};
+use crate::worker::{ChunkWorker, Polled};
 
 /// Frames decoded per pump iteration (~93 ms at 44.1 kHz).
 const CHUNK_FRAMES: usize = 4096;
@@ -190,6 +193,9 @@ pub struct PlayerSnapshot {
     /// of the track, not a slow connection.
     #[serde(default)]
     pub buffer_complete: bool,
+    /// Playback has run out of buffered audio and is waiting for the network.
+    #[serde(default)]
+    pub buffering: bool,
     /// Sample rate of the audio reaching the output (after any resampling);
     /// the rate the EQ is designed at. `None` when idle.
     #[serde(default)]
@@ -242,6 +248,7 @@ impl Default for PlayerSnapshot {
             download_bps: None,
             buffer_ahead_ms: None,
             buffer_complete: false,
+            buffering: false,
             output_rate_hz: None,
             analog_plan: None,
             analog_level: None,
@@ -328,7 +335,11 @@ struct PcmStream {
     gapless_mode: Option<String>,
     format_used: StreamFormat,
     chain: Option<String>,
-    decoder: StreamDecoder,
+    /// Decodes on its own thread (the network read can block); the playback
+    /// thread only polls it. See [`crate::worker`].
+    worker: ChunkWorker<Vec<f32>>,
+    /// Container streams the decoder has finished (chained gapless).
+    streams_completed: Arc<AtomicUsize>,
     spec: DecodedSpec,
     resampler: Option<CubicResampler>,
     /// Rate of the frames handed to the sink (post-resample).
@@ -375,7 +386,10 @@ struct DopPlayback {
     seg_frames: Vec<u64>,
     gapless_mode: Option<String>,
     chain: Option<String>,
-    stream: DopStream,
+    /// Reads the DoP stream on its own thread, like [`PcmStream::worker`].
+    worker: ChunkWorker<Vec<u8>>,
+    /// WAV segments the reader has finished (chained gapless).
+    segments_completed: Arc<AtomicUsize>,
     spec: DopSpec,
     /// DoP frames written to the sink.
     pumped_frames: u64,
@@ -556,11 +570,19 @@ impl ActiveStream {
                 Some("single-session") => a.segments.len(),
                 // One container stream per segment; a broken chain falls back
                 // to sequential requests for whatever didn't play.
-                Some("chained") => a.decoder.streams_completed.min(a.segments.len()).max(1),
+                Some("chained") => a
+                    .streams_completed
+                    .load(AtomicOrdering::Relaxed)
+                    .min(a.segments.len())
+                    .max(1),
                 _ => 1,
             },
             ActiveStream::Dop(a) => match a.gapless_mode.as_deref() {
-                Some("chained") => a.stream.segments_completed.min(a.segments.len()).max(1),
+                Some("chained") => a
+                    .segments_completed
+                    .load(AtomicOrdering::Relaxed)
+                    .min(a.segments.len())
+                    .max(1),
                 // DoP single-session is one WAV per response in practice;
                 // treat like the PCM rule for uniformity.
                 Some("single-session") => a.segments.len(),
@@ -578,9 +600,26 @@ impl ActiveStream {
 /// from the playback thread; [`EngineController`] enforces that.
 pub struct Player {
     sink: Box<dyn AudioSink>,
-    transport: Box<dyn Transport>,
+    /// Shared so the open thread can use it (see [`PendingOpen`]).
+    transport: Arc<dyn Transport>,
     queue: Queue,
     status: PlayerStatus,
+    /// When the playing stream ran out of data with the network stalled (the
+    /// player is "buffering"); `None` while data is flowing.
+    starved_since: Option<Instant>,
+    /// How long a starved stream is waited for before giving up.
+    stall_timeout: Duration,
+    /// The network part of an open that is still running off the playback
+    /// thread (the player is `Loading`).
+    pending_open: Option<PendingOpen>,
+    /// What to do once the open in flight settles (see [`OpenFollowUp`]).
+    follow_up: Option<OpenFollowUp>,
+    /// How long `open_current` waits inline for an open before the player
+    /// carries on in `Loading` (commands are served meanwhile).
+    open_wait: Duration,
+    /// The stream that just opened chains audio for a track that is no longer
+    /// next (the queue changed while it opened), so it must be re-opened.
+    chain_stale: bool,
     global_format: Option<StreamFormat>,
     /// Client DSD preference (Settings → DSD handling); consulted by
     /// [`resolve_format`] when no explicit override applies.
@@ -609,6 +648,9 @@ pub struct Player {
     /// [`Player::set_eq_preamp`]).
     eq_preamp_db: f32,
     preamp_ramp: GainRamp,
+    /// Moves the volume to `volume` per frame, so a change never lands as a
+    /// step (see [`AmpRamp`]).
+    volume_ramp: AmpRamp,
     active: Option<ActiveStream>,
     error: Option<String>,
     notice: Option<String>,
@@ -659,9 +701,15 @@ impl Player {
     pub fn new(sink: Box<dyn AudioSink>, transport: Box<dyn Transport>) -> Self {
         Self {
             sink,
-            transport,
+            transport: Arc::from(transport),
             queue: Queue::new(),
             status: PlayerStatus::Stopped,
+            starved_since: None,
+            stall_timeout: STALL_TIMEOUT,
+            pending_open: None,
+            follow_up: None,
+            open_wait: OPEN_FAST_WAIT,
+            chain_stale: false,
             global_format: None,
             dsd_story: DsdStory::default(),
             dsd_devices: Vec::new(),
@@ -675,6 +723,7 @@ impl Player {
             volume: 1.0,
             eq_preamp_db: 0.0,
             preamp_ramp: GainRamp::new(2205),
+            volume_ramp: AmpRamp::new(441),
             active: None,
             error: None,
             notice: None,
@@ -1010,6 +1059,7 @@ impl Player {
     pub fn pause(&mut self) {
         if self.status == PlayerStatus::Playing {
             self.status = PlayerStatus::Paused;
+            self.starved_since = None;
             let _ = self.sink.pause();
             self.persist_queue();
         }
@@ -1019,6 +1069,7 @@ impl Player {
         match self.status {
             PlayerStatus::Paused => {
                 self.status = PlayerStatus::Playing;
+                self.starved_since = None;
                 let _ = self.sink.play();
             }
             PlayerStatus::Stopped if self.queue.current().is_some() => {
@@ -1039,6 +1090,9 @@ impl Player {
 
     pub fn stop(&mut self) {
         self.skip_exclusive_track = None;
+        self.pending_open = None;
+        self.follow_up = None;
+        self.starved_since = None;
         self.status = PlayerStatus::Stopped;
         self.active = None;
         self.resume_at_ms = None;
@@ -1098,32 +1152,15 @@ impl Player {
         let paused = self.status == PlayerStatus::Paused;
         let before = self.position_ms();
         self.error = None;
-        self.open_current(Some(target));
         // A seek that cannot be served (server hiccup, dropped connection)
-        // must not end the song: carry on from where it was, and say so.
-        if self.status == PlayerStatus::Stopped
-            && self.error.is_some()
-            && target != before
-            && self.queue.current().is_some()
-        {
-            let failure = self.error.take();
-            self.open_current(Some(before));
-            if self.error.is_none() {
-                let secs = before / 1000;
-                self.add_notice(format!(
-                    "Couldn't seek there; carried on from {}:{:02}.",
-                    secs / 60,
-                    secs % 60
-                ));
-            } else {
-                // Recovery failed too: the original failure is the reason.
-                self.error = failure;
-            }
-        }
-        if paused && self.status == PlayerStatus::Playing {
-            self.status = PlayerStatus::Paused;
-            let _ = self.sink.pause();
-        }
+        // must not end the song: once the open settles, `settle_open` carries
+        // on from where it was and says so. A paused player stays paused.
+        self.follow_up = Some(OpenFollowUp {
+            paused,
+            recover_to: (target != before).then_some(before),
+            recovering: None,
+        });
+        self.open_current_inner(Some(target));
     }
 
     /// After the queue changed under a playing stream: if the server already
@@ -1164,12 +1201,12 @@ impl Player {
             Some(Removed::Current) => {
                 self.persist_queue();
                 if self.queue.current().is_some() {
-                    let paused = self.status == PlayerStatus::Paused;
-                    self.open_current(None);
-                    if paused && self.status == PlayerStatus::Playing {
-                        self.status = PlayerStatus::Paused;
-                        let _ = self.sink.pause();
-                    }
+                    self.follow_up = Some(OpenFollowUp {
+                        paused: self.status == PlayerStatus::Paused,
+                        recover_to: None,
+                        recovering: None,
+                    });
+                    self.open_current_inner(None);
                 } else {
                     self.stop();
                 }
@@ -1375,13 +1412,23 @@ impl Player {
 
     /// True when the playback thread should call [`pump`](Self::pump).
     pub fn wants_pump(&self) -> bool {
-        self.status == PlayerStatus::Playing
+        self.status == PlayerStatus::Playing || self.pending_open.is_some()
     }
 
     // -- streaming ---------------------------------------------------------
 
     /// Open the current queue item. `seek` = scrub target in ms.
     fn open_current(&mut self, seek: Option<u64>) {
+        self.follow_up = None;
+        self.open_current_inner(seek);
+    }
+
+    /// The open itself. Callers that want something done once it settles set
+    /// `follow_up` first (and go through here, not [`open_current`](Self::open_current)).
+    fn open_current_inner(&mut self, seek: Option<u64>) {
+        self.chain_stale = false;
+        self.pending_open = None; // a newer open supersedes one still in flight
+        self.starved_since = None;
         self.resume_at_ms = None; // a restored position only applies to the first resume
         let track = match self.queue.current().cloned() {
             Some(t) => t,
@@ -1432,45 +1479,6 @@ impl Player {
         self.open_pcm(&track, seek, fmt);
     }
 
-    /// Open a passthrough track at `ms` through a seekable source, if the
-    /// transport offers one and the container can seek. `None` means "use the
-    /// forward-only path"; this never fails the track.
-    fn open_seeked_passthrough(
-        &self,
-        track: &Track,
-        opts: &StreamOptions,
-        ms: u64,
-    ) -> Option<(StreamInfo, StreamDecoder, u64, Option<ProgressFeed>)> {
-        let sk = match self.transport.open_seekable(track.id, opts) {
-            Ok(Some(sk)) => sk,
-            Ok(None) => return None,
-            Err(e) => {
-                tracing::warn!(error = %e, "seekable open failed; streaming from the start");
-                return None;
-            }
-        };
-        let (decoder, skip) = match StreamDecoder::new_seekable(sk.source, sk.byte_len, ms) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "seeking in the container failed; streaming from the start");
-                return None;
-            }
-        };
-        if let Some(control) = &sk.control {
-            control.warm();
-        }
-        let feed = sk.control.map(ProgressFeed::Seekable);
-        let info = StreamInfo {
-            reader: Box::new(std::io::empty()),
-            content_type: sk.content_type,
-            chain: sk.chain,
-            gapless_next: None,
-            gapless_mode: None,
-            progress: None,
-        };
-        Some((info, decoder, skip, feed))
-    }
-
     /// Start DoP for `track`, or say why it cannot. On `Err` the sink has
     /// been released and nothing is playing.
     fn try_dop(&mut self, track: &Track, seek: Option<u64>) -> Result<(), String> {
@@ -1513,31 +1521,36 @@ impl Player {
                 return Err("your DAC doesn't accept the sample rate this DSD file needs".into())
             }
         };
-        let next_id = self.queue.peek_next().map(|t| t.id);
-        let opts = StreamOptions {
-            format: Some(StreamFormat::Dop),
-            seek_ms: seek,
-            next: next_id,
-            range_start: None,
+        let open = DopOpen {
+            track: track.clone(),
+            seek,
+            next_id: self.queue.peek_next().map(|t| t.id),
+            dop_rate,
+            established: self.dop_spec,
         };
-        let info = match self.transport.open_stream(track.id, &opts) {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::warn!(error = %e, "DoP stream request failed");
-                return Err("the server couldn't provide the DSD stream".into());
-            }
-        };
+        // The request and the header read can wait on the network: do them off
+        // the playback thread. Failures come back through `finish_open`, which
+        // owns the fall-back to FLAC.
+        let job = open.clone();
+        self.start_open(OpenKind::Dop(open), seek, move |transport| {
+            OpenResult::Dop(run_dop_open(transport, &job))
+        });
+        Ok(())
+    }
+
+    /// The engine-thread half of a DoP open, once the stream is readable: the
+    /// segments, the sink, the playback state. On `Err` the caller falls back.
+    fn finish_dop(&mut self, open: DopOpen, opened: OpenedDop) -> Result<(), String> {
+        let DopOpen {
+            track,
+            seek,
+            next_id,
+            ..
+        } = open;
+        let track = &track;
+        let OpenedDop { info, stream } = opened;
         let gapless_mode = info.gapless_mode.clone();
         let progress = info.progress.clone().map(ProgressFeed::Response);
-        let chained = gapless_mode.as_deref() == Some("chained");
-        let established = self.dop_spec;
-        let stream = match DopStream::new(info.reader, dop_rate, established, chained) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "DoP stream unreadable");
-                return Err("the DSD stream couldn't be read".into());
-            }
-        };
         let spec = stream.spec();
         // Remember the established format for seek continuations.
         self.dop_spec = Some(spec);
@@ -1546,12 +1559,16 @@ impl Player {
         let mut segments = vec![track.clone()];
         let mut seg_frames = vec![expected_frames(track, spec.dop_rate_hz)];
         if gapless_mode.is_some() {
-            if let Some(next) = self.queue.peek_next().cloned() {
-                // Sanity: the chained id must be the one we asked for.
-                if Some(next.id) == info.gapless_next.or(next_id) {
+            // Sanity: the chained id must be the one we asked for. If it is not,
+            // the queue changed while the open was in flight and the response
+            // carries audio for a track that is no longer next.
+            let asked = info.gapless_next.or(next_id);
+            match self.queue.peek_next().cloned() {
+                Some(next) if Some(next.id) == asked => {
                     seg_frames.push(expected_frames(&next, spec.dop_rate_hz));
                     segments.push(next);
                 }
+                _ => self.chain_stale = true,
             }
         }
 
@@ -1567,13 +1584,15 @@ impl Player {
         }
 
         let base_frames = seek.unwrap_or(0) * spec.dop_rate_hz as u64 / 1000;
+        let (worker, segments_completed) = spawn_dop_worker(stream, spec.frame_bytes());
         self.active = Some(ActiveStream::Dop(DopPlayback {
             segments,
             seg_idx: 0,
             seg_frames,
             gapless_mode,
             chain: info.chain,
-            stream,
+            worker,
+            segments_completed,
             spec,
             pumped_frames: 0,
             base_frames,
@@ -1599,67 +1618,63 @@ impl Player {
                 .filter(|next| can_chain(track, next, fmt))
                 .map(|t| t.id)
         };
-
+        // Passthrough seeks go through a seekable Range source, or failing that
+        // decode-skip from the start; everything else uses the server's
+        // sample-exact ?seek_ms=.
+        let passthrough_seek = seek.is_some() && fmt == StreamFormat::Passthrough;
         // Loudness pre-scan (v1): one extra deterministic stream per
         // first-play of a track; the gain is cached by (track, format).
         // Cost: double LAN bandwidth + a second server transcode for
         // uncached tracks. DoP never reaches this path.
+        let scan = self.loudness.enabled() && !want_bp && !self.loudness.has_levels(track.id, fmt);
+        let open = PcmOpen {
+            track: track.clone(),
+            seek,
+            fmt,
+            want_bp,
+            next_id,
+            passthrough_seek,
+        };
+        // Everything that waits on the network (the pre-scan, the request, the
+        // container probe) runs off the playback thread, so a dead network here
+        // cannot hold up pause, seek, stop or quitting.
+        let job = open.clone();
+        self.start_open(OpenKind::Pcm(open), seek, move |transport| {
+            OpenResult::Pcm(run_pcm_open(transport, &job, scan))
+        });
+    }
+
+    /// The engine-thread half of a PCM open: the network part has produced a
+    /// decoder; this sets up the sink, the DSP chain and the playback state.
+    fn finish_pcm(&mut self, open: PcmOpen, opened: OpenedPcm) {
+        let PcmOpen {
+            track,
+            seek,
+            fmt,
+            want_bp,
+            next_id,
+            passthrough_seek,
+        } = open;
+        let track = &track;
+        let OpenedPcm {
+            info,
+            decoder,
+            skip: seek_skip_frames,
+            feed,
+            mut levels,
+        } = opened;
+        // Plan the gain against the track's peak and the EQ's worst-case boost,
+        // so the result cannot clip at the output. The pre-scan (if one was
+        // needed) already ran with the open.
         let loudness_gain_db = if self.loudness.enabled() && !want_bp {
-            let track_id = track.id;
-            let transport = &*self.transport;
-            // Plan the gain against the track's peak and the EQ's worst-case
-            // boost, so the result cannot clip at the output.
             let eq_boost = self.eq_boost_db();
-            self.loudness.gain_for_levels(track_id, fmt, eq_boost, || {
-                scan_track_levels(transport, track_id, fmt)
+            self.loudness.gain_for_levels(track.id, fmt, eq_boost, || {
+                levels.take().unwrap_or(Ok(None))
             })
         } else {
             0.0
         };
         self.gain_ramp.retarget(loudness_gain_db);
-
-        // Passthrough seeks go through a seekable Range source (below), or
-        // failing that decode-skip from the start; everything else uses the
-        // server's sample-exact ?seek_ms=.
-        let passthrough_seek = seek.is_some() && fmt == StreamFormat::Passthrough;
-        let opts = StreamOptions {
-            format: Some(fmt),
-            seek_ms: if passthrough_seek { None } else { seek },
-            next: next_id,
-            range_start: None,
-        };
-        // A passthrough seek first tries a seekable (HTTP Range) source, so the
-        // container's own index finds the spot and only the bytes from there are
-        // fetched; failing that, the whole file streams and frames are skipped.
-        let seeked = match (passthrough_seek, seek) {
-            (true, Some(ms)) => self.open_seeked_passthrough(track, &opts, ms),
-            _ => None,
-        };
-        let (info, decoder, seek_skip_frames, feed) = match seeked {
-            Some((info, decoder, skip, feed)) => (info, decoder, Some(skip), feed),
-            None => {
-                let mut info = match self.transport.open_stream(track.id, &opts) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "stream request failed");
-                        self.fail("Couldn't get the stream from the server.");
-                        return;
-                    }
-                };
-                let expect_chained = info.gapless_mode.as_deref() == Some("chained");
-                let reader = std::mem::replace(&mut info.reader, Box::new(std::io::empty()));
-                let decoder = match StreamDecoder::new(reader, expect_chained) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "decode failed");
-                        self.fail("Couldn't decode this file.");
-                        return;
-                    }
-                };
-                let feed = info.progress.clone().map(ProgressFeed::Response);
-                (info, decoder, None, feed)
-            }
-        };
         let gapless_mode = info.gapless_mode.clone();
         let spec = decoder.spec();
 
@@ -1668,12 +1683,16 @@ impl Player {
         let mut segments = vec![track.clone()];
         let mut seg_frames = vec![expected_frames(track, spec.sample_rate)];
         if gapless_mode.is_some() {
-            if let Some(next) = self.queue.peek_next().cloned() {
-                // Sanity: the chained id must be the one we asked for.
-                if Some(next.id) == info.gapless_next.or(next_id) {
+            // Sanity: the chained id must be the one we asked for. If it is not,
+            // the queue changed while the open was in flight and the response
+            // carries audio for a track that is no longer next.
+            let asked = info.gapless_next.or(next_id);
+            match self.queue.peek_next().cloned() {
+                Some(next) if Some(next.id) == asked => {
                     seg_frames.push(expected_frames(&next, spec.sample_rate));
                     segments.push(next);
                 }
+                _ => self.chain_stale = true,
             }
         }
 
@@ -1786,6 +1805,12 @@ impl Player {
         // The EQ runs on what the sink receives (after any resampling), so
         // it is designed at the sink rate, not the file's.
         self.preamp_ramp.snap(self.preamp_db_in_effect());
+        self.volume_ramp.set_ramp_frames((sink_rate / 100).max(64));
+        self.volume_ramp.snap(if self.volume < 0.999 {
+            self.volume
+        } else {
+            1.0
+        });
         self.eq.set_sample_rate(sink_rate);
         self.crossfeed.prepare(sink_rate);
         self.crossfeed.reset();
@@ -1808,6 +1833,7 @@ impl Player {
             0
         };
 
+        let (worker, streams_completed) = spawn_pcm_worker(decoder, spec.channels as usize);
         self.active = Some(ActiveStream::Pcm(PcmStream {
             segments,
             seg_idx: 0,
@@ -1815,7 +1841,8 @@ impl Player {
             gapless_mode,
             format_used: fmt,
             chain: info.chain,
-            decoder,
+            worker,
+            streams_completed,
             spec,
             resampler,
             sink_rate,
@@ -1829,9 +1856,165 @@ impl Player {
         self.status = PlayerStatus::Playing;
     }
 
-    /// Decode one chunk and push it to the sink. Call in a loop while
-    /// [`wants_pump`](Self::wants_pump).
+    /// The stream has nothing decoded to play and the network is the reason
+    /// (the worker is waiting on a read). The playback thread is not blocked,
+    /// so commands are still served; this only tracks how long it has been
+    /// and gives up after `stall_timeout` rather than waiting for ever.
+    fn note_starved(&mut self) {
+        let since = *self.starved_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= self.stall_timeout {
+            tracing::warn!(waited = ?since.elapsed(), "stream starved; giving up");
+            self.fail("The connection to the server was lost.");
+        }
+    }
+
+    /// Run the network part of an open on its own thread and wait for it a
+    /// moment. If it finishes within `open_wait` the open completes right here;
+    /// otherwise the player stays `Loading` and `pump` collects the result, so
+    /// the playback thread is never held up by the network.
+    fn start_open<F>(&mut self, kind: OpenKind, seek: Option<u64>, job: F)
+    where
+        F: FnOnce(&dyn Transport) -> OpenResult + Send + 'static,
+    {
+        let transport = self.transport.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("stream-open".into())
+            .spawn(move || {
+                let _ = tx.send(job(&*transport)); // nobody listening = superseded
+            })
+            .expect("spawn stream-open thread");
+        self.pending_open = Some(PendingOpen {
+            rx,
+            kind,
+            started: Instant::now(),
+        });
+        // Until it finishes, the old stream is gone and the playhead sits at
+        // the target (this is also what a quit would save).
+        self.active = None;
+        self.resume_at_ms = seek;
+        self.poll_open(self.open_wait);
+    }
+
+    /// Collect the open in flight if it is done, waiting at most `wait`; give up
+    /// on it after `stall_timeout`.
+    fn poll_open(&mut self, wait: Duration) {
+        let Some(pending) = self.pending_open.as_ref() else {
+            return;
+        };
+        match pending.rx.recv_timeout(wait) {
+            Ok(result) => {
+                if let Some(pending) = self.pending_open.take() {
+                    self.finish_open(pending.kind, result);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if pending.started.elapsed() >= self.stall_timeout {
+                    tracing::warn!("stream open timed out; giving up");
+                    self.fail("Couldn't reach the server.");
+                    self.settle_open();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.fail("Couldn't get the stream from the server.");
+                self.settle_open();
+            }
+        }
+    }
+
+    /// The network part is done: set the stream up on this thread.
+    fn finish_open(&mut self, kind: OpenKind, result: OpenResult) {
+        self.resume_at_ms = None;
+        match (kind, result) {
+            (OpenKind::Pcm(open), OpenResult::Pcm(Ok(opened))) => self.finish_pcm(open, opened),
+            (OpenKind::Pcm(_), OpenResult::Pcm(Err(failure))) => self.fail(match failure {
+                OpenFailure::Stream => "Couldn't get the stream from the server.",
+                OpenFailure::Decode => "Couldn't decode this file.",
+            }),
+            (OpenKind::Dop(open), OpenResult::Dop(Ok(opened))) => {
+                let (track, seek) = (open.track.clone(), open.seek);
+                if let Err(why) = self.finish_dop(open, opened) {
+                    self.dop_unavailable(&track, seek, why);
+                }
+            }
+            (OpenKind::Dop(open), OpenResult::Dop(Err(why))) => {
+                self.dop_unavailable(&open.track, open.seek, why);
+            }
+            _ => self.fail("Couldn't get the stream from the server."),
+        }
+        if self.pending_open.is_none() {
+            self.settle_open();
+            // Re-open once, at the current position, with the right next track.
+            if std::mem::take(&mut self.chain_stale) {
+                self.reopen_live();
+            }
+        }
+    }
+
+    /// DoP could not start: say why and play the track as FLAC instead.
+    /// Playback never fails outright for a device that can do PCM.
+    fn dop_unavailable(&mut self, track: &Track, seek: Option<u64>, why: String) {
+        tracing::warn!(track_id = track.id, %why, "DoP unavailable; falling back to FLAC");
+        let _ = self.sink.stop();
+        self.add_notice(format!("Played as PCM (FLAC): {why}."));
+        self.active = None;
+        self.sink.select_output_path(OutputPath::Pcm);
+        self.output_path = OutputPath::Pcm;
+        self.open_pcm(track, seek, StreamFormat::Flac);
+    }
+
+    /// An open has finished for good (no further one is in flight): do what
+    /// whoever asked for it wanted done afterwards.
+    fn settle_open(&mut self) {
+        let Some(mut follow) = self.follow_up.take() else {
+            return;
+        };
+        let failed = self.status == PlayerStatus::Stopped && self.error.is_some();
+        if failed && follow.recovering.is_none() {
+            // A seek that cannot be served must not end the song: carry on from
+            // where it was (the fall-back open settles through here again).
+            if let Some(before) = follow.recover_to.take() {
+                if self.queue.current().is_some() {
+                    follow.recovering = self.error.take();
+                    self.follow_up = Some(follow);
+                    self.open_current_inner(Some(before));
+                    return;
+                }
+            }
+        }
+        if let Some(original) = follow.recovering.take() {
+            if failed {
+                // Recovery failed too: the original failure is the reason.
+                self.error = Some(original);
+            } else if self.status == PlayerStatus::Playing {
+                let secs = follow.recover_to.unwrap_or(0) / 1000;
+                self.add_notice(format!(
+                    "Couldn't seek there; carried on from {}:{:02}.",
+                    secs / 60,
+                    secs % 60
+                ));
+            }
+        }
+        if follow.paused && self.status == PlayerStatus::Playing {
+            self.status = PlayerStatus::Paused;
+            let _ = self.sink.pause();
+        }
+    }
+
+    /// How long a starved stream is waited for before playback stops with an
+    /// error (30 s by default). Exposed for tests.
+    pub fn set_stall_timeout(&mut self, d: Duration) {
+        self.stall_timeout = d;
+    }
+
+    /// Take one decoded chunk and push it to the sink. Call in a loop while
+    /// [`wants_pump`](Self::wants_pump). Never blocks on the network: the
+    /// decoder runs on a worker thread and this only polls it.
     pub fn pump(&mut self) {
+        if self.pending_open.is_some() {
+            self.poll_open(POLL_WAIT);
+            return;
+        }
         if self.status != PlayerStatus::Playing {
             return;
         }
@@ -1850,26 +2033,35 @@ impl Player {
 
     /// PCM pump: decode -> EQ -> loudness gain ramp -> volume -> sink.
     fn pump_pcm(&mut self) {
-        // Decode one chunk.
+        // Take one decoded chunk from the worker.
         let channels = match self.active.as_ref() {
             Some(ActiveStream::Pcm(a)) => a.spec.channels as usize,
             _ => return,
         };
-        let mut pcm = vec![0.0f32; CHUNK_FRAMES * channels];
-        let decoded_frames = {
-            let active = match self.active.as_mut() {
-                Some(ActiveStream::Pcm(a)) => a,
-                _ => return,
-            };
-            match active.decoder.decode_interleaved(&mut pcm) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(error = %e, "decode failed");
-                    self.fail("Couldn't decode this file.");
-                    return;
-                }
+        let polled = match self.active.as_mut() {
+            Some(ActiveStream::Pcm(a)) => a.worker.poll(POLL_WAIT),
+            _ => return,
+        };
+        let pcm = match polled {
+            Polled::Ready(chunk) => {
+                self.starved_since = None;
+                chunk
+            }
+            Polled::Empty => {
+                self.note_starved();
+                return;
+            }
+            Polled::Ended => {
+                self.starved_since = None;
+                Vec::new()
+            }
+            Polled::Failed(e) => {
+                tracing::warn!(error = %e, "decode failed");
+                self.fail("Couldn't decode this file.");
+                return;
             }
         };
+        let decoded_frames = pcm.len() / channels.max(1);
         if decoded_frames == 0 {
             // A response that never yields audio is skipped, but a streak
             // longer than the queue means every track is poison - fail
@@ -1963,12 +2155,14 @@ impl Player {
         let peak = chunk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         self.peak_out = peak.max(self.peak_out * 0.5f32.powf(dt));
         self.gain_ramp.apply(&mut chunk);
-        let vol = self.volume;
-        if vol < 0.999 {
-            for s in chunk.iter_mut() {
-                *s *= vol;
-            }
-        }
+        // Volume, ramped per frame (about 10 ms) so dragging the slider does not
+        // zipper. At (or within 0.1 % of) full volume this is a bit-exact no-op.
+        self.volume_ramp.set_target(if self.volume < 0.999 {
+            self.volume
+        } else {
+            1.0
+        });
+        self.volume_ramp.apply(&mut chunk, channels);
         // EQ boosts and loudness gain can lift peaks past full scale, which the
         // output device would hard-clip. The limiter ducks ahead of a peak so
         // the ceiling is reached transparently; the guard is a cheap backstop.
@@ -2030,22 +2224,32 @@ impl Player {
             Some(ActiveStream::Dop(a)) => a.spec.frame_bytes(),
             _ => return,
         };
-        // Whole frames only: the sink must never see a partial DoP frame.
-        let mut buf = vec![0u8; 4096 * frame_bytes];
-        let n = {
-            let active = match self.active.as_mut() {
-                Some(ActiveStream::Dop(a)) => a,
-                _ => return,
-            };
-            match active.stream.read_frames(&mut buf) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(error = %e, "DoP read failed");
-                    self.fail("Couldn't read the DSD stream.");
-                    return;
-                }
+        // Whole frames only: the sink must never see a partial DoP frame (the
+        // worker's reader only ever returns whole frames).
+        let polled = match self.active.as_mut() {
+            Some(ActiveStream::Dop(a)) => a.worker.poll(POLL_WAIT),
+            _ => return,
+        };
+        let buf = match polled {
+            Polled::Ready(chunk) => {
+                self.starved_since = None;
+                chunk
+            }
+            Polled::Empty => {
+                self.note_starved();
+                return;
+            }
+            Polled::Ended => {
+                self.starved_since = None;
+                Vec::new()
+            }
+            Polled::Failed(e) => {
+                tracing::warn!(error = %e, "DoP read failed");
+                self.fail("Couldn't read the DSD stream.");
+                return;
             }
         };
+        let n = buf.len();
         if n == 0 {
             let never_produced =
                 matches!(self.active.as_ref(), Some(ActiveStream::Dop(a)) if a.pumped_frames == 0);
@@ -2130,6 +2334,8 @@ impl Player {
     }
 
     fn fail(&mut self, msg: &str) {
+        self.pending_open = None;
+        self.starved_since = None;
         self.error = Some(msg.to_string());
         self.status = PlayerStatus::Stopped;
         self.active = None;
@@ -2184,6 +2390,7 @@ impl Player {
             download_bps: net.0,
             buffer_ahead_ms: net.1,
             buffer_complete: net.2,
+            buffering: self.starved_since.is_some() && self.status == PlayerStatus::Playing,
             output_rate_hz,
             analog_plan: if self.active.is_some() && self.output_path == OutputPath::Pcm {
                 self.analog.status().map(|s| s.describe())
@@ -2988,6 +3195,245 @@ fn estimate_ahead_ms(
         _ => return None,
     };
     Some((queued as f64 / bytes_per_ms) as u64)
+}
+
+/// How long a starved stream is waited for before giving up.
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a pump waits for the decode worker's next chunk. Short, because
+/// the same thread serves commands: while the network is stalled a pause, seek
+/// or stop is answered within about this long.
+const POLL_WAIT: Duration = Duration::from_millis(25);
+
+/// Decoded chunks the worker may run ahead of the playback thread.
+const DECODE_DEPTH: usize = 8;
+
+/// Run a decoder on its own thread, producing `CHUNK_FRAMES`-frame chunks of
+/// interleaved `f32`. Also returns the live count of container streams it has
+/// finished (for chained gapless).
+fn spawn_pcm_worker(
+    mut decoder: StreamDecoder,
+    channels: usize,
+) -> (ChunkWorker<Vec<f32>>, Arc<AtomicUsize>) {
+    let channels = channels.max(1);
+    let completed = Arc::new(AtomicUsize::new(decoder.streams_completed));
+    let shared = completed.clone();
+    let worker = ChunkWorker::spawn(DECODE_DEPTH, move || {
+        let mut pcm = vec![0.0f32; CHUNK_FRAMES * channels];
+        let frames = decoder.decode_interleaved(&mut pcm)?;
+        shared.store(decoder.streams_completed, AtomicOrdering::Relaxed);
+        if frames == 0 {
+            return Ok(None); // fully consumed
+        }
+        pcm.truncate(frames * channels);
+        Ok(Some(pcm))
+    });
+    (worker, completed)
+}
+
+/// The same for a DoP stream: whole-frame byte chunks.
+fn spawn_dop_worker(
+    mut stream: DopStream,
+    frame_bytes: usize,
+) -> (ChunkWorker<Vec<u8>>, Arc<AtomicUsize>) {
+    let completed = Arc::new(AtomicUsize::new(stream.segments_completed));
+    let shared = completed.clone();
+    let worker = ChunkWorker::spawn(DECODE_DEPTH, move || {
+        let mut buf = vec![0u8; 4096 * frame_bytes];
+        let n = stream.read_frames(&mut buf)?;
+        shared.store(stream.segments_completed, AtomicOrdering::Relaxed);
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.truncate(n);
+        Ok(Some(buf))
+    });
+    (worker, completed)
+}
+
+/// How long `open_current` waits inline for the network part of an open. An
+/// open that finishes in this time (every normal one) completes before the call
+/// returns; a slower one leaves the player `Loading` and is polled by `pump`, so
+/// commands are served while it waits.
+const OPEN_FAST_WAIT: Duration = Duration::from_millis(150);
+
+/// What an open is for; kept while its network part runs on another thread.
+enum OpenKind {
+    Pcm(PcmOpen),
+    Dop(DopOpen),
+}
+
+#[derive(Clone)]
+struct PcmOpen {
+    track: Track,
+    seek: Option<u64>,
+    fmt: StreamFormat,
+    want_bp: bool,
+    next_id: Option<i64>,
+    passthrough_seek: bool,
+}
+
+#[derive(Clone)]
+struct DopOpen {
+    track: Track,
+    seek: Option<u64>,
+    next_id: Option<i64>,
+    dop_rate: u32,
+    established: Option<DopSpec>,
+}
+
+/// An open whose network part is running off the playback thread.
+struct PendingOpen {
+    rx: mpsc::Receiver<OpenResult>,
+    kind: OpenKind,
+    started: Instant,
+}
+
+enum OpenResult {
+    Pcm(Result<OpenedPcm, OpenFailure>),
+    /// `Err` is the reason DoP could not start, for the fall-back notice.
+    Dop(Result<OpenedDop, String>),
+}
+
+/// Why a PCM open failed, as the message the user sees.
+enum OpenFailure {
+    Stream,
+    Decode,
+}
+
+struct OpenedPcm {
+    info: StreamInfo,
+    decoder: StreamDecoder,
+    /// Frames to drop after a seekable open (`None` = decide from the target).
+    skip: Option<u64>,
+    feed: Option<ProgressFeed>,
+    /// The loudness pre-scan result, when one was run with the open.
+    levels: Option<Result<Option<(f32, f32)>, MusicError>>,
+}
+
+struct OpenedDop {
+    info: StreamInfo,
+    stream: DopStream,
+}
+
+/// What to do when an open settles, set by whatever started it.
+struct OpenFollowUp {
+    /// The player was paused: stay paused once playing again.
+    paused: bool,
+    /// A seek that fails to open falls back to this position.
+    recover_to: Option<u64>,
+    /// Set while that fall-back open runs: the failure that caused it.
+    recovering: Option<String>,
+}
+
+/// The network-bound half of a PCM open. Runs on the open thread.
+fn run_pcm_open(
+    transport: &dyn Transport,
+    open: &PcmOpen,
+    scan: bool,
+) -> Result<OpenedPcm, OpenFailure> {
+    let levels = scan.then(|| scan_track_levels(transport, open.track.id, open.fmt));
+    let opts = StreamOptions {
+        format: Some(open.fmt),
+        seek_ms: if open.passthrough_seek {
+            None
+        } else {
+            open.seek
+        },
+        next: open.next_id,
+        range_start: None,
+    };
+    // A passthrough seek first tries a seekable (HTTP Range) source, so the
+    // container's own index finds the spot and only the bytes from there are
+    // fetched; failing that, the whole file streams and frames are skipped.
+    let seeked = match (open.passthrough_seek, open.seek) {
+        (true, Some(ms)) => open_seeked_passthrough(transport, &open.track, &opts, ms),
+        _ => None,
+    };
+    let (info, decoder, skip, feed) = match seeked {
+        Some((info, decoder, skip, feed)) => (info, decoder, Some(skip), feed),
+        None => {
+            let mut info = transport.open_stream(open.track.id, &opts).map_err(|e| {
+                tracing::warn!(error = %e, "stream request failed");
+                OpenFailure::Stream
+            })?;
+            let expect_chained = info.gapless_mode.as_deref() == Some("chained");
+            let reader = std::mem::replace(&mut info.reader, Box::new(std::io::empty()));
+            let decoder = StreamDecoder::new(reader, expect_chained).map_err(|e| {
+                tracing::warn!(error = %e, "decode failed");
+                OpenFailure::Decode
+            })?;
+            let feed = info.progress.clone().map(ProgressFeed::Response);
+            (info, decoder, None, feed)
+        }
+    };
+    Ok(OpenedPcm {
+        info,
+        decoder,
+        skip,
+        feed,
+        levels,
+    })
+}
+
+/// The network-bound half of a DoP open. Runs on the open thread.
+fn run_dop_open(transport: &dyn Transport, open: &DopOpen) -> Result<OpenedDop, String> {
+    let opts = StreamOptions {
+        format: Some(StreamFormat::Dop),
+        seek_ms: open.seek,
+        next: open.next_id,
+        range_start: None,
+    };
+    let mut info = transport.open_stream(open.track.id, &opts).map_err(|e| {
+        tracing::warn!(error = %e, "DoP stream request failed");
+        "the server couldn't provide the DSD stream".to_string()
+    })?;
+    let chained = info.gapless_mode.as_deref() == Some("chained");
+    let reader = std::mem::replace(&mut info.reader, Box::new(std::io::empty()));
+    let stream = DopStream::new(reader, open.dop_rate, open.established, chained).map_err(|e| {
+        tracing::warn!(error = %e, "DoP stream unreadable");
+        "the DSD stream couldn't be read".to_string()
+    })?;
+    Ok(OpenedDop { info, stream })
+}
+
+/// Open a passthrough track at `ms` through a seekable source, if the
+/// transport offers one and the container can seek. `None` means "use the
+/// forward-only path"; this never fails the track.
+fn open_seeked_passthrough(
+    transport: &dyn Transport,
+    track: &Track,
+    opts: &StreamOptions,
+    ms: u64,
+) -> Option<(StreamInfo, StreamDecoder, u64, Option<ProgressFeed>)> {
+    let sk = match transport.open_seekable(track.id, opts) {
+        Ok(Some(sk)) => sk,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "seekable open failed; streaming from the start");
+            return None;
+        }
+    };
+    let (decoder, skip) = match StreamDecoder::new_seekable(sk.source, sk.byte_len, ms) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "seeking in the container failed; streaming from the start");
+            return None;
+        }
+    };
+    if let Some(control) = &sk.control {
+        control.warm();
+    }
+    let feed = sk.control.map(ProgressFeed::Seekable);
+    let info = StreamInfo {
+        reader: Box::new(std::io::empty()),
+        content_type: sk.content_type,
+        chain: sk.chain,
+        gapless_next: None,
+        gapless_mode: None,
+        progress: None,
+    };
+    Some((info, decoder, skip, feed))
 }
 
 /// How far inside the end a seek onto the end lands, in ms.
