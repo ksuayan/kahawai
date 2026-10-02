@@ -82,6 +82,9 @@ pub struct DirValidation {
     readable: bool,
     writable: bool,
     audio_files: usize,
+    /// Audiobooks under the folder (folders of audio files, with `Disc N`
+    /// folders joined to their book). Only counted for an audiobook folder.
+    audiobooks: usize,
     /// True if the walk hit `VALIDATE_DIR_FILE_CAP` before finishing —
     /// `audio_files` is then a lower bound, not the true count. Never true
     /// for the actual scan, only this quick preview.
@@ -196,7 +199,17 @@ fn is_writable(dir: &Path) -> bool {
 
 #[tauri::command]
 pub fn setup_validate_dir(path: String) -> DirValidation {
-    let dir = Path::new(&path);
+    validate_dir(&path, false)
+}
+
+/// Like `setup_validate_dir`, for an audiobook folder: also counts the books.
+#[tauri::command]
+pub fn setup_validate_audiobook_dir(path: String) -> DirValidation {
+    validate_dir(&path, true)
+}
+
+fn validate_dir(path: &str, count_books: bool) -> DirValidation {
+    let dir = Path::new(path);
     let exists = dir.exists();
     let is_dir = dir.is_dir();
     if !exists || !is_dir {
@@ -206,12 +219,14 @@ pub fn setup_validate_dir(path: String) -> DirValidation {
             readable: false,
             writable: false,
             audio_files: 0,
+            audiobooks: 0,
             truncated: false,
         };
     }
     let readable = std::fs::read_dir(dir).is_ok();
     let writable = is_writable(dir);
     let mut audio_files = 0usize;
+    let mut books: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut truncated = false;
     if readable {
         let start = std::time::Instant::now();
@@ -223,7 +238,12 @@ pub fn setup_validate_dir(path: String) -> DirValidation {
             if !entry.file_type().is_file() {
                 continue;
             }
-            if crate::scanner::is_audio(entry.path()) {
+            if count_books {
+                if crate::audiobooks::is_book_audio(entry.path()) {
+                    audio_files += 1;
+                    books.insert(crate::audiobooks::book_dir(entry.path()));
+                }
+            } else if crate::scanner::is_audio(entry.path()) {
                 audio_files += 1;
             }
             checked += 1;
@@ -241,6 +261,7 @@ pub fn setup_validate_dir(path: String) -> DirValidation {
         readable,
         writable,
         audio_files,
+        audiobooks: books.len(),
         truncated,
     }
 }
@@ -407,69 +428,90 @@ pub async fn setup_audiobook_folders(
         .map_err(user_msg)
 }
 
-/// Add an audiobook folder to the running server (refused when it is not a
-/// folder or overlaps another), remember it in the config file, and scan.
-#[tauri::command]
-pub async fn setup_add_audiobook_folder(
-    path: String,
-    state: tauri::State<'_, DesktopState>,
-) -> Result<crate::audiobooks::Root, String> {
-    let app_state = live_state_for_books(&state)?;
-    let root = crate::audiobooks::add_root(&app_state.pool, &path, None)
-        .await
-        .map_err(user_msg)?;
-    {
-        let mut cfg = app_state.config.write().unwrap();
-        let p = PathBuf::from(&root.path);
-        if !cfg.audiobook_dirs.contains(&p) {
-            cfg.audiobook_dirs.push(p);
-        }
-    }
-    save_audiobook_dirs(&app_state)?;
-    if let Ok(guard) = app_state.scan_lock.clone().try_lock_owned() {
-        let job = app_state
-            .jobs
-            .create(
-                kahawai_core::JobKind::Scan,
-                "Audiobook scan".to_string(),
-                None,
-            )
-            .await;
-        crate::audiobooks_api::spawn_audiobook_scan(app_state.clone(), job.id, guard);
-    }
-    Ok(root)
+#[derive(Deserialize)]
+pub struct ApplyAudiobooksInput {
+    /// Folders to add.
+    add: Vec<String>,
+    /// Ids of the folders to forget.
+    remove: Vec<i64>,
 }
 
-/// Forget an audiobook folder, its books, and their progress (the files
-/// stay), here and in the config file so it does not come back at start.
+/// Apply the audiobook folder edits from Settings, as one step like the music
+/// folders' Apply: forget the removed folders (their books and progress; the
+/// files stay), add the new ones (refused when one is not a folder or overlaps
+/// another), remember the result in the config file, and scan.
 #[tauri::command]
-pub async fn setup_remove_audiobook_folder(
-    id: i64,
+pub async fn setup_apply_audiobooks(
+    input: ApplyAudiobooksInput,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<(), String> {
     let app_state = live_state_for_books(&state)?;
-    let path = crate::audiobooks::list_roots(&app_state.pool)
-        .await
-        .map_err(user_msg)?
-        .into_iter()
-        .find(|r| r.id == id)
-        .map(|r| PathBuf::from(r.path));
-    crate::audiobooks::delete_root(&app_state.pool, id)
-        .await
-        .map_err(user_msg)?;
-    if let Some(p) = path {
-        app_state
-            .config
-            .write()
-            .unwrap()
-            .audiobook_dirs
-            .retain(|d| d != &p && std::fs::canonicalize(d).map(|c| c != p).unwrap_or(true));
-        save_audiobook_dirs(&app_state)?;
+    let mut problems: Vec<String> = Vec::new();
+
+    for id in input.remove {
+        let path = crate::audiobooks::list_roots(&app_state.pool)
+            .await
+            .map_err(user_msg)?
+            .into_iter()
+            .find(|r| r.id == id)
+            .map(|r| PathBuf::from(r.path));
+        match crate::audiobooks::delete_root(&app_state.pool, id).await {
+            Ok(()) => {
+                if let Some(p) = path {
+                    app_state
+                        .config
+                        .write()
+                        .unwrap()
+                        .audiobook_dirs
+                        .retain(|d| {
+                            d != &p && std::fs::canonicalize(d).map(|c| c != p).unwrap_or(true)
+                        });
+                }
+            }
+            Err(e) => problems.push(user_msg(e)),
+        }
     }
+    for path in input.add {
+        match crate::audiobooks::add_root(&app_state.pool, &path, None).await {
+            Ok(root) => {
+                let mut cfg = app_state.config.write().unwrap();
+                let p = PathBuf::from(&root.path);
+                if !cfg.audiobook_dirs.contains(&p) {
+                    cfg.audiobook_dirs.push(p);
+                }
+            }
+            Err(e) => problems.push(user_msg(e)),
+        }
+    }
+    save_audiobook_dirs(&app_state)?;
     let _ = app_state
         .catalog_events
         .send(crate::ServerEvent::CatalogUpdated);
-    Ok(())
+
+    // Scan what changed. A scan already running will not pick up the new
+    // folder by itself, so say so rather than silently doing nothing.
+    match app_state.scan_lock.clone().try_lock_owned() {
+        Ok(guard) => {
+            let job = app_state
+                .jobs
+                .create(
+                    kahawai_core::JobKind::Scan,
+                    "Audiobook scan".to_string(),
+                    None,
+                )
+                .await;
+            crate::audiobooks_api::spawn_audiobook_scan(app_state.clone(), job.id, guard);
+        }
+        Err(_) => problems.push(
+            "a scan is already running; the new folders will be scanned by the next one"
+                .to_string(),
+        ),
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join(" "))
+    }
 }
 
 #[derive(Serialize, Default)]

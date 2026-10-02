@@ -1075,6 +1075,13 @@ fn book_audio_format(path: &Path) -> Option<AudioFormat> {
     }
 }
 
+/// Is this an audio file an audiobook folder may hold? (Used by the desktop
+/// app's folder check, which only builds on macOS.)
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn is_book_audio(path: &Path) -> bool {
+    book_audio_format(path).is_some()
+}
+
 /// Everything one file tells us.
 struct FileInfo {
     path: PathBuf,

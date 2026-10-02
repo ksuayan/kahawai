@@ -9,6 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AudiobookRoot,
+  ApplyAudiobooksInput,
   ApplyConfigInput,
   DirValidation,
   EnrichAction,
@@ -175,13 +176,13 @@ export async function setupAudiobookFolders(): Promise<AudiobookRoot[]> {
   return (await cmd<AudiobookRoot[]>("setup_audiobook_folders")) ?? [];
 }
 
-/** Add an audiobook folder to the running server, remember it in the config file, and scan.
- *  Throws the backend's reason when it is refused (not a folder, overlaps another). */
-export async function setupAddAudiobookFolder(path: string): Promise<AudiobookRoot> {
-  return invoke<AudiobookRoot>("setup_add_audiobook_folder", { path });
+/** Apply the audiobook folder edits (forget `remove`, add `add`) to the running server,
+ *  remember them in the config file, and scan. Throws the backend's reason on a problem. */
+export async function setupApplyAudiobooks(input: ApplyAudiobooksInput): Promise<void> {
+  await invoke("setup_apply_audiobooks", { input });
 }
 
-/** Forget an audiobook folder and its books' progress; the files stay. */
-export async function setupRemoveAudiobookFolder(id: number): Promise<void> {
-  await invoke("setup_remove_audiobook_folder", { id });
+/** Like `setupValidateDir`, but counts the audiobooks under the folder. */
+export async function setupValidateAudiobookDir(path: string): Promise<DirValidation | undefined> {
+  return cmd<DirValidation>("setup_validate_audiobook_dir", { path });
 }

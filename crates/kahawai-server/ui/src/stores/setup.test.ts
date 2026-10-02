@@ -384,31 +384,53 @@ describe("setup store: audiobook folders", () => {
     expect(tauri.callsTo("setup_save_config")[0]).toMatchObject({ input: { audiobook_dirs: [] } });
   });
 
-  it("the running list adds and removes at once, and shows the server's refusal", async () => {
+  it("the running list works like the music one: pending edits, then Apply", async () => {
     inTauri();
     const setup = useSetupStore();
     let roots = [{ id: 1, path: "/srv/books", name: "books" }];
+    const books = { exists: true, is_dir: true, readable: true, writable: true, audio_files: 40, audiobooks: 7, truncated: false };
     tauri.on("setup_audiobook_folders", () => roots);
-    tauri.on("setup_add_audiobook_folder", (a?: Record<string, unknown>) => {
-      if (a?.path === "/srv/books/inner") throw "that folder overlaps the audiobook folder /srv/books";
-      roots = [...roots, { id: 2, path: String(a?.path), name: "more" }];
-      return roots[1];
-    });
-    tauri.on("setup_remove_audiobook_folder", (a?: Record<string, unknown>) => {
-      roots = roots.filter((r) => r.id !== a?.id);
-    });
+    tauri.on("setup_validate_audiobook_dir", books);
     tauri.on("setup_recent_scans", []);
+    let refuse = false;
+    tauri.on("setup_apply_audiobooks", (a?: Record<string, unknown>) => {
+      if (refuse) throw "that folder overlaps the audiobook folder /srv/books";
+      const input = a?.input as { add: string[]; remove: number[] };
+      roots = roots.filter((r) => !input.remove.includes(r.id)).concat(input.add.map((p, i) => ({ id: 10 + i, path: p, name: "n" })));
+    });
     await setup.loadAudiobookRoots();
-    expect(setup.audiobookRoots).toHaveLength(1);
-    dialog.nextPath = "/srv/books/inner";
-    await setup.addRunningAudiobookFromPicker();
-    expect(setup.audiobookError).toContain("overlaps");
+    expect(setup.runningBookDirs).toMatchObject([{ id: 1, path: "/srv/books", validation: { audiobooks: 7 } }]);
+    expect(setup.canApplyBooks).toBe(false);
+
+    // Picking lists the folder at once, as pending, with its book count.
     dialog.nextPath = "/srv/more";
     await setup.addRunningAudiobookFromPicker();
+    expect(setup.runningBookDirs.map((d) => d.path)).toEqual(["/srv/books", "/srv/more"]);
+    expect(setup.runningBookDirs[1].validation?.audiobooks).toBe(7);
+    expect(setup.pendingBookAdds).toEqual(["/srv/more"]);
+    expect(setup.canApplyBooks).toBe(true);
+    expect(tauri.callsTo("setup_apply_audiobooks")).toHaveLength(0);
+
+    // A pending add that is removed again is just forgotten; removing a real one is queued.
+    setup.removeRunningAudiobook("/srv/more");
+    expect(setup.pendingBookAdds).toEqual([]);
+    expect(setup.canApplyBooks).toBe(false);
+    setup.removeRunningAudiobook("/srv/books");
+    expect(setup.pendingBookRemoves).toEqual([1]);
+
+    // The server's refusal is shown, and what it has is re-read.
+    refuse = true;
+    await setup.applyAudiobooks();
+    expect(setup.audiobookError).toContain("overlaps");
+    refuse = false;
+    dialog.nextPath = "/srv/new";
+    await setup.addRunningAudiobookFromPicker();
+    await setup.applyAudiobooks();
+    expect(tauri.callsTo("setup_apply_audiobooks").at(-1)).toMatchObject({ input: { add: ["/srv/new"], remove: [] } });
     expect(setup.audiobookError).toBeNull();
-    expect(setup.audiobookRoots.map((r) => r.path)).toEqual(["/srv/books", "/srv/more"]);
-    await setup.removeRunningAudiobook(1);
-    expect(setup.audiobookRoots.map((r) => r.id)).toEqual([2]);
+    // The refused attempt re-synced the list, so the earlier pending removal was dropped with it.
+    expect(setup.runningBookDirs.map((d) => d.path)).toEqual(["/srv/books", "/srv/new"]);
+    expect(setup.canApplyBooks).toBe(false);
   });
 });
 

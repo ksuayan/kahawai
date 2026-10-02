@@ -7,7 +7,7 @@ import { computed, onMounted } from "vue";
 import { useEnrichmentStore } from "../stores/enrichment";
 import { setupRevealLogs } from "../tauri";
 import { useSetupStore } from "../stores/setup";
-import { CONFIDENCE_LEVELS, dirChipClass, dirChipText } from "../types";
+import { bookDirChipClass, bookDirChipText, CONFIDENCE_LEVELS, dirChipClass, dirChipText } from "../types";
 
 const setup = useSetupStore();
 const enrich = useEnrichmentStore();
@@ -117,32 +117,61 @@ const jobLine = computed(() => {
 
     <h3 class="heading-3 mb-2 mt-4">Audiobook folders</h3>
     <UiHint tone="faint">
-      Kept apart from the music, with their own library in the Player. Changes apply at once: a new
-      folder is scanned right away, and removing one forgets its books and your progress (the files
-      stay).
+      Kept apart from the music, with their own library in the Player. Each folder of audio files is one
+      book.
     </UiHint>
     <ul class="mb-3 flex flex-col gap-2" data-testid="audiobook-roots">
       <li
-        v-for="r in setup.audiobookRoots"
-        :key="r.id"
+        v-for="d in setup.runningBookDirs"
+        :key="d.path"
         class="flex items-center justify-between gap-3 rounded-md border border-line bg-raised px-3 py-2"
+        data-testid="audiobook-row"
       >
         <div class="min-w-0">
-          <div class="truncate text-[13px]" :title="r.path">{{ r.path }}</div>
-          <div v-if="r.name" class="truncate text-xs text-faint">{{ r.name }}</div>
+          <div class="flex items-center gap-2 truncate text-[13px]">
+            {{ d.path }}
+            <span
+              v-if="setup.pendingBookAdds.includes(d.path)"
+              class="micro-label rounded-sm bg-accent/15 px-1 py-0.5 text-accent"
+            >
+              new
+            </span>
+          </div>
+          <div
+            class="text-xs"
+            :class="d.validation ? bookDirChipClass(d.validation) : 'text-faint'"
+            :title="d.validation?.truncated ? 'This is a lower bound — the folder has more than this quick check counts. The actual scan is never capped.' : undefined"
+            data-testid="audiobook-chip"
+          >
+            {{ d.validating ? "checking…" : d.validation ? bookDirChipText(d.validation) : "" }}
+          </div>
         </div>
         <UiButton
           variant="icon-danger"
           aria-label="Remove audiobook folder"
           data-testid="remove-audiobook-folder"
-          @click="setup.removeRunningAudiobook(r.id)"
+          @click="setup.removeRunningAudiobook(d.path)"
         >
           <X class="size-4" />
         </UiButton>
       </li>
     </ul>
-    <p v-if="setup.audiobookRoots.length === 0" class="mb-2 text-xs text-faint">No audiobook folders.</p>
-    <UiButton data-testid="add-audiobook-folder" @click="setup.addRunningAudiobookFromPicker()">Add audiobook folder…</UiButton>
+    <p v-if="setup.runningBookDirs.length === 0" class="mb-2 text-xs text-faint">No audiobook folders.</p>
+    <div class="mb-2 flex flex-wrap items-center gap-2">
+      <UiButton data-testid="add-audiobook-folder" @click="setup.addRunningAudiobookFromPicker()">Add folder…</UiButton>
+      <UiButton
+        variant="primary"
+        :disabled="!setup.canApplyBooks || setup.applyingBooks"
+        data-testid="apply-audiobooks"
+        @click="setup.applyAudiobooks()"
+      >
+        {{ setup.applyingBooks || (setup.isScanning && !setup.canApplyBooks) ? "Scanning…" : "Apply" }}
+      </UiButton>
+    </div>
+    <UiHint v-if="setup.canApplyBooks" tone="faint">
+      {{ setup.pendingBookAdds.length }} to add, {{ setup.pendingBookRemoves.length }} to remove — not applied
+      until you click Apply. Removing a folder forgets its books and your progress; the files stay.
+    </UiHint>
     <UiHint v-if="setup.audiobookError" tone="warn">{{ setup.audiobookError }}</UiHint>
 
     <h3 class="heading-3 mb-2 mt-4">Album info</h3>

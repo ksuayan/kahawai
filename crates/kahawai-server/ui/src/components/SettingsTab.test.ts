@@ -216,31 +216,59 @@ describe("SettingsTab: logs", () => {
 
 
 describe("SettingsTab: audiobook folders", () => {
-  it("is a separate list from the music folders, and removes a folder", async () => {
-    tauri.on("setup_audiobook_folders", [{ id: 4, path: "/srv/books", name: "books" }]).on("setup_remove_audiobook_folder", undefined);
+  const books = { exists: true, is_dir: true, readable: true, writable: true, audio_files: 40, audiobooks: 12, truncated: false };
+
+  it("is a separate list from the music folders, shows how many audiobooks each holds, and queues a removal", async () => {
+    tauri.on("setup_audiobook_folders", [{ id: 4, path: "/srv/books", name: "books" }]).on("setup_validate_audiobook_dir", books);
     const { wrapper } = boot();
     const setup = useSetupStore();
     setup.runningDirs = [{ path: "/music/a", validating: false, validation: okValidation }];
     await settle();
-    expect(wrapper.get('[data-testid="audiobook-roots"]').text()).toContain("/srv/books");
-    expect(wrapper.get('[data-testid="audiobook-roots"]').text()).not.toContain("/music/a");
+    const list = wrapper.get('[data-testid="audiobook-roots"]');
+    expect(list.text()).toContain("/srv/books");
+    expect(list.text()).not.toContain("/music/a");
+    expect(wrapper.get('[data-testid="audiobook-chip"]').text()).toBe("12 audiobooks");
+    const apply = () => wrapper.get('[data-testid="apply-audiobooks"]').element as HTMLButtonElement;
+    expect(apply().disabled).toBe(true);
     await wrapper.get('[data-testid="remove-audiobook-folder"]').trigger("click");
     await settle();
-    expect(tauri.callsTo("setup_remove_audiobook_folder")).toEqual([{ id: 4 }]);
+    expect(setup.pendingBookRemoves).toEqual([4]);
+    expect(tauri.callsTo("setup_apply_audiobooks")).toHaveLength(0);
+    expect(apply().disabled).toBe(false);
+    expect(wrapper.text()).toContain("0 to add, 1 to remove");
   });
 
-  it("adds a folder from the picker and shows the server's reason when it is refused", async () => {
+  it("a picked folder appears marked new with its count, and Apply sends it", async () => {
     inTauri();
+    tauri.on("setup_audiobook_folders", []).on("setup_validate_audiobook_dir", { ...books, audiobooks: 1 }).on("setup_apply_audiobooks", undefined).on("setup_recent_scans", []);
     const { wrapper } = boot();
-    const setup = useSetupStore();
     await settle();
-    tauri.on("setup_add_audiobook_folder", () => {
-      throw "/nope is not a folder";
-    });
-    dialog.nextPath = "/nope";
+    dialog.nextPath = "/srv/shelf";
     await wrapper.get('[data-testid="add-audiobook-folder"]').trigger("click");
     await settle();
-    expect(wrapper.text()).toContain("/nope is not a folder");
-    expect(setup.audiobookError).toContain("not a folder");
+    const row = wrapper.get('[data-testid="audiobook-row"]');
+    expect(row.text()).toContain("/srv/shelf");
+    expect(row.text()).toContain("new");
+    expect(wrapper.get('[data-testid="audiobook-chip"]').text()).toBe("1 audiobook");
+    await wrapper.get('[data-testid="apply-audiobooks"]').trigger("click");
+    await settle();
+    expect(tauri.callsTo("setup_apply_audiobooks")).toEqual([{ input: { add: ["/srv/shelf"], remove: [] } }]);
+  });
+
+  it("says when a folder holds no audiobooks, and shows the server's reason when Apply is refused", async () => {
+    inTauri();
+    tauri.on("setup_audiobook_folders", []).on("setup_validate_audiobook_dir", { ...books, audiobooks: 0 }).on("setup_recent_scans", []);
+    const { wrapper } = boot();
+    await settle();
+    dialog.nextPath = "/srv/empty";
+    await wrapper.get('[data-testid="add-audiobook-folder"]').trigger("click");
+    await settle();
+    expect(wrapper.get('[data-testid="audiobook-chip"]').text()).toBe("no audiobooks found");
+    tauri.on("setup_apply_audiobooks", () => {
+      throw "/srv/empty is not a folder";
+    });
+    await wrapper.get('[data-testid="apply-audiobooks"]').trigger("click");
+    await settle();
+    expect(wrapper.text()).toContain("/srv/empty is not a folder");
   });
 });

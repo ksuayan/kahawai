@@ -83,7 +83,7 @@ describe("WizardView: audiobook folders step", () => {
 
   it("lists the folders added and shows them in the review", async () => {
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
-    tauri.on("setup_validate_dir", { ...okValidation, audio_files: 0 });
+    tauri.on("setup_validate_audiobook_dir", { ...okValidation, audio_files: 30, audiobooks: 5 });
     const { wrapper } = boot();
     const setup = useSetupStore();
     setup.step = 2;
@@ -92,6 +92,7 @@ describe("WizardView: audiobook folders step", () => {
     await wrapper.get('[data-testid="add-audiobook-folder"]').trigger("click");
     await settle();
     expect(wrapper.findAll('[data-testid="audiobook-dir"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="audiobook-chip"]').text()).toBe("5 audiobooks");
     setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
     setup.step = 4;
     await settle();

@@ -3,7 +3,7 @@ import { X } from "lucide-vue-next";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import { useSetupStore } from "../stores/setup";
-import { dirChipClass, dirChipText } from "../types";
+import { bookDirChipClass, bookDirChipText } from "../types";
 
 const setup = useSetupStore();
 </script>
@@ -27,8 +27,8 @@ const setup = useSetupStore();
       >
         <div class="min-w-0">
           <div class="truncate text-[13px]">{{ d.path }}</div>
-          <div class="text-xs" :class="d.validation ? dirChipClass(d.validation) : 'text-faint'">
-            {{ d.validating ? "checking…" : d.validation ? dirChipText(d.validation) : "" }}
+          <div class="text-xs" :class="d.validation ? bookDirChipClass(d.validation) : 'text-faint'" data-testid="audiobook-chip">
+            {{ d.validating ? "checking…" : d.validation ? bookDirChipText(d.validation) : "" }}
           </div>
         </div>
         <UiButton variant="icon-danger" aria-label="Remove folder" @click="setup.removeAudiobookDir(d.path)">

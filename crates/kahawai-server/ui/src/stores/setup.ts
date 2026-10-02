@@ -9,9 +9,9 @@ import {
   setupQuit,
   setupActiveBookLookup,
   setupActiveHashJob,
-  setupAddAudiobookFolder,
+  setupApplyAudiobooks,
   setupAudiobookFolders,
-  setupRemoveAudiobookFolder,
+  setupValidateAudiobookDir,
   setupRecentScans,
   setupRestartServer,
   setupRevealConfig,
@@ -76,8 +76,15 @@ export const useSetupStore = defineStore("setup", () => {
   const hashJob = ref<ScanJob | null>(null);
   /** The online audiobook details lookup, while it is active. */
   const bookLookupJob = ref<ScanJob | null>(null);
-  /** The running server's audiobook folders (applied at once, unlike the music list). */
+  /** The running server's audiobook folders, as the server has them. */
   const audiobookRoots = ref<AudiobookRoot[]>([]);
+  /** Display copy for Settings: the server's folders plus pending adds, minus
+   *  pending removes, each checked for how many audiobooks it holds. Like the
+   *  music list, only the *deltas* below are sent on Apply. */
+  const runningBookDirs = ref<(MusicDirEntry & { id?: number })[]>([]);
+  const pendingBookAdds = ref<string[]>([]);
+  const pendingBookRemoves = ref<number[]>([]);
+  const applyingBooks = ref(false);
   const audiobookError = ref<string | null>(null);
   let scanPollTimer: number | undefined;
   let statusPollTimer: number | undefined;
@@ -89,6 +96,7 @@ export const useSetupStore = defineStore("setup", () => {
   const canLeaveDatabase = computed(() => dbDirValidation.value?.writable === true);
   const bindLooksValid = computed(() => BIND_RE.test(bind.value.trim()));
   const canApply = computed(() => pendingAdds.value.length > 0 || pendingRemoves.value.length > 0);
+  const canApplyBooks = computed(() => pendingBookAdds.value.length > 0 || pendingBookRemoves.value.length > 0);
   /** True while any scan job (however it was started — Settings' Apply, the
    *  startup scan, anything) is queued or running. Drives the Status tab's
    *  live view independent of who triggered it. */
@@ -193,32 +201,60 @@ export const useSetupStore = defineStore("setup", () => {
     }
   }
 
+  /** Read the server's audiobook folders and check each for its books;
+   *  this re-syncs to the server, so it clears any pending edit. */
   async function loadAudiobookRoots(): Promise<void> {
-    audiobookRoots.value = await setupAudiobookFolders();
+    const roots = await setupAudiobookFolders();
+    audiobookRoots.value = roots;
+    const checks = await Promise.all(roots.map((r) => setupValidateAudiobookDir(r.path)));
+    runningBookDirs.value = roots.map((r, i) => ({ id: r.id, path: r.path, validating: false, validation: checks[i] }));
+    pendingBookAdds.value = [];
+    pendingBookRemoves.value = [];
   }
 
-  /** Pick an audiobook folder for the running server. Applied at once: the
-   *  server adds it, remembers it in the config file, and scans. */
+  /** Pick an audiobook folder: it is listed at once (marked new, with its
+   *  book count once checked) and added for real on Apply. */
   async function addRunningAudiobookFromPicker(): Promise<void> {
     const picked = await setupPickDirectory();
     if (!picked) return;
+    if (runningBookDirs.value.some((d) => d.path === picked)) return;
     audiobookError.value = null;
+    runningBookDirs.value.push({ path: picked, validating: true });
+    pendingBookAdds.value.push(picked);
+    const validation = await setupValidateAudiobookDir(picked);
+    const row = runningBookDirs.value.find((d) => d.path === picked);
+    if (row) {
+      row.validation = validation;
+      row.validating = false;
+    }
+  }
+
+  /** Take a folder off the list; a folder that was only a pending add just
+   *  disappears, any other is forgotten on Apply. */
+  function removeRunningAudiobook(path: string): void {
+    const row = runningBookDirs.value.find((d) => d.path === path);
+    runningBookDirs.value = runningBookDirs.value.filter((d) => d.path !== path);
+    if (pendingBookAdds.value.includes(path)) {
+      pendingBookAdds.value = pendingBookAdds.value.filter((p) => p !== path);
+    } else if (row?.id !== undefined && !pendingBookRemoves.value.includes(row.id)) {
+      pendingBookRemoves.value.push(row.id);
+    }
+  }
+
+  /** Apply the audiobook folder edits on the running server and scan. */
+  async function applyAudiobooks(): Promise<void> {
+    audiobookError.value = null;
+    applyingBooks.value = true;
     try {
-      await setupAddAudiobookFolder(picked);
+      await setupApplyAudiobooks({ add: pendingBookAdds.value, remove: pendingBookRemoves.value });
       await Promise.all([loadAudiobookRoots(), loadRecentScans()]);
       ensureScanPolling();
     } catch (err) {
       audiobookError.value = String(err);
-    }
-  }
-
-  async function removeRunningAudiobook(id: number): Promise<void> {
-    audiobookError.value = null;
-    try {
-      await setupRemoveAudiobookFolder(id);
-      await loadAudiobookRoots();
-    } catch (err) {
-      audiobookError.value = String(err);
+      // Show what the server has now: part of the change may have gone through.
+      await loadAudiobookRoots().catch(() => undefined);
+    } finally {
+      applyingBooks.value = false;
     }
   }
 
@@ -331,7 +367,7 @@ export const useSetupStore = defineStore("setup", () => {
     if (!picked) return;
     if (audiobookDirs.value.some((d) => d.path === picked)) return;
     audiobookDirs.value.push({ path: picked, validating: true });
-    const validation = await setupValidateDir(picked);
+    const validation = await setupValidateAudiobookDir(picked);
     const row = audiobookDirs.value.find((d) => d.path === picked);
     if (row) {
       row.validation = validation;
@@ -426,6 +462,12 @@ export const useSetupStore = defineStore("setup", () => {
     dirs,
     audiobookDirs,
     audiobookRoots,
+    runningBookDirs,
+    pendingBookAdds,
+    pendingBookRemoves,
+    applyingBooks,
+    canApplyBooks,
+    applyAudiobooks,
     audiobookError,
     dbDir,
     bind,

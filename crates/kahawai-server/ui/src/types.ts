@@ -25,6 +25,8 @@ export interface DirValidation {
   readable: boolean;
   writable: boolean;
   audio_files: number;
+  /** Audiobooks under an audiobook folder (only counted for one). */
+  audiobooks?: number;
   /** True if the quick preview walk hit its file cap before finishing —
    *  `audio_files` is then a lower bound, not the true count. The actual
    *  scan is never capped. */
@@ -51,6 +53,22 @@ export function dirChipText(v: DirValidation): string {
   // Explicit locale: this must render identically regardless of the host's
   // default locale (deterministic tests, consistent UI for every user).
   return `${v.audio_files.toLocaleString("en-US")}${suffix} audio file${plural}`;
+}
+
+/** Chip copy for an audiobook folder: how many books it holds. */
+export function bookDirChipText(v: DirValidation): string {
+  if (!v.exists || !v.is_dir || !v.readable) return "not accessible";
+  const n = v.audiobooks ?? 0;
+  if (n === 0) return "no audiobooks found";
+  const suffix = v.truncated ? "+" : "";
+  const plural = n === 1 && !v.truncated ? "" : "s";
+  return `${n.toLocaleString("en-US")}${suffix} audiobook${plural}`;
+}
+
+/** Colour for the audiobook chip, from the same checks. */
+export function bookDirChipClass(v: DirValidation): string {
+  if (!v.exists || !v.is_dir || !v.readable) return "text-danger-fg";
+  return (v.audiobooks ?? 0) === 0 ? "text-warn-fg" : "text-ok";
 }
 
 export function dirChipClass(v: DirValidation): string {
@@ -240,6 +258,13 @@ export const CONFIDENCE_LEVELS: { value: number; label: string }[] = [
   { value: 0.9, label: "Balanced (90%)" },
   { value: 0.95, label: "Strict (95%)" },
 ];
+
+/** Deltas for the audiobook folders' Apply (`setup_apply_audiobooks`). */
+export interface ApplyAudiobooksInput {
+  add: string[];
+  /** Ids of the folders to forget. */
+  remove: number[];
+}
 
 /** An audiobook folder of the running server (`setup_audiobook_folders`). */
 export interface AudiobookRoot {
