@@ -76,6 +76,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         (11, include_str!("../migrations/011_indexes.sql")),
         (12, include_str!("../migrations/012_job_times.sql")),
         (13, include_str!("../migrations/013_duplicates.sql")),
+        (14, include_str!("../migrations/014_audiobooks.sql")),
     ];
     // One connection throughout: `PRAGMA foreign_keys` is per connection, and
     // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off

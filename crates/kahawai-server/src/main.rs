@@ -2,6 +2,7 @@
 //! (Spec: kahawai-spec.md)
 
 mod api;
+mod audiobooks;
 mod catalog;
 mod db;
 #[cfg(target_os = "macos")]
