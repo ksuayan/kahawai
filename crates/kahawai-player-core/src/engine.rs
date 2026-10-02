@@ -29,11 +29,11 @@ use kahawai_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::analog::{AnalogSettings, AnalogStage};
 use crate::bitperfect::{f32_to_i24_le, BitPerfect};
-use crate::crossfeed::{CrossfeedSettings, CrossfeedStage};
 use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
+use crate::dsp::analog::{AnalogSettings, AnalogStage};
+use crate::dsp::crossfeed::{CrossfeedSettings, CrossfeedStage};
 use crate::dsp::{
     headroom_guard, scan_track_levels, DspStage, EqBand, GainRamp, LookaheadLimiter, LoudnessMeter,
     LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET, EQ_PREAMP_RANGE_DB,

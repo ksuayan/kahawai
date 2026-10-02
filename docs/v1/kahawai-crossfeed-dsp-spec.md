@@ -1,6 +1,6 @@
 # Kahawai Crossfeed DSP — Design Specification
 
-**Status:** implemented on the `dsp-crossfeed` branch (`crates/kahawai-player-core/src/crossfeed.rs`, `player/ui/src/components/CrossfeedSection.vue`), with these deviations from the text below:
+**Status:** implemented on the `dsp-crossfeed` branch (`crates/kahawai-player-core/src/dsp/crossfeed.rs`, `player/ui/src/components/CrossfeedSection.vue`), with these deviations from the text below:
 
 - **No delay line; `latency_frames()` is 0.** The bs2b reference (libbs2b 3.1.0 `init()` / `cross_feed_d()`) has no delay: the timing cue comes from the filters' phase. §2.1's `LP_tau` and §4's delay-line latency describe a different topology; the code follows the reference.
 - **No Linkwitz preset yet.** Its 1971 circuit values could not be verified, and §2.2 forbids a preset under that name that isn't digitized from the real circuit. Tracked in `docs/Backlog.md`.
@@ -53,7 +53,7 @@ Cutoff/feed values for the first three are BS2B's published presets, confirmed a
 
 ## 3. Settings model
 
-New file `crates/kahawai-player-core/src/crossfeed.rs`, mirroring the `AnalogSettings` pattern (`analog.rs:132`):
+New file `crates/kahawai-player-core/src/dsp/crossfeed.rs`, mirroring the `AnalogSettings` pattern (`analog.rs:132`):
 
 ```rust
 /// Which classic circuit this stage imitates.
@@ -76,14 +76,14 @@ pub struct CrossfeedSettings {
 
 ## 4. `DspStage` implementation
 
-`pub struct CrossfeedStage` implements `DspStage` (`dsp.rs:218`):
+`pub struct CrossfeedStage` implements `DspStage` (`dsp/mod.rs`):
 
 - `prepare(sample_rate)` — (re)design the low-pass biquad (or the Linkwitz bilinear-transform biquads) at the new rate. Crossfeed's psychoacoustic constants are defined by head geometry, not sample rate, so the *design* scales while the *perception* stays put. This is what makes the stage cheap and correct on high-resolution audio with no special-casing.
 - `process(&mut [f32], channels)` — stereo only. Any other channel count passes through untouched (never invent behavior for layouts the presets weren't designed for).
 - `latency_frames()` — the delay-line length in frames (sub-millisecond); 0 when bypassed. Feeds the same latency accounting the look-ahead limiter already uses.
 - `reset()` — clear delay lines and filter state (track change, seek).
 - Bit-transparency: when `enabled` is false, return before touching the buffer — the same early-return bypass `AnalogStage::process` uses.
-- Enable/disable ramps over ~15 ms (`EQ_RAMP_SECONDS` in `dsp.rs`) so toggling never clicks.
+- Enable/disable ramps over ~15 ms (`EQ_RAMP_SECONDS` in `dsp/eq.rs`) so toggling never clicks.
 
 Cost: ~10 multiply-adds per sample per channel plus a delay line of dozens of samples. At 192 kHz stereo this is single-digit millions of MAC/s — the lightest stage in the chain by a wide margin, far below the oversampled analog stage.
 
@@ -91,7 +91,7 @@ Cost: ~10 multiply-adds per sample per channel plus a delay line of dozens of sa
 
 - New field `crossfeed: CrossfeedStage` on the engine struct, with `set_crossfeed()` mirroring `set_analog()` (`engine.rs:1131`): no-op when settings are unchanged, live-applied otherwise.
 - Chain position: **first, before EQ**. Rationale: crossfeed simulates the speaker acoustics; EQ corrects the headphone's own response, so it should correct the signal as the ear will actually receive it. This amends the fixed-order comment at `engine.rs:1670`.
-- Never invoked on the DoP / bit-perfect path — same exclusion the analog stage documents (`analog.rs` module docs: "the DoP and bit-perfect paths never call it").
+- Never invoked on the DoP / bit-perfect path — same exclusion the analog stage documents (`dsp/analog/mod.rs` module docs: "the DoP and bit-perfect paths never call it").
 - `signalPath.ts` gains the crossfeed entry so the signal-path display stays truthful.
 
 ## 6. Tauri API and frontend

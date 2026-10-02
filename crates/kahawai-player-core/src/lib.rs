@@ -6,11 +6,9 @@
 //! platform audio (cpal/rodio on desktop, AudioTrack/AVAudioPlayer on mobile)
 //! lives behind the [`AudioSink`] trait, implemented by each shell.
 
-pub mod analog;
 pub mod artwork;
 pub mod bitperfect;
 pub mod catalog;
-pub mod crossfeed;
 pub mod decode;
 pub mod dop;
 pub mod dsd_devices;
@@ -27,16 +25,16 @@ pub mod timestretch;
 pub mod transport;
 pub mod worker;
 
-pub use analog::{
-    anti_alias_plan, koren_plate_current, oversample_factor, triode_table, AnalogFlavour,
-    AnalogSettings, AnalogStage, AnalogStatus, AntiAlias, AntiAliasChoice, TubeTable,
-};
 pub use artwork::{fetch_from_server as fetch_artwork, ArtworkCache, CachedArt};
 pub use bitperfect::{f32_to_i24_le, BitPerfect};
-pub use crossfeed::{CrossfeedPreset, CrossfeedSettings, CrossfeedStage};
 pub use decode::{DecodedSpec, StreamDecoder};
 pub use dop::{dop_pcm_rate, parse_wav_header, DopSpec, DopStream, DOP_BITS_PER_SAMPLE};
 pub use dsd_devices::is_known_dsd_device;
+pub use dsp::analog::{
+    anti_alias_plan, koren_plate_current, oversample_factor, triode_table, AnalogFlavour,
+    AnalogSettings, AnalogStage, AnalogStatus, AntiAlias, AntiAliasChoice, TubeTable,
+};
+pub use dsp::crossfeed::{CrossfeedPreset, CrossfeedSettings, CrossfeedStage};
 pub use dsp::{
     headroom_guard, integrated_lufs, max_boost_db, plan_gain_db, scan_track_levels,
     scan_track_lufs, usable_freq, validate_bands, DspStage, EqBand, EqBandType, GainRamp,
