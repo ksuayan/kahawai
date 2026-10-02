@@ -23,6 +23,7 @@ pub mod rangesource;
 pub mod readahead;
 pub mod resample;
 pub mod sink;
+pub mod timestretch;
 pub mod transport;
 pub mod worker;
 
