@@ -73,12 +73,18 @@ radio_history(id INTEGER PK, station_name TEXT, stream_title TEXT,
   for D3, not a spec change.
   **Checked (2026-10-02):** the player decodes with Symphonia 0.6, whose AAC
   decoder is **LC-only** — it rejects SBR/HE-AAC streams ("aac: aac too
-  complex"). So AAC+ stations cannot play through the current pipeline.
-  Options, cheapest first: (1) route AAC+ stations through the server's
-  ffmpeg pipeline (relay + transcode to FLAC/PCM; a deliberate exception to
-  "no relay", and recording/timeshift then work on the decoded copy);
-  (2) bind a native HE-AAC decoder in the player (new dependency; check
-  licence against AGPL); (3) wait on Symphonia. Decide after the D3 spike.
+  complex"). The server has no HE-AAC path either (its transcoder is also
+  Symphonia; ffmpeg is only a test tool). **Decision: decode AAC+ in the
+  Player with a pure-Rust decoder, no server relay and no ffmpeg.** Spike:
+  the `syom` crate (MIT, no dependencies, HE-AAC v1/v2, push `Decoder`,
+  ADTS/LATM/M4A) decoded an HE-AAC v1 ADTS stream to within ~108 dB SNR of
+  ffmpeg's decoder, and joined a live stream mid-frame once the ADTS sync
+  word was found (reset after an error). Caveats: the crate is young
+  (v0.7, published October 2026, one author), the test stream came from its
+  own encoder, and AAC patents apply to any AAC decoder. Before relying on
+  it, test real station captures (FDK/Nero-encoded AAC+ streams, and
+  `audio/aacp` ICY streams); keep Symphonia for AAC-LC. If it fails on real
+  streams, fall back to an optional server-side ffmpeg relay.
 - Auto-reconnect: exponential backoff 1 s → 2 s → 5 s → 15 s → 60 s cap;
   try the station's alternate URLs/mounts before surfacing failure;
   visible "reconnecting…" state, never a silent stall.

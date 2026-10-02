@@ -143,7 +143,7 @@ Two specs in `docs/v2/`, each with a build list: [kahawai-radio-spec.md](v2/kaha
 
 | Item | Why / notes | Details | Status |
 |---|---|---|---|
-| **Internet radio** | Browse radio-browser.info, play streams directly with live track titles (ICY), favorites on the server, then recording, timeshift, sleep timer and alarm. v1 is D1-D4. First task: AAC+ (HE-AAC) streams do not decode: Symphonia 0.6 is AAC-LC only, and most stations use AAC+. Decide between a server-side ffmpeg relay for those stations and a native decoder (see the radio spec, D3). | Size: **L** (v1 ~22 days)<br>Phase: **v2**<br>Priority: **P2** | **Not started** |
+| **Internet radio** | Browse radio-browser.info, play streams directly with live track titles (ICY), favorites on the server, then recording, timeshift, sleep timer and alarm. v1 is D1-D4. First task: AAC+ (HE-AAC) streams do not decode: Symphonia 0.6 is AAC-LC only, and most stations use AAC+. Plan: decode it in the Player with the pure-Rust `syom` crate (spiked, see the radio spec, D3), verified on real station captures first. | Size: **L** (v1 ~22 days)<br>Phase: **v2**<br>Priority: **P2** | **Not started** |
 | **Podcasts** | Subscribe by URL or OPML, refresh feeds, download episodes on the server, resume per episode, reusing the audiobook speed, skip and sleep-timer code. v1 is D1-D5. First task: run the feed parser against real feeds. | Size: **L** (v1 ~35 days)<br>Phase: **v2**<br>Priority: **P2** | **Not started** |
 
 ## Look and feel

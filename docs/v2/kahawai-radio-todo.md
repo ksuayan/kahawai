@@ -12,7 +12,7 @@ Sizes: XS < S < M < L. Spec: `kahawai-radio-spec.md` (2026-10-02).
 | 5 | Favorites sync to player + offline list cache | S | Not started | D2 |
 | 6 | Direct stream connect + ICY metadata parsing (`StreamTitle`) | M | Not started | D3; tolerate metadata-less stations |
 | 7 | StreamTitle → now-playing + `radio_history` logging | S | Not started | D3 |
-| 8 | Codec verification: AAC/AAC+ through existing decode pipeline | S | Not started | D3; **confirmed gap**: Symphonia 0.6 is AAC-LC only, no HE-AAC/SBR. Resolve via server-side ffmpeg relay for AAC+ stations or a native decoder (see spec D3); may grow to M |
+| 8 | Codec verification: AAC/AAC+ through existing decode pipeline | S | Spike done | D3; Symphonia 0.6 is AAC-LC only. Pure-Rust `syom` crate decodes HE-AAC (matches ffmpeg to ~108 dB on a synthetic stream); needs real-station captures. Fallback: optional server ffmpeg relay |
 | 9 | Auto-reconnect (exp backoff) + alternate-URL fallback | S | Not started | D3; visible reconnecting state |
 | 10 | Player: directory browse/search UI (genre/country/language) | M | Not started | D4 |
 | 11 | Player: favorites view + reorder + one-tap play | S | Not started | D4 |
