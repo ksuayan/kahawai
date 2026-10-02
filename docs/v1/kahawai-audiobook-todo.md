@@ -1,7 +1,7 @@
 # Kahawai Audiobook — TODO
 
 Buildable feature list with estimated sizing and status.
-Sizes: XS < S < M < L. Spec: [kahawai-audiobook-spec.md](kahawai-audiobook-spec.md) (2026-10-01). Built on `claude/audiobook`; nothing here has been listened to or tried on the Mac yet, so "Built" means the code and its tests exist.
+Sizes: XS < S < M < L. Spec: [kahawai-audiobook-spec.md](kahawai-audiobook-spec.md) (2026-10-01). Built on `claude/audiobook`, now on `main`. "Built" means the code and its tests exist; it has since been run on the Mac against a real library, which is where the later fixes below came from (mono books, the speed menu, the online lookup).
 
 | # | Feature | Size | Status | Notes |
 |---|---------|------|--------|-------|

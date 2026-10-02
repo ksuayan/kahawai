@@ -85,6 +85,9 @@ audiobook_settings(book_id INTEGER PK, speed REAL DEFAULT 1.0,
 - `POST /api/audiobooks/{id}/bookmarks {book_offset_ms, name?, note?}`;
   `GET .../bookmarks`; `DELETE .../bookmarks/{bid}`.
 - `GET /api/audiobooks/{id}/history` — listening sessions, newest first.
+- `DELETE /api/audiobooks/{id}/continue` — take a book off the listener's
+  Continue listening shelf; the position is kept, and listening again (the
+  position moving) puts it back.
 - `POST /api/audiobooks/{id}/finished` and auto-finish when
   `book_offset_ms >= 0.97 * duration_ms` (sets `finished_at`; clears on
   rewind below threshold by user action).
@@ -180,3 +183,9 @@ follows as a fast follow.
 - **Duplicate copies:** audiobook files are not all content-hashed (many GB). Only a file that shares its size with another audiobook file is (a copy always does), once, and a book whose files all have the same hashes, in order, as another's is hidden as a copy (`audiobooks.duplicate_of`, migration 016). The copy with listening progress is kept, else the oldest; the hidden one stays in the database, so it comes back if the other goes. The music hash job leaves audiobooks alone.
 - **Online lookup** needs the existing `enrichment_enabled` switch (off by default), because it sends titles off the LAN.
 - **Playback speed** is not a saved engine setting: the book being played decides it, and the engine returns to 1.0 for music. Anything but 1.0 holds exclusive (bit-perfect) output back, like the EQ does.
+- **More per book in the list and detail:** `path` (the folder), and the first file's `format`, `bitrate` (kbps), `sample_rate` and `channels`; each part in the detail carries its own file's four, which the Player shows on every chapter row.
+- **Continue listening** can be pruned: a book taken off the shelf (`audiobook_positions.dismissed`, migration 018) keeps its place and comes back when the listener plays it again; a position save that does not move (the app closing) leaves it off.
+- **"Title by Author"** folder or tag names (the commonest naming in real libraries, with no author tag) are split into title and author, both by the scan and before an online search. Only a plausible name is taken (two to six capitalised words after the last " by "), so "Stand by Me" stays whole.
+- **Google Books is optional in practice:** it refuses keyless requests from many networks (HTTP 429). A refusal skips Google Books for the rest of the lookup, keeps what Open Library found, and leaves the books it could not complete to be asked again next time, instead of stopping the job.
+- **Mono books:** most audiobooks are mono. The Player's shared output opens the device in stereo when it has no mono layout and sends the voice to both sides.
+- **Player screens:** the library has a List/Grid toggle (with each book's format in the list) and a right-click menu per book (Play, Info, Edit details); Now Playing shows the book (chapter, whole-book progress, time left at the current speed, speed, sleep timer) with Add bookmark, Book details and Back to music; books without a cover show an open book.

@@ -21,6 +21,12 @@ stays on your server; nothing about it is sent anywhere else.
   graph, loudness normalization, and an optional **analog warmth** stage that adds the
   character of tubes and transistors, with an A/B panel, level meter and blind test to
   judge it honestly.
+- **Audiobooks:** a separate library of books, as a grid or a list, with a Continue
+  listening shelf. A book picks up where you left off, with its chapters, bookmarks,
+  listening history by day, and its own speed (0.75× to 2.5×, without changing the
+  voice's pitch) and skip times. A sleep timer fades out after a set time or at the end
+  of the chapter. Playing a book puts your music queue aside and gives it back exactly
+  when you return. Several listeners can share one server, each with their own place.
 - **Look:** dark and light themes, IBM Plex type.
 
 ## How audio reaches your ears
@@ -41,7 +47,9 @@ player says so where you would look for them.
 - **The server has no authentication and no encryption.** Run it on a private network you
   trust; the player warns you when it cannot reach it.
 - **Your settings stay on this computer.** The server address, output device, equalizer,
-  queue and preferences are stored locally.
+  queue and preferences are stored locally. Where you are in each audiobook, your
+  bookmarks and listening history are kept on your Kahawai server, for each listener,
+  so any player in the house picks up where you left off.
 
 ## Copyright and trademarks
 
