@@ -25,7 +25,10 @@ const workingText = computed(() => {
   return detail ? `${what} · ${detail}` : `${what}…`;
 });
 
-onMounted(() => void books.loadLibrary());
+onMounted(() => {
+  void books.loadLibrary();
+  void books.loadListeners().catch(() => undefined);
+});
 // Typing is debounced a little so a search does not fire per keystroke.
 let timer: number | undefined;
 watch(
@@ -57,6 +60,15 @@ const filtered = (): boolean => !!(books.query.q || books.query.author || books.
         placeholder="Title, author, narrator…"
         aria-label="Search audiobooks"
         data-testid="book-search"
+      />
+      <UiSelect
+        v-if="books.listeners.length > 1"
+        aria-label="Listener"
+        trigger-class="w-[130px]"
+        :model-value="books.listener || 'Default'"
+        :options="books.listeners.map((l) => ({ value: l.name, label: l.name }))"
+        data-testid="listener-switch"
+        @update:model-value="(v) => void books.switchListener(v ?? '')"
       />
       <UiSelect
         aria-label="Author"

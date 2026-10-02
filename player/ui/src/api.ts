@@ -189,8 +189,21 @@ async function fail(method: string, path: string, res: Response): Promise<never>
   throw new ApiError(method, path, res.status, body.trim());
 }
 
+/** Who is listening to audiobooks; "" is the server's default listener. */
+let listener = "";
+export function setAudiobookListener(name: string): void {
+  listener = name.trim();
+}
+
+/** Request headers; audiobook calls also say whose place, bookmarks and history they mean. */
+function headers(path: string, json = false): Record<string, string> {
+  const h: Record<string, string> = json ? { "Content-Type": "application/json" } : {};
+  if (listener && path.startsWith("/api/audiobook")) h["X-Kahawai-Listener"] = encodeURIComponent(listener);
+  return h;
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${baseUrl}${path}`);
+  const res = await fetch(`${baseUrl}${path}`, { headers: headers(path) });
   if (!res.ok) await fail("GET", path, res);
   return (await res.json()) as T;
 }
@@ -198,7 +211,7 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: headers(path, true),
     body: JSON.stringify(body),
   });
   if (!res.ok) await fail("POST", path, res);
@@ -208,7 +221,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 async function patch<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: headers(path, true),
     body: JSON.stringify(body),
   });
   if (!res.ok) await fail("PATCH", path, res);
@@ -218,7 +231,7 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
 async function put<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: headers(path, true),
     body: JSON.stringify(body),
   });
   if (!res.ok) await fail("PUT", path, res);
@@ -226,7 +239,7 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function del(path: string): Promise<void> {
-  const res = await fetch(`${baseUrl}${path}`, { method: "DELETE" });
+  const res = await fetch(`${baseUrl}${path}`, { method: "DELETE", headers: headers(path) });
   if (!res.ok) await fail("DELETE", path, res);
 }
 
@@ -568,6 +581,24 @@ export interface AudiobookMetaEdit {
 
 export async function editAudiobook(id: number, edit: AudiobookMetaEdit): Promise<Audiobook> {
   return patch<Audiobook>(`/api/audiobooks/${id}`, edit);
+}
+
+export interface AudiobookListener {
+  id: number;
+  name: string;
+  books_started: number;
+}
+
+export async function fetchAudiobookListeners(): Promise<AudiobookListener[]> {
+  return get<AudiobookListener[]>("/api/audiobook-listeners");
+}
+
+export async function addAudiobookListener(name: string): Promise<AudiobookListener> {
+  return post<AudiobookListener>("/api/audiobook-listeners", { name });
+}
+
+export async function deleteAudiobookListener(id: number): Promise<void> {
+  return del(`/api/audiobook-listeners/${id}`);
 }
 
 export async function fetchAudiobookRoots(): Promise<AudiobookRoot[]> {

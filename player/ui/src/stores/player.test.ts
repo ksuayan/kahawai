@@ -199,7 +199,7 @@ describe("per-track format overrides", () => {
     expect(p.formatOverride(7)).toBe("flac");
     expect(p.formatOverride(8)).toBe("opus");
     expect(p.formatOverride(9)).toBeNull();
-    expect(tauri.callsTo("set_track_format")).toEqual([{ track_id: 7, fmt: "flac" }, { track_id: 8, fmt: "opus" }]);
+    expect(tauri.callsTo("set_track_format")).toEqual([{ trackId: 7, fmt: "flac" }, { trackId: 8, fmt: "opus" }]);
   });
 
   it("Auto (null) clears the override and tells the engine", async () => {
@@ -207,7 +207,7 @@ describe("per-track format overrides", () => {
     await p.changeTrackFormat(7, "flac");
     await p.changeTrackFormat(7, null);
     expect(p.formatOverride(7)).toBeNull();
-    expect(tauri.callsTo("set_track_format").at(-1)).toEqual({ track_id: 7, fmt: null });
+    expect(tauri.callsTo("set_track_format").at(-1)).toEqual({ trackId: 7, fmt: null });
   });
 
   it("changing the format of one track leaves the others alone", async () => {

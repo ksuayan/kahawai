@@ -164,6 +164,14 @@ pub fn app(state: AppState) -> Router {
             "/api/audiobook-roots/{id}",
             axum::routing::delete(audiobooks_api::delete_root),
         )
+        .route(
+            "/api/audiobook-listeners",
+            get(audiobooks_api::list_listeners).post(audiobooks_api::add_listener),
+        )
+        .route(
+            "/api/audiobook-listeners/{id}",
+            axum::routing::delete(audiobooks_api::delete_listener),
+        )
         .route("/api/audiobooks", get(audiobooks_api::list_books))
         .route("/api/audiobooks/scan", post(audiobooks_api::trigger_scan))
         .route("/api/audiobooks/enrich", post(audiobooks_api::enrich))

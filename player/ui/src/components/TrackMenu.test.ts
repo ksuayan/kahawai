@@ -76,7 +76,7 @@ describe("TrackMenu: Stream as…", () => {
     await openStreamAs();
     key(radios().find((e) => e.textContent?.includes("FLAC"))!, "Enter");
     await settle();
-    expect(tauri.callsTo("set_track_format")).toEqual([{ track_id: track.id, fmt: "flac" }]);
+    expect(tauri.callsTo("set_track_format")).toEqual([{ trackId: track.id, fmt: "flac" }]);
     expect(usePlayerStore().formatOverride(track.id)).toBe("flac");
 
     await open();
@@ -85,7 +85,7 @@ describe("TrackMenu: Stream as…", () => {
     expect(radios().find((e) => e.getAttribute("aria-checked") === "true")!.textContent).toContain("FLAC");
     key(radios().find((e) => e.textContent?.includes("Auto"))!, "Enter");
     await settle();
-    expect(tauri.callsTo("set_track_format").at(-1)).toEqual({ track_id: track.id, fmt: null });
+    expect(tauri.callsTo("set_track_format").at(-1)).toEqual({ trackId: track.id, fmt: null });
     expect(usePlayerStore().formatOverride(track.id)).toBeNull();
   });
 

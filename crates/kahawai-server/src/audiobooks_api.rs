@@ -19,6 +19,183 @@ use crate::AppState;
 
 type ApiResult<T> = Result<T, ApiError>;
 
+// --- listeners ----------------------------------------------------------------
+//
+// Several people can share one server: each *listener* has their own place in
+// every book, bookmarks, history, finished flags and speed, while the library
+// and its details are shared. There are no accounts (the server is for a
+// trusted home network): a listener is a name the Player sends in
+// `X-Kahawai-Listener` (percent-encoded). No name, or "Default", is listener 0.
+
+pub const LISTENER_HEADER: &str = "x-kahawai-listener";
+const MAX_LISTENER_NAME: usize = 40;
+
+/// Who is asking: the listener's id.
+pub struct Listener(pub i64);
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A listener's name as stored: trimmed, one line, a sensible length.
+pub fn clean_listener_name(raw: &str) -> Result<String, MusicError> {
+    let n = raw.trim();
+    if n.is_empty() {
+        return Err(MusicError::BadRequest("a listener needs a name".into()));
+    }
+    if n.chars().count() > MAX_LISTENER_NAME || n.chars().any(char::is_control) {
+        return Err(MusicError::BadRequest(format!(
+            "a listener's name is one line of at most {MAX_LISTENER_NAME} characters"
+        )));
+    }
+    Ok(n.to_string())
+}
+
+/// The id for a listener name, creating the listener the first time.
+pub async fn listener_id(pool: &SqlitePool, name: &str) -> Result<i64, MusicError> {
+    let name = clean_listener_name(name)?;
+    if let Some(r) = sqlx::query("SELECT id FROM audiobook_listeners WHERE name = ?")
+        .bind(&name)
+        .fetch_optional(pool)
+        .await
+        .map_err(cvt)?
+    {
+        return Ok(r.get(0));
+    }
+    let id: i64 = sqlx::query("INSERT INTO audiobook_listeners (name) VALUES (?) ON CONFLICT(name) DO UPDATE SET name = name RETURNING id")
+        .bind(&name)
+        .fetch_one(pool)
+        .await
+        .map_err(cvt)?
+        .get(0);
+    Ok(id)
+}
+
+impl axum::extract::FromRequestParts<AppState> for Listener {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let raw = parts
+            .headers
+            .get(LISTENER_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(percent_decode)
+            .unwrap_or_default();
+        if raw.trim().is_empty() {
+            return Ok(Listener(0));
+        }
+        Ok(Listener(listener_id(&state.pool, &raw).await?))
+    }
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct ListenerInfo {
+    pub id: i64,
+    pub name: String,
+    /// Books this listener has a place in.
+    pub books_started: i64,
+}
+
+pub async fn list_listeners(State(s): State<AppState>) -> ApiResult<Json<Vec<ListenerInfo>>> {
+    Ok(Json(
+        sqlx::query(
+            "SELECT l.id, l.name,
+                    (SELECT COUNT(*) FROM audiobook_positions p WHERE p.user_id = l.id) AS started
+             FROM audiobook_listeners l ORDER BY l.id = 0 DESC, l.name COLLATE NOCASE",
+        )
+        .fetch_all(&s.pool)
+        .await
+        .map_err(cvt)?
+        .iter()
+        .map(|r| ListenerInfo {
+            id: r.get("id"),
+            name: r.get("name"),
+            books_started: r.get("started"),
+        })
+        .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct NewListener {
+    pub name: String,
+}
+
+/// `POST /api/audiobook-listeners`: make a listener (also made the first time a name is used).
+pub async fn add_listener(
+    State(s): State<AppState>,
+    Json(b): Json<NewListener>,
+) -> ApiResult<Response> {
+    let id = listener_id(&s.pool, &b.name).await?;
+    let name = clean_listener_name(&b.name)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ListenerInfo {
+            id,
+            name,
+            books_started: 0,
+        }),
+    )
+        .into_response())
+}
+
+/// `DELETE /api/audiobook-listeners/{id}`: forget a listener and everything
+/// that is theirs (the library is untouched). The default listener stays.
+pub async fn delete_listener(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<StatusCode> {
+    if id == 0 {
+        return Err(MusicError::BadRequest("the default listener cannot be removed".into()).into());
+    }
+    let mut tx = s.pool.begin().await.map_err(cvt)?;
+    let found = sqlx::query("SELECT 1 FROM audiobook_listeners WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    if found.is_none() {
+        return Err(MusicError::NotFound(format!("listener {id}")).into());
+    }
+    for table in [
+        "audiobook_bookmarks",
+        "audiobook_sessions",
+        "audiobook_positions",
+        "audiobook_settings",
+        "audiobook_finished",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE user_id = ?"))
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(cvt)?;
+    }
+    sqlx::query("DELETE FROM audiobook_listeners WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    tx.commit().await.map_err(cvt)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // --- roots ------------------------------------------------------------------
 
 pub async fn list_roots(State(s): State<AppState>) -> ApiResult<Json<Vec<ab::Root>>> {
@@ -159,6 +336,7 @@ pub struct EnrichBody {
 /// LAN, so it needs the album lookup's opt-in (`enrichment_enabled`).
 pub async fn enrich(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     body: Option<Json<EnrichBody>>,
 ) -> ApiResult<Response> {
     if !s.config.read().unwrap().enrichment_enabled {
@@ -169,7 +347,7 @@ pub async fn enrich(
     }
     let only = body.and_then(|b| b.0.book_id);
     if let Some(id) = only {
-        get_book(&s.pool, id).await?;
+        get_book(&s.pool, id, uid).await?;
     }
     let guard = s
         .enrich_lock
@@ -271,8 +449,17 @@ pub struct Book {
 }
 
 const BOOK_COLS: &str = "b.id, b.root_id, b.title, b.author, b.narrator, b.series, b.series_index,
-     b.year, b.cover_hash, b.duration_ms, b.added_at, b.finished_at,
+     b.year, b.cover_hash, b.duration_ms, b.added_at, f.finished_at,
      COALESCE(p.book_offset_ms, 0) AS position_ms, p.updated_at AS last_played_at";
+
+/// The joins that bring in one listener's place and finished flag. `uid` is a
+/// number we got from the database, never text from the request.
+fn listener_joins(uid: i64) -> String {
+    format!(
+        "LEFT JOIN audiobook_positions p ON p.book_id = b.id AND p.user_id = {uid}
+         LEFT JOIN audiobook_finished f ON f.book_id = b.id AND f.user_id = {uid}"
+    )
+}
 
 /// A book is listed while at least one of its files is on disk.
 const BOOK_PRESENT: &str =
@@ -317,16 +504,18 @@ pub struct ListQuery {
 
 pub async fn list_books(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<Book>>> {
-    Ok(Json(books(&s.pool, &q).await?))
+    Ok(Json(books(&s.pool, &q, uid).await?))
 }
 
-pub async fn books(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Book>, MusicError> {
+pub async fn books(pool: &SqlitePool, q: &ListQuery, uid: i64) -> Result<Vec<Book>, MusicError> {
     let mut sql = format!(
         "SELECT {BOOK_COLS} FROM audiobooks b
-         LEFT JOIN audiobook_positions p ON p.book_id = b.id
-         WHERE {BOOK_PRESENT} AND b.duplicate_of IS NULL"
+         {}
+         WHERE {BOOK_PRESENT} AND b.duplicate_of IS NULL",
+        listener_joins(uid)
     );
     let mut binds: Vec<String> = Vec::new();
     let continue_shelf = q.shelf.as_deref() == Some("continue");
@@ -352,12 +541,12 @@ pub async fn books(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Book>, MusicE
         binds.push(sr.to_string());
     }
     match q.finished {
-        Some(true) => sql.push_str(" AND b.finished_at IS NOT NULL"),
-        Some(false) => sql.push_str(" AND b.finished_at IS NULL"),
+        Some(true) => sql.push_str(" AND f.finished_at IS NOT NULL"),
+        Some(false) => sql.push_str(" AND f.finished_at IS NULL"),
         None => {}
     }
     if continue_shelf {
-        sql.push_str(" ORDER BY (b.finished_at IS NOT NULL), p.updated_at DESC, b.id");
+        sql.push_str(" ORDER BY (f.finished_at IS NOT NULL), p.updated_at DESC, b.id");
     } else {
         sql.push_str(" ORDER BY COALESCE(b.author, '') COLLATE NOCASE, COALESCE(b.series, '') COLLATE NOCASE, COALESCE(b.series_index, 0), b.title COLLATE NOCASE, b.id");
     }
@@ -436,9 +625,10 @@ fn bookmark_from_row(r: &SqliteRow) -> Bookmark {
     }
 }
 
-async fn get_book(pool: &SqlitePool, id: i64) -> Result<Book, MusicError> {
+async fn get_book(pool: &SqlitePool, id: i64, uid: i64) -> Result<Book, MusicError> {
     let sql = format!(
-        "SELECT {BOOK_COLS} FROM audiobooks b LEFT JOIN audiobook_positions p ON p.book_id = b.id WHERE b.id = ?"
+        "SELECT {BOOK_COLS} FROM audiobooks b {} WHERE b.id = ?",
+        listener_joins(uid)
     );
     sqlx::query(&sql)
         .bind(id)
@@ -449,11 +639,12 @@ async fn get_book(pool: &SqlitePool, id: i64) -> Result<Book, MusicError> {
         .ok_or_else(|| MusicError::NotFound(format!("audiobook {id}")))
 }
 
-pub async fn get_settings(pool: &SqlitePool, id: i64) -> Result<Settings, MusicError> {
+pub async fn get_settings(pool: &SqlitePool, id: i64, uid: i64) -> Result<Settings, MusicError> {
     Ok(sqlx::query(
-        "SELECT speed, skip_back_s, skip_forward_s FROM audiobook_settings WHERE book_id = ?",
+        "SELECT speed, skip_back_s, skip_forward_s FROM audiobook_settings WHERE book_id = ? AND user_id = ?",
     )
     .bind(id)
+    .bind(uid)
     .fetch_optional(pool)
     .await
     .map_err(cvt)?
@@ -467,9 +658,10 @@ pub async fn get_settings(pool: &SqlitePool, id: i64) -> Result<Settings, MusicE
 
 pub async fn book_detail(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<BookDetail>> {
-    let book = get_book(&s.pool, id).await?;
+    let book = get_book(&s.pool, id, uid).await?;
     let parts = parts_of(&s.pool, id).await?;
     let chapters = sqlx::query(
         "SELECT id, part_id, title, start_offset_ms, duration_ms FROM audiobook_chapters
@@ -488,8 +680,8 @@ pub async fn book_detail(
         duration_ms: r.get("duration_ms"),
     })
     .collect();
-    let bookmarks = bookmarks_of(&s.pool, id).await?;
-    let settings = get_settings(&s.pool, id).await?;
+    let bookmarks = bookmarks_of(&s.pool, id, uid).await?;
+    let settings = get_settings(&s.pool, id, uid).await?;
     Ok(Json(BookDetail {
         book,
         parts,
@@ -520,12 +712,13 @@ async fn parts_of(pool: &SqlitePool, id: i64) -> Result<Vec<Part>, MusicError> {
     .collect())
 }
 
-async fn bookmarks_of(pool: &SqlitePool, id: i64) -> Result<Vec<Bookmark>, MusicError> {
+async fn bookmarks_of(pool: &SqlitePool, id: i64, uid: i64) -> Result<Vec<Bookmark>, MusicError> {
     Ok(sqlx::query(
         "SELECT id, book_id, book_offset_ms, name, note, created_at FROM audiobook_bookmarks
-         WHERE book_id = ? ORDER BY book_offset_ms, id",
+         WHERE book_id = ? AND user_id = ? ORDER BY book_offset_ms, id",
     )
     .bind(id)
+    .bind(uid)
     .fetch_all(pool)
     .await
     .map_err(cvt)?
@@ -550,10 +743,11 @@ pub struct MetaEdit {
 /// (an empty string clears one), and the book is then left alone by rescans.
 pub async fn edit_book(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
     Json(e): Json<MetaEdit>,
 ) -> ApiResult<Json<Book>> {
-    let current = get_book(&s.pool, id).await?;
+    let current = get_book(&s.pool, id, uid).await?;
     let blank = |v: Option<String>, old: Option<String>| match v {
         Some(t) => {
             let t = t.trim().to_string();
@@ -582,7 +776,7 @@ pub async fn edit_book(
     .execute(&s.pool)
     .await
     .map_err(cvt)?;
-    Ok(Json(get_book(&s.pool, id).await?))
+    Ok(Json(get_book(&s.pool, id, uid).await?))
 }
 
 // --- position, sessions, finishing -----------------------------------------
@@ -601,11 +795,12 @@ pub struct PositionOut {
 
 pub async fn put_position(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
     Json(b): Json<PositionBody>,
 ) -> ApiResult<Json<PositionOut>> {
     Ok(Json(
-        save_position(&s.pool, id, b.book_offset_ms, now_ms()).await?,
+        save_position(&s.pool, id, b.book_offset_ms, now_ms(), uid).await?,
     ))
 }
 
@@ -617,34 +812,46 @@ pub async fn save_position(
     id: i64,
     offset_ms: i64,
     now: i64,
+    uid: i64,
 ) -> Result<PositionOut, MusicError> {
     let mut tx = pool.begin().await.map_err(cvt)?;
-    let book = sqlx::query("SELECT duration_ms, finished_at FROM audiobooks WHERE id = ?")
+    let book = sqlx::query("SELECT duration_ms FROM audiobooks WHERE id = ?")
         .bind(id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(cvt)?
         .ok_or_else(|| MusicError::NotFound(format!("audiobook {id}")))?;
     let duration: i64 = book.get("duration_ms");
-    let finished_at: Option<i64> = book.get("finished_at");
+    let finished_at: Option<i64> =
+        sqlx::query("SELECT finished_at FROM audiobook_finished WHERE book_id = ? AND user_id = ?")
+            .bind(id)
+            .bind(uid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(cvt)?
+            .map(|r| r.get(0));
     let offset = if duration > 0 {
         offset_ms.clamp(0, duration)
     } else {
         offset_ms.max(0)
     };
     let previous: Option<(i64, i64)> =
-        sqlx::query("SELECT book_offset_ms, updated_at FROM audiobook_positions WHERE book_id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
+        sqlx::query(
+            "SELECT book_offset_ms, updated_at FROM audiobook_positions WHERE book_id = ? AND user_id = ?",
+        )
+        .bind(id)
+        .bind(uid)
+        .fetch_optional(&mut *tx)
             .await
             .map_err(cvt)?
             .map(|r| (r.get(0), r.get(1)));
     sqlx::query(
-        "INSERT INTO audiobook_positions (book_id, book_offset_ms, updated_at) VALUES (?, ?, ?)
-         ON CONFLICT(book_id) DO UPDATE SET book_offset_ms = excluded.book_offset_ms,
-                                            updated_at = excluded.updated_at",
+        "INSERT INTO audiobook_positions (book_id, user_id, book_offset_ms, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(book_id, user_id) DO UPDATE SET book_offset_ms = excluded.book_offset_ms,
+                                                     updated_at = excluded.updated_at",
     )
     .bind(id)
+    .bind(uid)
     .bind(offset)
     .bind(now)
     .execute(&mut *tx)
@@ -656,9 +863,10 @@ pub async fn save_position(
     // not move the position after a long silence is the app closing, not
     // listening, and opens nothing.
     let last = sqlx::query(
-        "SELECT id, ended_at FROM audiobook_sessions WHERE book_id = ? ORDER BY ended_at DESC, id DESC LIMIT 1",
+        "SELECT id, ended_at FROM audiobook_sessions WHERE book_id = ? AND user_id = ? ORDER BY ended_at DESC, id DESC LIMIT 1",
     )
     .bind(id)
+    .bind(uid)
     .fetch_optional(&mut *tx)
     .await
     .map_err(cvt)?
@@ -680,10 +888,11 @@ pub async fn save_position(
             if moved {
                 let start = previous.map(|(o, _)| o).unwrap_or(offset);
                 sqlx::query(
-                    "INSERT INTO audiobook_sessions (book_id, started_at, ended_at, start_offset_ms, end_offset_ms)
-                     VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO audiobook_sessions (book_id, user_id, started_at, ended_at, start_offset_ms, end_offset_ms)
+                     VALUES (?, ?, ?, ?, ?, ?)",
                 )
                 .bind(id)
+                .bind(uid)
                 .bind(now)
                 .bind(now)
                 .bind(start)
@@ -699,16 +908,20 @@ pub async fn save_position(
     let finished = ab::is_finished(offset, duration);
     match (finished, finished_at) {
         (true, None) => {
-            sqlx::query("UPDATE audiobooks SET finished_at = ? WHERE id = ?")
-                .bind(now)
+            sqlx::query(
+                "INSERT OR IGNORE INTO audiobook_finished (book_id, user_id, finished_at) VALUES (?, ?, ?)",
+            )
                 .bind(id)
+                .bind(uid)
+                .bind(now)
                 .execute(&mut *tx)
                 .await
                 .map_err(cvt)?;
         }
         (false, Some(_)) => {
-            sqlx::query("UPDATE audiobooks SET finished_at = NULL WHERE id = ?")
+            sqlx::query("DELETE FROM audiobook_finished WHERE book_id = ? AND user_id = ?")
                 .bind(id)
+                .bind(uid)
                 .execute(&mut *tx)
                 .await
                 .map_err(cvt)?;
@@ -736,26 +949,31 @@ fn yes() -> bool {
 /// `{"finished": false}`, not). Marking finished does not move the position.
 pub async fn mark_finished(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
     body: Option<Json<FinishedBody>>,
 ) -> ApiResult<Json<Book>> {
     let finished = body.map(|b| b.0.finished).unwrap_or(true);
-    get_book(&s.pool, id).await?;
+    get_book(&s.pool, id, uid).await?;
     if finished {
-        sqlx::query("UPDATE audiobooks SET finished_at = COALESCE(finished_at, ?) WHERE id = ?")
-            .bind(now_ms())
-            .bind(id)
+        sqlx::query(
+            "INSERT OR IGNORE INTO audiobook_finished (book_id, user_id, finished_at) VALUES (?, ?, ?)",
+        )
+        .bind(id)
+        .bind(uid)
+        .bind(now_ms())
             .execute(&s.pool)
             .await
             .map_err(cvt)?;
     } else {
-        sqlx::query("UPDATE audiobooks SET finished_at = NULL WHERE id = ?")
+        sqlx::query("DELETE FROM audiobook_finished WHERE book_id = ? AND user_id = ?")
             .bind(id)
+            .bind(uid)
             .execute(&s.pool)
             .await
             .map_err(cvt)?;
     }
-    Ok(Json(get_book(&s.pool, id).await?))
+    Ok(Json(get_book(&s.pool, id, uid).await?))
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -771,15 +989,17 @@ pub struct Session {
 
 pub async fn history(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Vec<Session>>> {
-    get_book(&s.pool, id).await?;
+    get_book(&s.pool, id, uid).await?;
     Ok(Json(
         sqlx::query(
             "SELECT id, started_at, ended_at, start_offset_ms, end_offset_ms FROM audiobook_sessions
-             WHERE book_id = ? ORDER BY started_at DESC, id DESC",
+             WHERE book_id = ? AND user_id = ? ORDER BY started_at DESC, id DESC",
         )
         .bind(id)
+        .bind(uid)
         .fetch_all(&s.pool)
         .await
         .map_err(cvt)?
@@ -823,18 +1043,20 @@ pub fn clock(ms: i64) -> String {
 
 pub async fn list_bookmarks(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Vec<Bookmark>>> {
-    get_book(&s.pool, id).await?;
-    Ok(Json(bookmarks_of(&s.pool, id).await?))
+    get_book(&s.pool, id, uid).await?;
+    Ok(Json(bookmarks_of(&s.pool, id, uid).await?))
 }
 
 pub async fn add_bookmark(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
     Json(b): Json<NewBookmark>,
 ) -> ApiResult<Response> {
-    let book = get_book(&s.pool, id).await?;
+    let book = get_book(&s.pool, id, uid).await?;
     let offset = b.book_offset_ms.clamp(0, book.duration_ms.max(0));
     let name = b
         .name
@@ -842,10 +1064,11 @@ pub async fn add_bookmark(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("Bookmark at {}", clock(offset)));
     let row = sqlx::query(
-        "INSERT INTO audiobook_bookmarks (book_id, book_offset_ms, name, note, created_at)
-         VALUES (?, ?, ?, ?, ?) RETURNING id, book_id, book_offset_ms, name, note, created_at",
+        "INSERT INTO audiobook_bookmarks (book_id, user_id, book_offset_ms, name, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id, book_id, book_offset_ms, name, note, created_at",
     )
     .bind(id)
+    .bind(uid)
     .bind(offset)
     .bind(name)
     .bind(b.note.unwrap_or_default())
@@ -864,17 +1087,19 @@ pub struct BookmarkEdit {
 
 pub async fn edit_bookmark(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path((id, bid)): Path<(i64, i64)>,
     Json(e): Json<BookmarkEdit>,
 ) -> ApiResult<Json<Bookmark>> {
     let row = sqlx::query(
         "UPDATE audiobook_bookmarks SET name = COALESCE(?, name), note = COALESCE(?, note)
-         WHERE id = ? AND book_id = ? RETURNING id, book_id, book_offset_ms, name, note, created_at",
+         WHERE id = ? AND book_id = ? AND user_id = ? RETURNING id, book_id, book_offset_ms, name, note, created_at",
     )
     .bind(e.name.map(|n| n.trim().to_string()))
     .bind(e.note)
     .bind(bid)
     .bind(id)
+    .bind(uid)
     .fetch_optional(&s.pool)
     .await
     .map_err(cvt)?
@@ -884,15 +1109,18 @@ pub async fn edit_bookmark(
 
 pub async fn delete_bookmark(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path((id, bid)): Path<(i64, i64)>,
 ) -> ApiResult<StatusCode> {
-    let n = sqlx::query("DELETE FROM audiobook_bookmarks WHERE id = ? AND book_id = ?")
-        .bind(bid)
-        .bind(id)
-        .execute(&s.pool)
-        .await
-        .map_err(cvt)?
-        .rows_affected();
+    let n =
+        sqlx::query("DELETE FROM audiobook_bookmarks WHERE id = ? AND book_id = ? AND user_id = ?")
+            .bind(bid)
+            .bind(id)
+            .bind(uid)
+            .execute(&s.pool)
+            .await
+            .map_err(cvt)?
+            .rows_affected();
     if n == 0 {
         return Err(MusicError::NotFound(format!("bookmark {bid}")).into());
     }
@@ -913,11 +1141,12 @@ pub const SPEED_RANGE: (f64, f64) = (0.5, 3.0);
 
 pub async fn put_settings(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
     Json(b): Json<SettingsBody>,
 ) -> ApiResult<Json<Settings>> {
-    get_book(&s.pool, id).await?;
-    let cur = get_settings(&s.pool, id).await?;
+    get_book(&s.pool, id, uid).await?;
+    let cur = get_settings(&s.pool, id, uid).await?;
     if let Some(sp) = b.speed {
         if !sp.is_finite() || sp < SPEED_RANGE.0 || sp > SPEED_RANGE.1 {
             return Err(MusicError::BadRequest(format!(
@@ -941,11 +1170,12 @@ pub async fn put_settings(
         skip_forward_s: b.skip_forward_s.unwrap_or(cur.skip_forward_s),
     };
     sqlx::query(
-        "INSERT INTO audiobook_settings (book_id, speed, skip_back_s, skip_forward_s) VALUES (?, ?, ?, ?)
-         ON CONFLICT(book_id) DO UPDATE SET speed = excluded.speed, skip_back_s = excluded.skip_back_s,
+        "INSERT INTO audiobook_settings (book_id, user_id, speed, skip_back_s, skip_forward_s) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(book_id, user_id) DO UPDATE SET speed = excluded.speed, skip_back_s = excluded.skip_back_s,
                                             skip_forward_s = excluded.skip_forward_s",
     )
     .bind(id)
+    .bind(uid)
     .bind(next.speed)
     .bind(next.skip_back_s)
     .bind(next.skip_forward_s)
@@ -975,10 +1205,11 @@ pub struct Resolved {
 /// it, a book offset falls.
 pub async fn resolve(
     State(s): State<AppState>,
+    Listener(uid): Listener,
     Path(id): Path<i64>,
     Query(q): Query<ResolveQuery>,
 ) -> ApiResult<Json<Resolved>> {
-    get_book(&s.pool, id).await?;
+    get_book(&s.pool, id, uid).await?;
     let parts = parts_of(&s.pool, id).await?;
     let spans: Vec<ab::PartSpan> = parts
         .iter()
@@ -1096,7 +1327,20 @@ mod tests {
         uri: &str,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
+        call_as(app, None, method, uri, body).await
+    }
+
+    async fn call_as(
+        app: &Router,
+        listener: Option<&str>,
+        method: Method,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        if let Some(l) = listener {
+            req = req.header(LISTENER_HEADER, l);
+        }
         let body = match body {
             Some(b) => {
                 req = req.header("content-type", "application/json");
@@ -1441,11 +1685,11 @@ mod tests {
         let pool = &e.state.pool;
 
         // 10 s apart: one session. 30 min later: a second.
-        save_position(pool, id, 100, t0).await.unwrap();
-        save_position(pool, id, 400, t0 + 10_000).await.unwrap();
-        save_position(pool, id, 700, t0 + 20_000).await.unwrap();
+        save_position(pool, id, 100, t0, 0).await.unwrap();
+        save_position(pool, id, 400, t0 + 10_000, 0).await.unwrap();
+        save_position(pool, id, 700, t0 + 20_000, 0).await.unwrap();
         let later = t0 + 30 * 60_000;
-        save_position(pool, id, 900, later).await.unwrap();
+        save_position(pool, id, 900, later, 0).await.unwrap();
         let (_, h) = call(
             &e.app,
             Method::GET,
@@ -1461,7 +1705,7 @@ mod tests {
         assert_eq!(h[1]["listened_ms"], 600);
 
         // The app closing later at the same spot opens no empty session.
-        save_position(pool, id, 900, later + 3 * 3_600_000)
+        save_position(pool, id, 900, later + 3 * 3_600_000, 0)
             .await
             .unwrap();
         let (_, h) = call(
@@ -1475,10 +1719,10 @@ mod tests {
 
         // Across midnight, even a minute apart, is a new session.
         let before_midnight = t0 - 10 * 3_600_000 + 86_400_000 - 30_000 + 86_400_000;
-        save_position(pool, id, 1000, before_midnight)
+        save_position(pool, id, 1000, before_midnight, 0)
             .await
             .unwrap();
-        save_position(pool, id, 1100, before_midnight + 60_000)
+        save_position(pool, id, 1100, before_midnight + 60_000, 0)
             .await
             .unwrap();
         let (_, h) = call(
@@ -1491,7 +1735,7 @@ mod tests {
         assert_eq!(h.as_array().unwrap().len(), 4, "the day-change rule: {h:?}");
 
         // Clamped to the book, and 97% finishes it.
-        let out = save_position(pool, id, dur + 99_999, before_midnight + 120_000)
+        let out = save_position(pool, id, dur + 99_999, before_midnight + 120_000, 0)
             .await
             .unwrap();
         assert_eq!(out.book_offset_ms, dur);
@@ -1499,7 +1743,7 @@ mod tests {
         let (_, b) = call(&e.app, Method::GET, &format!("/api/audiobooks/{id}"), None).await;
         assert!(b["finished_at"].is_i64());
         // Rewinding clears it.
-        save_position(pool, id, 10, before_midnight + 130_000)
+        save_position(pool, id, 10, before_midnight + 130_000, 0)
             .await
             .unwrap();
         let (_, b) = call(&e.app, Method::GET, &format!("/api/audiobooks/{id}"), None).await;
@@ -1545,8 +1789,10 @@ mod tests {
         let (_, shelf) = call(&e.app, Method::GET, "/api/audiobooks?shelf=continue", None).await;
         assert!(shelf.as_array().unwrap().is_empty(), "nothing started");
         let t = 1_800_000_000_000i64;
-        save_position(&e.state.pool, ids[0], 500, t).await.unwrap();
-        save_position(&e.state.pool, ids[1], 300, t + 60_000)
+        save_position(&e.state.pool, ids[0], 500, t, 0)
+            .await
+            .unwrap();
+        save_position(&e.state.pool, ids[1], 300, t + 60_000, 0)
             .await
             .unwrap();
         let (_, shelf) = call(&e.app, Method::GET, "/api/audiobooks?shelf=continue", None).await;
@@ -1924,7 +2170,7 @@ mod tests {
             .await
             .unwrap()
             .get(0);
-        save_position(&e.state.pool, hidden, 1000, 1_800_000_000_000)
+        save_position(&e.state.pool, hidden, 1000, 1_800_000_000_000, 0)
             .await
             .unwrap();
         ab::find_duplicates(&e.state.pool).await.unwrap();
@@ -2047,5 +2293,117 @@ mod tests {
             (1400..=1600).contains(&start),
             "second chapter starts near 1.5 s: {start}"
         );
+    }
+
+    #[tokio::test]
+    async fn listeners_keep_their_own_place_bookmarks_history_and_finished_flag() {
+        let e = env().await;
+        library(&e).await;
+        let (_, list) = call(&e.app, Method::GET, "/api/audiobooks", None).await;
+        let id = list[0]["id"].as_i64().unwrap();
+        let dur = list[0]["duration_ms"].as_i64().unwrap();
+        let book = format!("/api/audiobooks/{id}");
+
+        // Ann (percent-encoded, with a space) listens; the default listener does not.
+        let ann = Some("Ann%20B");
+        let (st, _) = call_as(
+            &e.app,
+            ann,
+            Method::PUT,
+            &format!("{book}/position"),
+            Some(serde_json::json!({"book_offset_ms": 500})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        call_as(
+            &e.app,
+            ann,
+            Method::POST,
+            &format!("{book}/bookmarks"),
+            Some(serde_json::json!({"book_offset_ms": 100})),
+        )
+        .await;
+        call_as(
+            &e.app,
+            ann,
+            Method::PUT,
+            &format!("{book}/settings"),
+            Some(serde_json::json!({"speed": 1.5})),
+        )
+        .await;
+        call_as(&e.app, ann, Method::POST, &format!("{book}/finished"), None).await;
+
+        let (_, mine) = call_as(&e.app, ann, Method::GET, &book, None).await;
+        assert_eq!(mine["position_ms"], 500);
+        assert_eq!(mine["bookmarks"].as_array().unwrap().len(), 1);
+        assert_eq!(mine["settings"]["speed"], 1.5);
+        assert!(!mine["finished_at"].is_null());
+        let (_, h) = call_as(&e.app, ann, Method::GET, &format!("{book}/history"), None).await;
+        assert_eq!(h.as_array().unwrap().len(), 1);
+
+        let (_, other) = call(&e.app, Method::GET, &book, None).await;
+        assert!(other["position_ms"] == 0, "{other}");
+        assert!(other["bookmarks"].as_array().unwrap().is_empty());
+        assert_eq!(other["settings"]["speed"], 1.0);
+        assert!(other["finished_at"].is_null());
+        let (_, h) = call(&e.app, Method::GET, &format!("{book}/history"), None).await;
+        assert!(h.as_array().unwrap().is_empty());
+        let (_, shelf) = call(&e.app, Method::GET, "/api/audiobooks?shelf=continue", None).await;
+        assert!(shelf.as_array().unwrap().is_empty());
+        let (_, shelf) = call_as(
+            &e.app,
+            ann,
+            Method::GET,
+            "/api/audiobooks?shelf=continue",
+            None,
+        )
+        .await;
+        assert_eq!(shelf.as_array().unwrap().len(), 1);
+        let _ = dur;
+
+        // Listeners were created on first use and are listed.
+        let (_, ls) = call(&e.app, Method::GET, "/api/audiobook-listeners", None).await;
+        let names: Vec<&str> = ls
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["Default", "Ann B"]);
+    }
+
+    #[tokio::test]
+    async fn listeners_can_be_added_validated_and_removed() {
+        let e = env().await;
+        let (st, l) = call(
+            &e.app,
+            Method::POST,
+            "/api/audiobook-listeners",
+            Some(serde_json::json!({"name": "  Bo  "})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+        assert_eq!(l["name"], "Bo");
+        let uid = l["id"].as_i64().unwrap();
+        let (st, _) = call(
+            &e.app,
+            Method::POST,
+            "/api/audiobook-listeners",
+            Some(serde_json::json!({"name": "   "})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(&e.app, Method::DELETE, "/api/audiobook-listeners/0", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "the default cannot go");
+        let (st, _) = call(
+            &e.app,
+            Method::DELETE,
+            &format!("/api/audiobook-listeners/{uid}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, ls) = call(&e.app, Method::GET, "/api/audiobook-listeners", None).await;
+        assert_eq!(ls.as_array().unwrap().len(), 1);
     }
 }

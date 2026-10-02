@@ -13,8 +13,14 @@ playback speed, and best-in-class bookmark / position / history tracking.
 
 - Podcasts. (Schema reserves room; not built.)
 - Audible `.aax` / any DRM content. Never.
-- Multi-user accounts. `audiobook_positions` carries a reserved `user_id`
-  column defaulting to 0; single user assumed.
+- Accounts and passwords. Instead, several named *listeners* can share one
+  server (trusted LAN): the Player sends the listener's name in the
+  `X-Kahawai-Listener` header (percent-encoded; missing or "Default" is
+  listener 0, others are created on first use). Position, bookmarks, history,
+  speed/skip settings and the finished flag are per listener (`user_id` on
+  `audiobook_positions`, `_settings`, `_bookmarks`, `_sessions`, and
+  `audiobook_finished`); the library and book details stay shared.
+  Endpoints: `GET/POST /api/audiobook-listeners`, `DELETE /api/audiobook-listeners/{id}`.
 - Cloud sync. The LAN server is the sync point; positions live server-side
   so they follow the listener across clients.
 

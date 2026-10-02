@@ -162,8 +162,8 @@ describe("Audiobook detail", () => {
     await wrapper.get('[data-testid="play-book"]').trigger("click");
     await settle();
     expect(tauri.callsTo("set_playback_rate").at(-1)).toEqual({ rate: 1.25 });
-    const play = tauri.callsTo("queue_play_at").at(-1) as { position_ms: number };
-    expect(play.position_ms).toBe(3_600_000);
+    const play = tauri.callsTo("queue_play_at").at(-1) as { positionMs: number };
+    expect(play.positionMs).toBe(3_600_000);
   });
 
   it("a chapter or a bookmark starts the book there", async () => {
@@ -174,10 +174,10 @@ describe("Audiobook detail", () => {
     await settle();
     await wrapper.findAll('[data-testid="chapter"]')[1].trigger("click");
     await settle();
-    expect((tauri.callsTo("queue_play_at").at(-1) as { position_ms: number }).position_ms).toBe(1_000_000);
+    expect((tauri.callsTo("queue_play_at").at(-1) as { positionMs: number }).positionMs).toBe(1_000_000);
     await wrapper.get('[data-testid="bookmark"]').trigger("click");
     await settle();
-    expect((tauri.callsTo("queue_play_at").at(-1) as { position_ms: number }).position_ms).toBe(120_000);
+    expect((tauri.callsTo("queue_play_at").at(-1) as { positionMs: number }).positionMs).toBe(120_000);
   });
 
   it("deletes a bookmark and marks the book finished", async () => {
@@ -347,3 +347,32 @@ describe("Settings: audiobook folders", () => {
   });
 });
 
+
+describe("Audiobook listeners", () => {
+  it("adds a listener, sends their name with audiobook calls only, and remembers the choice", async () => {
+    let listeners = [{ id: 0, name: "Default", books_started: 0 }];
+    const calls = mockFetch({
+      "/api/audiobook-listeners": (_u: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body));
+          listeners = [...listeners, { id: 1, name: body.name, books_started: 0 }];
+          return json(listeners[1], 201);
+        }
+        return json(listeners);
+      },
+      "/api/audiobook-roots": () => json([]),
+      "/api/audiobooks": () => json([]),
+    });
+    const { wrapper } = mountApp(AudiobookSection);
+    await settle();
+    await typeInto(wrapper.get<HTMLInputElement>('[data-testid="new-listener"]').element, "Ann B");
+    await wrapper.get('[data-testid="add-listener"]').trigger("click");
+    await settle();
+
+    expect(localStorage.getItem("kahawai.audiobook-listener")).toBe("Ann B");
+    const header = (c: { init?: RequestInit }) => (c.init?.headers as Record<string, string> | undefined)?.["X-Kahawai-Listener"];
+    const library = calls.filter((c) => c.url.includes("/api/audiobooks"));
+    expect(library.length).toBeGreaterThan(0);
+    expect(library.every((c) => header(c) === "Ann%20B")).toBe(true);
+  });
+});

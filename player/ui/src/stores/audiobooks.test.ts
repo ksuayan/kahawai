@@ -100,10 +100,10 @@ describe("starting a book", () => {
 
     await e.store.start(7);
     expect(tauri.callsTo("set_playback_rate").at(-1)).toEqual({ rate: 1.5 });
-    const play = tauri.callsTo("queue_play_at").at(-1) as { index: number; position_ms: number; tracks: { id: number }[] };
+    const play = tauri.callsTo("queue_play_at").at(-1) as { index: number; positionMs: number; tracks: { id: number }[] };
     expect(play.tracks.map((t) => t.id)).toEqual([101, 102]);
     expect(play.index).toBe(1); // 250 s is in part two
-    expect(play.position_ms).toBe(50_000);
+    expect(play.positionMs).toBe(50_000);
     expect(e.store.stash).toMatchObject({ index: 1, positionMs: 42_000, repeat: "all", shuffle: true, wasPlaying: true });
     expect(e.store.stash?.tracks.map((t) => t.id)).toEqual([1, 2]);
   });
@@ -111,8 +111,8 @@ describe("starting a book", () => {
   it("a finished book starts again from the beginning", async () => {
     const e = await setup(book({ position_ms: 590_000, finished_at: 5 }));
     await e.store.start(7);
-    const play = tauri.callsTo("queue_play_at").at(-1) as { index: number; position_ms: number };
-    expect([play.index, play.position_ms]).toEqual([0, 0]);
+    const play = tauri.callsTo("queue_play_at").at(-1) as { index: number; positionMs: number };
+    expect([play.index, play.positionMs]).toEqual([0, 0]);
   });
 
   it("starting a second book does not replace the music that was put aside", async () => {
@@ -178,8 +178,8 @@ describe("moving around", () => {
     await e.store.seekToOffset(120_000);
     expect(tauri.callsTo("seek_ms").at(-1)).toEqual({ ms: 120_000 });
     await e.store.seekToOffset(300_000);
-    const play = tauri.callsTo("queue_play_at").at(-1) as { index: number; position_ms: number };
-    expect([play.index, play.position_ms]).toEqual([1, 100_000]);
+    const play = tauri.callsTo("queue_play_at").at(-1) as { index: number; positionMs: number };
+    expect([play.index, play.positionMs]).toEqual([1, 100_000]);
     expect(puts(e).at(-1)).toBe(300_000);
   });
 
@@ -251,8 +251,8 @@ describe("switching back to music", () => {
     await e.store.returnToMusic();
     expect(tauri.callsTo("pause")).toHaveLength(1);
     expect(puts(e).at(-1)).toBe(220_000);
-    const restore = tauri.callsTo("queue_restore").at(-1) as { index: number; position_ms: number; tracks: { id: number }[] };
-    expect([restore.index, restore.position_ms, restore.tracks.map((t) => t.id)]).toEqual([1, 42_000, [1, 2]]);
+    const restore = tauri.callsTo("queue_restore").at(-1) as { index: number; positionMs: number; tracks: { id: number }[] };
+    expect([restore.index, restore.positionMs, restore.tracks.map((t) => t.id)]).toEqual([1, 42_000, [1, 2]]);
     expect(tauri.callsTo("set_playback_rate").at(-1)).toEqual({ rate: 1 });
     expect(tauri.callsTo("resume")).toHaveLength(1);
     expect(e.store.active).toBeNull();

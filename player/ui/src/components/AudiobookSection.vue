@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { RefreshCw, Trash2 } from "lucide-vue-next";
+import { RefreshCw, Trash2, UserPlus } from "lucide-vue-next";
 import { onMounted, ref } from "vue";
 import { useAudiobooksStore } from "../stores/audiobooks";
 import StateMessage from "../ui/StateMessage.vue";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import UiInput from "../ui/UiInput.vue";
+import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 
 /**
  * Where the server finds audiobooks. The path is on the server's machine
@@ -17,9 +18,44 @@ const name = ref("");
 const error = ref<string | null>(null);
 const busy = ref(false);
 
+const newListener = ref("");
+const listenerOptions = (): UiSelectOption[] => books.listeners.map((l) => ({ value: l.name, label: l.name }));
+const listenerError = ref<string | null>(null);
+
+async function chooseListener(name: string | null): Promise<void> {
+  listenerError.value = null;
+  try {
+    await books.switchListener(name ?? "");
+  } catch (e) {
+    listenerError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function addListener(): Promise<void> {
+  if (!newListener.value.trim()) return;
+  listenerError.value = null;
+  try {
+    await books.addListener(newListener.value);
+    newListener.value = "";
+  } catch (e) {
+    listenerError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function removeCurrentListener(): Promise<void> {
+  const cur = books.listeners.find((l) => l.name === (books.listener || "Default"));
+  if (!cur || cur.id === 0) return;
+  listenerError.value = null;
+  try {
+    await books.removeListener(cur.id);
+  } catch (e) {
+    listenerError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 onMounted(async () => {
   try {
-    await books.loadRoots();
+    await Promise.all([books.loadRoots(), books.loadListeners()]);
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   }
@@ -83,5 +119,35 @@ async function rescan(): Promise<void> {
       <UiButton variant="icon" title="Scan the audiobook folders again" aria-label="Rescan audiobooks" data-testid="rescan-books" @click="rescan"><RefreshCw /></UiButton>
     </div>
     <StateMessage v-if="error" kind="error" class="mt-3">{{ error }}</StateMessage>
+
+    <h4 class="heading-3 mb-1 mt-5">Listener</h4>
+    <UiHint>
+      Everyone using this server shares the books, but each listener keeps their own place, bookmarks, history,
+      speed and finished books. There are no passwords: pick who you are. Removing a listener forgets their
+      progress.
+    </UiHint>
+    <div class="flex gap-2">
+      <UiSelect
+        aria-label="Listener"
+        trigger-class="flex-1"
+        :model-value="books.listener || 'Default'"
+        :options="listenerOptions()"
+        data-testid="listener-select"
+        @update:model-value="chooseListener"
+      />
+      <UiButton
+        variant="icon-danger"
+        title="Remove this listener and their progress"
+        aria-label="Remove listener"
+        :disabled="!books.listener"
+        data-testid="remove-listener"
+        @click="removeCurrentListener"
+      ><Trash2 /></UiButton>
+    </div>
+    <div class="mt-2 flex gap-2">
+      <UiInput v-model="newListener" class="flex-1" type="text" maxlength="40" placeholder="New listener's name" aria-label="New listener name" data-testid="new-listener" @keydown.enter="addListener" />
+      <UiButton variant="primary" :disabled="!newListener.trim()" data-testid="add-listener" @click="addListener"><UserPlus class="mr-1" />Add</UiButton>
+    </div>
+    <StateMessage v-if="listenerError" kind="error" class="mt-3">{{ listenerError }}</StateMessage>
   </div>
 </template>

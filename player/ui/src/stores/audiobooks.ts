@@ -2,14 +2,17 @@ import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 import {
   addAudiobookBookmark,
+  addAudiobookListener,
   addAudiobookRoot,
   deleteAudiobookBookmark,
+  deleteAudiobookListener,
   deleteAudiobookRoot,
   editAudiobook,
   editAudiobookBookmark,
   enrichAudiobooks,
   fetchAudiobook,
   fetchAudiobookHistory,
+  fetchAudiobookListeners,
   fetchAudiobookRoots,
   fetchAudiobooks,
   fetchTrack,
@@ -17,6 +20,8 @@ import {
   saveAudiobookPosition,
   saveAudiobookSettings,
   scanAudiobooks,
+  setAudiobookListener,
+  type AudiobookListener,
   type AudiobookMetaEdit,
   type AudiobookQuery,
 } from "../api";
@@ -78,6 +83,64 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   const player = usePlayerStore();
   const queue = useQueueStore();
   const toasts = useToastsStore();
+
+  // --- listener ----------------------------------------------------------------
+  // Several people can share one server's books, each with their own place,
+  // bookmarks, history, speed and finished flags. There are no accounts: the
+  // name is just remembered here and sent with every audiobook request.
+  const LISTENER_KEY = "kahawai.audiobook-listener";
+  const readListener = (): string => {
+    try {
+      return localStorage.getItem(LISTENER_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  };
+  /** "" is the server's default listener. */
+  const listener = ref(readListener());
+  setAudiobookListener(listener.value);
+  const listeners = ref<AudiobookListener[]>([]);
+
+  async function loadListeners(): Promise<void> {
+    listeners.value = await fetchAudiobookListeners();
+  }
+
+  /** Listen as someone else: the book in hand is put down (position saved) first. */
+  async function switchListener(name: string): Promise<void> {
+    const next = name.trim() === "Default" ? "" : name.trim();
+    if (next === listener.value) return;
+    if (active.value) {
+      await player.pause();
+      await reportNow();
+      await leave(true);
+    }
+    listener.value = next;
+    setAudiobookListener(next);
+    try {
+      if (next) localStorage.setItem(LISTENER_KEY, next);
+      else localStorage.removeItem(LISTENER_KEY);
+    } catch {
+      /* private mode: the choice just will not survive a restart */
+    }
+    detail.value = null;
+    history.value = [];
+    books.value = [];
+    shelf.value = [];
+    await loadLibrary();
+  }
+
+  async function addListener(name: string): Promise<void> {
+    const made = await addAudiobookListener(name);
+    await loadListeners();
+    await switchListener(made.name);
+  }
+
+  async function removeListener(id: number): Promise<void> {
+    const gone = listeners.value.find((l) => l.id === id);
+    await deleteAudiobookListener(id);
+    if (gone && (gone.name === listener.value || (id === 0 && !listener.value))) await switchListener("");
+    await loadListeners();
+  }
 
   // --- library ---------------------------------------------------------------
   const books = ref<Audiobook[]>([]);
@@ -548,6 +611,12 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     loaded,
     error,
     roots,
+    listener,
+    listeners,
+    loadListeners,
+    switchListener,
+    addListener,
+    removeListener,
     authors,
     seriesNames,
     loadLibrary,

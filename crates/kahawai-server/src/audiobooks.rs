@@ -1303,8 +1303,8 @@ pub async fn find_duplicates(pool: &SqlitePool) -> Result<u64, MusicError> {
     // A book's signature: its present files' hashes, in order. Any file
     // without a hash (it is unique by size) means no copy can exist.
     let books = sqlx::query(
-        "SELECT b.id, COALESCE(p.updated_at, 0) AS played FROM audiobooks b
-         LEFT JOIN audiobook_positions p ON p.book_id = b.id
+        "SELECT b.id, COALESCE((SELECT MAX(p.updated_at) FROM audiobook_positions p
+                                 WHERE p.book_id = b.id), 0) AS played FROM audiobooks b
          WHERE EXISTS (SELECT 1 FROM audiobook_parts ap JOIN tracks t ON t.id = ap.track_id
                        WHERE ap.book_id = b.id AND t.missing = 0)
          ORDER BY b.id",

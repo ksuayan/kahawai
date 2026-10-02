@@ -91,7 +91,7 @@ export async function queuePlay(tracks: Track[], index: number): Promise<void> {
 /** Play tracks in order (no repeat, no shuffle) from `index`, `positionMs`
  *  into that track: an audiobook's parts. */
 export async function queuePlayAt(tracks: Track[], index: number, positionMs: number): Promise<void> {
-  await cmd("queue_play_at", { tracks: plain(tracks), index, position_ms: Math.max(0, Math.round(positionMs)) });
+  await cmd("queue_play_at", { tracks: plain(tracks), index, positionMs: Math.max(0, Math.round(positionMs)) });
 }
 
 /** Put a queue back without starting it (switching back from an audiobook):
@@ -106,7 +106,7 @@ export async function queueRestore(
   await cmd("queue_restore", {
     tracks: plain(tracks),
     index,
-    position_ms: Math.max(0, Math.round(positionMs)),
+    positionMs: Math.max(0, Math.round(positionMs)),
     repeat,
     shuffle,
   });
@@ -159,7 +159,7 @@ export async function setFormat(fmt: StreamFormat | null): Promise<void> {
 }
 
 export async function setTrackFormat(trackId: number, fmt: StreamFormat | null): Promise<void> {
-  await cmd("set_track_format", { track_id: trackId, fmt });
+  await cmd("set_track_format", { trackId, fmt });
 }
 
 export async function setVolume(v: number): Promise<void> {
