@@ -29,7 +29,7 @@ const props = withDefaults(
   { getKey: undefined, isCurrent: () => false, number: () => null, rowHeight: 52 },
 );
 const emit = defineEmits<{ (e: "play", item: T): void; (e: "near-end"): void }>();
-defineSlots<{ row?(props: { item: T; index: number }): unknown; footer?(): unknown }>();
+defineSlots<{ row?(props: { item: T; index: number }): unknown; overlay?(): unknown; footer?(): unknown }>();
 
 const lib = useLibraryStore();
 const key = (item: T, index: number) => (props.getKey ? props.getKey(item, index) : props.track(item).id);
@@ -74,6 +74,7 @@ const key = (item: T, index: number) => (props.getKey ? props.getKey(item, index
         />
       </slot>
     </template>
+    <template #overlay><slot name="overlay" /></template>
     <template #footer><slot name="footer" /></template>
   </VirtualList>
 </template>

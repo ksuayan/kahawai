@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { Pencil, Play } from "lucide-vue-next";
+import { usePlayToggle } from "../lib/playToggle";
+import { Pencil } from "lucide-vue-next";
 import { computed } from "vue";
 import { audioFormat, duration } from "../lib/audiobook";
 import { useAudiobooksStore } from "../stores/audiobooks";
@@ -46,18 +47,22 @@ const rows = computed<[string, string][]>(() => {
 function edit(): void {
   if (book.value) books.bookDialog = { kind: "edit", book: book.value };
 }
-function play(): void {
-  const b = book.value;
-  books.bookDialog = null;
-  if (b) void books.start(b.id);
-}
+/** Play, or Pause while this book plays. */
+const playButton = usePlayToggle(
+  () => books.isActive && books.active?.id === book.value?.id,
+  () => {
+    const b = book.value;
+    books.bookDialog = null;
+    if (b) void books.start(b.id);
+  },
+);
 </script>
 
 <template>
   <UiDialog v-model:open="infoOpen" title="Book info" wide>
     <div v-if="book" class="flex flex-col gap-5 sm:flex-row" data-testid="book-info">
       <div class="w-40 shrink-0">
-        <Artwork :hash="book.cover_hash" :size="160" :radius="6" :alt="book.title" />
+        <Artwork :hash="book.cover_hash" placeholder="book" :size="160" :radius="6" :alt="book.title" />
       </div>
       <div class="min-w-0 flex-1">
         <h3 class="heading-2 m-0 mb-1 break-words">{{ book.title }}</h3>
@@ -74,7 +79,7 @@ function play(): void {
     </div>
     <template #footer>
       <UiButton @click="edit"><Pencil /> Edit details</UiButton>
-      <UiButton @click="play"><Play /> Play</UiButton>
+      <UiButton data-testid="book-info-play" @click="playButton.press()"><component :is="playButton.icon" /> {{ playButton.label }}</UiButton>
       <UiButton variant="primary" @click="infoOpen = false">Close</UiButton>
     </template>
   </UiDialog>

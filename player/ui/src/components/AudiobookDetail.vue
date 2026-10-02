@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { BookmarkPlus, Check, Pencil, Play, RotateCcw, Search, Trash2 } from "lucide-vue-next";
+import { usePlayToggle } from "../lib/playToggle";
+import { BookmarkPlus, Check, Pencil, RotateCcw, Search, Trash2 } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { audioFormat, clock, dayLine, duration, groupByDay, remainingText, SPEEDS, speedLabel } from "../lib/audiobook";
 import { useAudiobooksStore } from "../stores/audiobooks";
-import { useNavStore } from "../stores/nav";
 import StateMessage from "../ui/StateMessage.vue";
 import UiButton from "../ui/UiButton.vue";
 import UiSelect from "../ui/UiSelect.vue";
@@ -14,7 +14,6 @@ import PromptDialog from "../ui/PromptDialog.vue";
 
 const props = defineProps<{ id: number }>();
 const books = useAudiobooksStore();
-const nav = useNavStore();
 
 onMounted(() => void books.openDetail(props.id));
 watch(() => props.id, (id) => void books.openDetail(id));
@@ -39,6 +38,8 @@ const bookSpeed = computed(() => String(playingThis.value ? books.speed : (book.
 async function play(from?: number): Promise<void> {
   await books.start(props.id, from);
 }
+/** Play (or Continue), or Pause while this book plays; paused, it carries on where it is. */
+const playButton = usePlayToggle(() => playingThis.value, () => play());
 
 const renaming = ref<{ id: number; name: string } | null>(null);
 const editing = ref(false);
@@ -54,13 +55,12 @@ const subtitle = computed(() => {
 </script>
 
 <template>
-  <ViewShell width="medium">
-    <button type="button" class="mb-3 text-xs text-dim hover:text-fg" data-testid="back" @click="nav.go('audiobooks')">← Audiobooks</button>
+  <ViewShell width="medium" section="audiobooks" :crumb="book?.title">
     <StateMessage v-if="books.error && !book" kind="error">{{ books.error }}</StateMessage>
     <StateMessage v-else-if="!book" kind="loading">Loading…</StateMessage>
     <template v-else>
       <div class="flex gap-5">
-        <Artwork :hash="book.cover_hash" :size="180" :radius="8" :alt="book.title" />
+        <Artwork :hash="book.cover_hash" placeholder="book" :size="180" :radius="8" :alt="book.title" />
         <div class="min-w-0 flex-1">
           <h2 class="heading-1 m-0 mb-1" data-testid="book-title">{{ book.title }}</h2>
           <p v-if="subtitle" class="m-0 text-dim" data-testid="book-by">{{ subtitle }}</p>
@@ -76,11 +76,11 @@ const subtitle = computed(() => {
             <div class="h-full bg-accent" :style="{ width: `${Math.round(Math.min(1, offset / Math.max(1, book.duration_ms)) * 100)}%` }" />
           </div>
           <div class="mt-4 flex flex-wrap items-center gap-2">
-            <UiButton v-if="!playingThis" variant="primary" data-testid="play-book" @click="play()">
-              <Play /> {{ started && !book.finished_at ? `Continue from ${clock(book.position_ms)}` : "Play" }}
+            <UiButton variant="primary" data-testid="play-book" @click="playButton.press()">
+              <component :is="playButton.icon" />
+              {{ playButton.playing ? "Pause" : started && !book.finished_at ? `Continue from ${clock(offset)}` : "Play" }}
             </UiButton>
             <UiButton v-if="started && !playingThis" data-testid="restart-book" @click="play(0)"><RotateCcw /> Start over</UiButton>
-            <UiButton v-if="playingThis" disabled>Playing</UiButton>
             <UiButton data-testid="toggle-finished" @click="books.setFinished(book.id, !book.finished_at)">
               <Check /> {{ book.finished_at ? "Mark not finished" : "Mark finished" }}
             </UiButton>

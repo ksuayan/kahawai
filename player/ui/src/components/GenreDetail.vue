@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { ChevronLeft, Play } from "lucide-vue-next";
+import { usePlayToggle } from "../lib/playToggle";
 import { computed, onMounted, ref, watch } from "vue";
 import { fetchGenreTracks } from "../api";
 import { SORT_OPTIONS } from "../lib/sorting";
 import { useLibraryStore } from "../stores/library";
-import { useNavStore } from "../stores/nav";
 import { useQueueStore } from "../stores/queue";
 import { useViewPrefsStore } from "../stores/viewPrefs";
 import { isPlayable, type Track } from "../types";
@@ -22,7 +21,6 @@ const props = defineProps<{ name: string }>();
 const PAGE = 200;
 
 const lib = useLibraryStore();
-const nav = useNavStore();
 const queue = useQueueStore();
 const view = useViewPrefsStore();
 
@@ -86,6 +84,8 @@ const playable = computed(() => tracks.value.filter(isPlayable));
 function playAll(): void {
   if (playable.value.length > 0) void queue.playAll(playable.value, 0);
 }
+/** Play, or Pause while one of this genre's tracks plays. */
+const playButton = usePlayToggle((t) => tracks.value.some((x) => x.id === t.id), playAll);
 
 function playFrom(track: Track): void {
   const idx = playable.value.findIndex((t) => t.id === track.id);
@@ -94,10 +94,7 @@ function playFrom(track: Track): void {
 </script>
 
 <template>
-  <ViewShell width="full">
-    <div class="shrink-0">
-      <UiButton variant="icon" class="mb-3" @click="nav.go('genres')"><ChevronLeft /> Genres</UiButton>
-    </div>
+  <ViewShell width="full" section="genres" :crumb="name">
     <StateMessage v-if="loading" kind="loading">Loading {{ name }}…</StateMessage>
     <StateMessage v-else-if="error && tracks.length === 0" kind="error">{{ error }}</StateMessage>
     <template v-else>
@@ -106,8 +103,8 @@ function playFrom(track: Track): void {
           <h2 class="heading-1 mb-1.5 mt-1">{{ name }}</h2>
           <p class="m-0 mb-1 text-dim">{{ total.toLocaleString("en-US") }} tracks</p>
           <div class="mt-3 flex items-center gap-2">
-            <UiButton variant="primary" :disabled="playable.length === 0" @click="playAll">
-              <Play class="fill-current" /> Play
+            <UiButton variant="primary" :disabled="playable.length === 0" data-testid="play-all" @click="playButton.press()">
+              <component :is="playButton.icon" class="fill-current" /> {{ playButton.label }}
             </UiButton>
             <TrackMenu :tracks="tracks" layout="buttons" />
           </div>

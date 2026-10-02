@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Music } from "lucide-vue-next";
+import { BookOpen, Music } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { artworkSrc } from "../api";
 
@@ -11,8 +11,10 @@ const props = withDefaults(
     radius?: number;
     /** Fill the parent's width as a square instead of using `size`. */
     fluid?: boolean;
+    /** What stands in for a missing cover: a note for music, an open book for an audiobook. */
+    placeholder?: "music" | "book";
   }>(),
-  { size: 48, alt: "Artwork", radius: 6, fluid: false },
+  { size: 48, alt: "Artwork", radius: 6, fluid: false, placeholder: "music" },
 );
 
 const failed = ref(false);
@@ -41,8 +43,8 @@ const boxStyle = computed(() => ({
       class="block size-full object-cover"
       @error="failed = true"
     />
-    <div v-else class="flex size-full items-center justify-center text-faint" aria-hidden="true">
-      <Music :size="fluid ? 72 : size * 0.45" :stroke-width="1.5" />
+    <div v-else class="flex size-full items-center justify-center text-faint" aria-hidden="true" :data-placeholder="placeholder">
+      <component :is="placeholder === 'book' ? BookOpen : Music" :size="fluid ? 72 : size * 0.45" :stroke-width="1.5" />
     </div>
   </div>
 </template>

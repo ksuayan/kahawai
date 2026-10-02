@@ -144,7 +144,7 @@ describe("NowPlayingView", () => {
   it("navigates back to the library; EQ is a transport control now, not a separate button", async () => {
     const w = await boot();
     expect(w.findAll("button").some((b) => b.text().trim() === "EQ")).toBe(false);
-    await w.findAll("button").find((b) => b.text().includes("Library"))!.trigger("click");
+    await w.findAll('[data-testid="crumb"]').find((b) => b.text() === "Albums")!.trigger("click");
     expect(useNavStore().view.name).toBe("albums");
   });
 });

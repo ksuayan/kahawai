@@ -166,7 +166,7 @@ const filtered = (): boolean => !!(books.query.q || books.query.author || books.
           data-testid="book-row"
           @click="nav.go('audiobook', item.id)"
         >
-          <Artwork :hash="item.cover_hash" :size="48" :radius="4" :alt="item.title" />
+          <Artwork :hash="item.cover_hash" placeholder="book" :size="48" :radius="4" :alt="item.title" />
           <div class="min-w-0 flex-1">
             <div class="truncate font-semibold">{{ item.title }}</div>
             <div class="truncate text-xs text-dim">{{ byline(item) }}</div>

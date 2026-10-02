@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronLeft, ChevronUp, ListPlus, Pencil, Play, X } from "lucide-vue-next";
+import { usePlayToggle } from "../lib/playToggle";
+import { ChevronDown, ChevronUp, ListPlus, Pencil, X } from "lucide-vue-next";
 import { onMounted, ref, watch } from "vue";
 import { useNavStore } from "../stores/nav";
 import { usePlaylistsStore } from "../stores/playlists";
@@ -42,6 +43,8 @@ function playAll(): void {
   const list = (playlists.detail?.tracks ?? []).filter(isPlayable);
   if (list.length > 0) void queue.playAll(list, 0);
 }
+/** Play, or Pause while one of this playlist's tracks plays. */
+const playButton = usePlayToggle((t) => (playlists.detail?.tracks ?? []).some((x) => x.id === t.id), playAll);
 
 async function addAllToQueue(): Promise<void> {
   const list = (playlists.detail?.tracks ?? []).filter(isPlayable);
@@ -104,8 +107,7 @@ function startRename(): void {
 </script>
 
 <template>
-  <ViewShell>
-    <UiButton variant="icon" class="mb-3" @click="nav.go('playlists')"><ChevronLeft /> Playlists</UiButton>
+  <ViewShell section="playlists" :crumb="playlists.detail?.playlist.name">
     <StateMessage v-if="playlists.loading" kind="loading">Loading playlist…</StateMessage>
     <StateMessage v-else-if="playlists.error" kind="error">{{ playlists.error }}</StateMessage>
     <div v-else-if="playlists.detail">
@@ -131,7 +133,7 @@ function startRename(): void {
           <p class="m-0 mt-1 text-dim">{{ playlists.detail.tracks.length }} tracks</p>
         </div>
         <div class="flex shrink-0 items-center gap-2">
-          <UiButton variant="primary" @click="playAll"><Play class="fill-current" /> Play</UiButton>
+          <UiButton variant="primary" data-testid="play-all" @click="playButton.press()"><component :is="playButton.icon" class="fill-current" /> {{ playButton.label }}</UiButton>
           <UiButton @click="addAllToQueue"><ListPlus /> Add to queue</UiButton>
           <UiButton variant="danger" @click="showDelete = true">Delete</UiButton>
         </div>

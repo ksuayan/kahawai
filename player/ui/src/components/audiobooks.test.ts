@@ -79,6 +79,7 @@ describe("Audiobooks library view", () => {
     expect(cards).toHaveLength(2);
     expect(cards[0].text()).toContain("Book 1");
     expect(cards[0].text()).toContain("Ann Author");
+    expect(cards[0].find('[data-placeholder="book"]').exists()).toBe(true); // no cover: an open book, not a note
     await cards[1].trigger("click");
     expect(useNavStore().view).toEqual({ name: "audiobook", id: 2 });
   });
@@ -215,6 +216,19 @@ describe("Audiobook detail", () => {
     expect(wrapper.get('[data-testid="history-day"]').text()).toContain("stopped at 1:00:00, 10 min listened");
   });
 
+  it("has the same breadcrumb as the other sections: Audiobooks › the book", async () => {
+    routes();
+    const { wrapper } = mountApp(AudiobookDetailView, { id: 1 }, {}, () => {
+      useNavStore().go("audiobooks");
+      useNavStore().go("audiobook", 1);
+    });
+    await settle();
+    expect(wrapper.get('[data-testid="crumb-current"]').text()).toBe("Book 1");
+    expect(useNavStore().trail.at(-1)?.label).toBe("Book 1");
+    await wrapper.get('[data-testid="crumb"]').trigger("click");
+    expect(useNavStore().view).toEqual({ name: "audiobooks", id: undefined });
+  });
+
   it("Continue starts the book at the saved place with its speed", async () => {
     routes();
     tauri.on("get_state", makeState({ status: "stopped", track: null }));
@@ -323,11 +337,27 @@ describe("Audiobook controls", () => {
     return { books, player };
   }
 
-  it("Now Playing shows the book file's format, bitrate and channels", async () => {
-    await playing();
+  it("Now Playing shows the book, not the file: title, author and narrator, chapter, progress, speed and format", async () => {
+    const { books } = await playing();
     const w = mountOnSamePinia(NowPlayingView);
     await settle();
+    expect(w.get('[data-testid="np-kind"]').text()).toBe("Audiobook");
+    expect(w.get('[data-testid="np-title"]').text()).toBe("Book 1");
+    expect(w.get('[data-testid="np-byline"]').text()).toBe("by Ann Author · read by Nora Narrator");
+    expect(w.get('[data-testid="np-series"]').text()).toBe("Saga, book 2");
+    const chapter = w.get('[data-testid="np-chapter"]').text();
+    expect(chapter).toContain("Chapter 1 of 2");
+    expect(chapter).toContain("Opening");
+    expect(chapter).toContain("0:05 of 16:40");
+    expect(w.get('[data-testid="np-book-progress"]').text()).toContain("0:05 of 10 h");
+    expect(w.get('[data-testid="np-speed"]').text()).toBe("1.25×");
     expect(w.get('[data-testid="np-book-format"]').text()).toMatch(/kHz/);
+    expect(w.find('[data-placeholder="book"]').exists()).toBe(true);
+    // Book actions, not the music ones.
+    expect(w.find('[data-testid="add-to-queue"]').exists()).toBe(false);
+    expect(w.find('[data-testid="np-back-to-music"]').exists()).toBe(!!books.stash);
+    await w.get('[data-testid="np-book-details"]').trigger("click");
+    expect(useNavStore().view).toEqual({ name: "audiobook", id: 1 });
     w.unmount();
   });
 

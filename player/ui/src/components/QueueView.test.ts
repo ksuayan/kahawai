@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeAlbum, makeState, makeTrack, mockFetch } from "../test/fixtures";
 import { $$, bodyOf, dialog, mountApp, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
@@ -25,13 +25,22 @@ const rows = (w: Awaited<ReturnType<typeof mountQueue>>) => w.findAll('[data-tes
 const btn = (w: Awaited<ReturnType<typeof mountQueue>>, text: string | RegExp) =>
   w.findAll("button").find((x) => (typeof text === "string" ? x.text() === text : text.test(x.text())))!;
 
-function dnd(target: Element, type: "dragstart" | "dragover" | "drop" | "dragend" | "dragleave", store: Record<string, string>) {
-  const e = new Event(type, { bubbles: true, cancelable: true });
-  Object.defineProperty(e, "dataTransfer", {
-    value: { effectAllowed: "", dropEffect: "", setData: (k: string, v: string) => (store[k] = v), getData: (k: string) => store[k] ?? "" },
-  });
-  target.dispatchEvent(e);
-  return e;
+/** Row height in the Queue's list (the drop geometry is computed from it). */
+const ROW = 52;
+const pointer = (type: string, x: number, y: number) =>
+  new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y, pointerType: "mouse" });
+
+/** Press on row `from`, move to `y` (px from the top of the list), and optionally let go. */
+async function drag(w: Awaited<ReturnType<typeof mountQueue>>, from: number, y: number, release = true) {
+  const start = from * ROW + ROW / 2;
+  rows(w)[from].element.dispatchEvent(pointer("pointerdown", 40, start));
+  window.dispatchEvent(pointer("pointermove", 40, start + 8)); // past the threshold: the drag begins
+  window.dispatchEvent(pointer("pointermove", 40, y));
+  await settle();
+  if (release) {
+    window.dispatchEvent(pointer("pointerup", 40, y));
+    await settle();
+  }
 }
 
 describe("QueueView", () => {
@@ -150,7 +159,7 @@ describe("QueueView", () => {
 
     it("dragging still works alongside double-click", async () => {
       const w = await mountQueue();
-      expect(rows(w)[0].attributes("draggable")).toBe("true");
+      expect(rows(w)[0].attributes("data-reorderable")).toBe("true");
     });
   });
 
@@ -207,37 +216,74 @@ describe("QueueView", () => {
   });
 
   describe("drag and drop reordering", () => {
-    it("drops a row onto another to reorder", async () => {
+    // The list and its scroller sit at the window's top-left, 800 × 600.
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+        { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600, x: 0, y: 0, toJSON: () => ({}) } as DOMRect,
+      );
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    it("while dragging: the row stays dimmed in a dashed outline, a copy follows the pointer, and the gap it will land in is marked", async () => {
       const w = await mountQueue();
-      const store: Record<string, string> = {};
-      dnd(rows(w)[0].element, "dragstart", store);
-      dnd(rows(w)[2].element, "dragover", store);
+      await drag(w, 0, 2 * ROW + 4, false); // between Beta and Gamma
+      expect(rows(w)[0].classes()).toContain("opacity-40");
+      const outline = w.get('[data-testid="drag-outline"]');
+      expect(outline.classes().join(" ")).toContain("border-dashed");
+      expect(outline.attributes("style")).toContain(`top: ${0 * ROW + 1}px`);
+      expect(w.get('[data-testid="drop-slot"]').attributes("data-slot")).toBe("2");
+      // The rows beside the gap step apart.
+      expect(rows(w)[1].attributes("style")).toContain("translateY(-4px)");
+      expect(rows(w)[2].attributes("style")).toContain("translateY(4px)");
+      expect(document.body.querySelector('[data-testid="drag-ghost"]')?.textContent).toContain("Alpha");
+      window.dispatchEvent(pointer("pointerup", 40, 2 * ROW + 4));
       await settle();
-      expect(rows(w)[2].classes().join(" ")).toContain("inset_0_2px_0"); // drop indicator
-      dnd(rows(w)[2].element, "drop", store);
-      await settle();
-      expect(useQueueStore().tracks.map((t) => t.title)).toEqual(["Beta", "Gamma", "Alpha"]);
     });
 
-    it("dims the dragged row and clears the indicator when the drag ends without a drop", async () => {
+    it("dropping in the gap moves the row there, in place", async () => {
       const w = await mountQueue();
-      const store: Record<string, string> = {};
-      dnd(rows(w)[0].element, "dragstart", store);
+      await drag(w, 0, 3 * ROW - 2); // below Gamma
+      expect(useQueueStore().tracks.map((t) => t.title)).toEqual(["Beta", "Gamma", "Alpha"]);
+      expect(tauri.callsTo("queue_move")).toEqual([{ from: 0, to: 2 }]);
+      await drag(w, 2, 2); // Alpha back to the top
+      expect(useQueueStore().tracks.map((t) => t.title)).toEqual(["Alpha", "Beta", "Gamma"]);
+      // Everything is cleared afterwards.
+      expect(w.find('[data-testid="drag-outline"]').exists()).toBe(false);
+      expect(w.find('[data-testid="drop-slot"]').exists()).toBe(false);
+      expect(document.body.querySelector('[data-testid="drag-ghost"]')).toBeNull();
+    });
+
+    it("offers no slot beside the row itself, and dropping there does nothing", async () => {
+      const w = await mountQueue();
+      await drag(w, 1, ROW + 4, false); // just above Beta, its own place
+      expect(w.find('[data-testid="drop-slot"]').exists()).toBe(false);
+      window.dispatchEvent(pointer("pointerup", 40, ROW + 4));
       await settle();
-      expect(rows(w)[0].classes()).toContain("opacity-40");
-      dnd(rows(w)[0].element, "dragend", store);
+      expect(tauri.callsTo("queue_move")).toHaveLength(0);
+    });
+
+    it("Escape cancels: nothing moves", async () => {
+      const w = await mountQueue();
+      await drag(w, 0, 3 * ROW - 2, false);
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       await settle();
-      expect(rows(w)[0].classes()).not.toContain("opacity-40");
+      expect(w.find('[data-testid="drag-outline"]').exists()).toBe(false);
+      window.dispatchEvent(pointer("pointerup", 40, 3 * ROW - 2));
+      await settle();
       expect(useQueueStore().tracks.map((t) => t.title)).toEqual(["Alpha", "Beta", "Gamma"]);
     });
 
-    it("dropping a row on itself does nothing", async () => {
+    it("a press without moving is a click, not a drag; the row's buttons never start one", async () => {
       const w = await mountQueue();
-      const store: Record<string, string> = {};
-      dnd(rows(w)[1].element, "dragstart", store);
-      dnd(rows(w)[1].element, "drop", store);
+      rows(w)[0].element.dispatchEvent(pointer("pointerdown", 40, 20));
+      window.dispatchEvent(pointer("pointerup", 40, 21));
       await settle();
-      expect(tauri.callsTo("queue_play")).toHaveLength(0);
+      expect(w.find('[data-testid="drag-outline"]').exists()).toBe(false);
+      rows(w)[0].get('button[aria-label="Remove from queue"]').element.dispatchEvent(pointer("pointerdown", 700, 20));
+      window.dispatchEvent(pointer("pointermove", 700, 140));
+      await settle();
+      expect(w.find('[data-testid="drag-outline"]').exists()).toBe(false);
+      window.dispatchEvent(pointer("pointerup", 700, 140));
     });
   });
 
@@ -316,7 +362,13 @@ describe("QueueView: sort and grid", () => {
     expect(r.map((row) => row.text().includes("Ypsilon"))).toEqual([true, false]); // Abe before Zed
     expect(r[0].text()).toContain("2"); // its real queue position
     expect(w.get('[data-testid="queue-sort-hint"]').text()).toContain("play order is unchanged");
-    expect(r[0].attributes("draggable")).toBe("false");
+    expect(r[0].attributes("data-reorderable")).toBe("false");
+    // A press-and-move on a sorted row starts no drag.
+    r[0].element.dispatchEvent(pointer("pointerdown", 40, 20));
+    window.dispatchEvent(pointer("pointermove", 40, 90));
+    await settle();
+    expect(w.find('[data-testid="drag-outline"]').exists()).toBe(false);
+    window.dispatchEvent(pointer("pointerup", 40, 90));
     expect(r[0].findAll("button").find((b) => b.attributes("aria-label") === "Move down")!.attributes("disabled")).toBeDefined();
 
     await r[0].trigger("dblclick");
