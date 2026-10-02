@@ -651,6 +651,45 @@ fn queue_play(
     Ok(())
 }
 
+/// Play `tracks` in order from `index`, `position_ms` into that track, with
+/// repeat and shuffle off (an audiobook's parts).
+#[tauri::command]
+fn queue_play_at(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tracks: Vec<Track>,
+    index: usize,
+    position_ms: u64,
+) -> Result<(), String> {
+    state.engine.play_queue_at(tracks, index, position_ms);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
+/// Put a queue back without starting it (switching back from an audiobook):
+/// the cursor lands on `index`, and play resumes `position_ms` in.
+#[tauri::command]
+fn queue_restore(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tracks: Vec<Track>,
+    index: usize,
+    position_ms: u64,
+    repeat: String,
+    shuffle: bool,
+) -> Result<(), String> {
+    let repeat = match repeat.as_str() {
+        "all" => RepeatMode::All,
+        "one" => RepeatMode::One,
+        _ => RepeatMode::Off,
+    };
+    state
+        .engine
+        .restore_queue(tracks, index, repeat, shuffle, position_ms);
+    emit_state(&app, &state.engine);
+    Ok(())
+}
+
 /// Move a queue entry (list positions) without interrupting playback. No
 /// `emit_state`: the playback thread emits the new queue itself once applied.
 #[tauri::command]
@@ -1322,6 +1361,8 @@ fn main() {
             set_server_url,
             play_track,
             queue_play,
+            queue_play_at,
+            queue_restore,
             queue_move,
             queue_remove,
             pause,

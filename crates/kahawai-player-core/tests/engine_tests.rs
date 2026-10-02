@@ -4559,3 +4559,62 @@ fn the_speed_is_clamped_and_ignores_nonsense() {
     h.player.set_playback_rate(f32::NAN);
     assert_eq!(h.player.snapshot().playback_rate, 1.0);
 }
+
+// ---------------------------------------------------------------------------
+// Playing a queue from a position (audiobook parts) and putting one back
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_queue_can_start_partway_into_a_part_without_playing_the_wrong_place() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, RATE as usize * 10)]);
+    h.stub.add(2, &[(660.0, RATE as usize * 10)]);
+    h.player.set_shuffle(true);
+    h.player.set_repeat(RepeatMode::All);
+    h.player.play_queue_at(
+        vec![
+            track(1, AudioFormat::Wav, 10_000),
+            track(2, AudioFormat::Wav, 10_000),
+        ],
+        1,
+        4000,
+    );
+    for _ in 0..4 {
+        h.player.pump();
+    }
+    let snap = h.player.snapshot();
+    assert_eq!(snap.current_id, Some(2), "starts on the chosen part");
+    assert!(!snap.shuffle, "a book plays in order");
+    assert_eq!(snap.repeat, RepeatMode::Off);
+    assert!(
+        (4000..5600).contains(&snap.position_ms),
+        "opened at the position, not at 0:00 and then moved: {} ms",
+        snap.position_ms
+    );
+}
+
+#[test]
+fn a_restored_queue_waits_for_play_and_resumes_where_it_was() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(440.0, RATE as usize * 10)]);
+    h.player.restore_queue(
+        vec![track(1, AudioFormat::Wav, 10_000)],
+        0,
+        RepeatMode::All,
+        true,
+        3000,
+    );
+    let snap = h.player.snapshot();
+    assert_eq!(snap.status, PlayerStatus::Stopped, "put back, not started");
+    assert_eq!(
+        snap.position_ms, 3000,
+        "and it shows where play will resume"
+    );
+    assert_eq!(snap.repeat, RepeatMode::All);
+    assert!(snap.shuffle);
+    h.player.resume();
+    for _ in 0..4 {
+        h.player.pump();
+    }
+    assert!(h.player.snapshot().position_ms >= 3000);
+}

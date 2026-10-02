@@ -88,6 +88,30 @@ export async function queuePlay(tracks: Track[], index: number): Promise<void> {
   await cmd("queue_play", { tracks: plain(tracks), index });
 }
 
+/** Play tracks in order (no repeat, no shuffle) from `index`, `positionMs`
+ *  into that track: an audiobook's parts. */
+export async function queuePlayAt(tracks: Track[], index: number, positionMs: number): Promise<void> {
+  await cmd("queue_play_at", { tracks: plain(tracks), index, position_ms: Math.max(0, Math.round(positionMs)) });
+}
+
+/** Put a queue back without starting it (switching back from an audiobook):
+ *  the cursor lands on `index`, and play resumes `positionMs` in. */
+export async function queueRestore(
+  tracks: Track[],
+  index: number,
+  positionMs: number,
+  repeat: RepeatMode,
+  shuffle: boolean,
+): Promise<void> {
+  await cmd("queue_restore", {
+    tracks: plain(tracks),
+    index,
+    position_ms: Math.max(0, Math.round(positionMs)),
+    repeat,
+    shuffle,
+  });
+}
+
 /** Reorder the core's queue in place; playback is not interrupted. */
 export async function queueMove(from: number, to: number): Promise<void> {
   await cmd("queue_move", { from, to });

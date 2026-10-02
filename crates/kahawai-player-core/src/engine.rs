@@ -786,6 +786,26 @@ impl Player {
         self.open_current(None);
     }
 
+    /// Play `tracks` in order (no repeat, no shuffle) from `index`, starting
+    /// `position_ms` into that track: an audiobook's parts. Opening at the
+    /// position, rather than seeking after the start, means the book never
+    /// plays a moment of the wrong place.
+    pub fn play_queue_at(&mut self, tracks: Vec<Track>, index: usize, position_ms: u64) {
+        self.error = None;
+        self.queue.set_tracks(tracks);
+        if self.queue.is_empty() {
+            self.stop();
+            return;
+        }
+        self.queue.repeat = RepeatMode::Off;
+        self.queue.set_shuffle(false);
+        for _ in 0..index.min(self.queue.len().saturating_sub(1)) {
+            self.queue.next_track();
+        }
+        self.persist_queue();
+        self.open_current((position_ms > 0).then_some(position_ms));
+    }
+
     /// Restore a persisted queue without starting playback (launch
     /// restore). The cursor lands on the persisted index; status stays
     /// Stopped so the UI can hydrate and the user presses play.
@@ -2547,6 +2567,8 @@ fn expected_frames(track: &Track, rate: u32) -> u64 {
 #[derive(Debug)]
 pub enum EngineCommand {
     PlayQueue(Vec<Track>, usize),
+    /// Play a queue in order from `index`, `position_ms` into that track.
+    PlayQueueAt(Vec<Track>, usize, u64),
     /// Move a queue entry (list positions) without interrupting playback.
     MoveQueueItem(usize, usize),
     /// Remove a queue entry (list position); moves on only if it was playing.
@@ -2865,6 +2887,30 @@ impl EngineController {
 
     pub fn play_queue(&self, tracks: Vec<Track>, index: usize) {
         self.send(EngineCommand::PlayQueue(tracks, index));
+    }
+    /// Play a queue in order from `index`, starting `position_ms` into that
+    /// track (an audiobook's parts).
+    pub fn play_queue_at(&self, tracks: Vec<Track>, index: usize, position_ms: u64) {
+        self.send(EngineCommand::PlayQueueAt(tracks, index, position_ms));
+    }
+    /// Put a queue back without starting it: the cursor lands on `index`
+    /// and pressing play resumes `position_ms` in (switching back from an
+    /// audiobook to the music that was paused).
+    pub fn restore_queue(
+        &self,
+        tracks: Vec<Track>,
+        index: usize,
+        repeat: RepeatMode,
+        shuffle: bool,
+        position_ms: u64,
+    ) {
+        self.send(EngineCommand::RestoreQueue {
+            tracks,
+            index,
+            repeat,
+            shuffle,
+            position_ms,
+        });
     }
     /// Reorder the queue in place; playback continues uninterrupted.
     pub fn move_queue_item(&self, from: usize, to: usize) {
@@ -3576,6 +3622,7 @@ fn snapshot_key(s: &PlayerSnapshot) -> SnapshotKey {
 fn apply_command(player: &mut Player, cmd: EngineCommand) {
     match cmd {
         EngineCommand::PlayQueue(tracks, index) => player.play_queue(tracks, index),
+        EngineCommand::PlayQueueAt(tracks, index, pos) => player.play_queue_at(tracks, index, pos),
         EngineCommand::MoveQueueItem(from, to) => player.move_queue_item(from, to),
         EngineCommand::RemoveQueueItem(i) => player.remove_queue_item(i),
         EngineCommand::Pause => player.pause(),
