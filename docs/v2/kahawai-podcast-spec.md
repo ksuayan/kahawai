@@ -47,6 +47,12 @@ podcast_feeds(id INTEGER PK, feed_url TEXT UNIQUE, title, author,
 
 - `GET/POST/DELETE /api/podcasts/feeds`; subscribe by pasting a feed URL.
   Probe on subscribe: fetch, parse, report title/episode count or the error.
+- Parse with a tolerant feed crate (e.g. `feed-rs`), not schema validation:
+  RSS/iTunes have no DTD and real feeds routinely break the formats. Keep a
+  fixtures suite of 20-30 real feeds (encodings, odd dates, `itunes:duration`
+  as seconds/MM:SS/HH:MM:SS, missing or reused GUIDs, relative and redirecting
+  enclosure URLs, HTML in titles). A feed that does not validate still loads,
+  with a warning.
 - RSS 2.0 + Atom; read the iTunes namespace (`itunes:duration`,
   `itunes:image`, `itunes:explicit`) and Podlove Simple Chapters where
   present (store chapters; UI later).

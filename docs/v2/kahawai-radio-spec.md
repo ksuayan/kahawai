@@ -71,6 +71,14 @@ radio_history(id INTEGER PK, station_name TEXT, stream_title TEXT,
   Opus, FLAC. **Verify AAC/AAC+ coverage at build time** — most stations
   are AAC+ or MP3; if the pipeline lacks HE-AAC, that is a build blocker
   for D3, not a spec change.
+  **Checked (2026-10-02):** the player decodes with Symphonia 0.6, whose AAC
+  decoder is **LC-only** — it rejects SBR/HE-AAC streams ("aac: aac too
+  complex"). So AAC+ stations cannot play through the current pipeline.
+  Options, cheapest first: (1) route AAC+ stations through the server's
+  ffmpeg pipeline (relay + transcode to FLAC/PCM; a deliberate exception to
+  "no relay", and recording/timeshift then work on the decoded copy);
+  (2) bind a native HE-AAC decoder in the player (new dependency; check
+  licence against AGPL); (3) wait on Symphonia. Decide after the D3 spike.
 - Auto-reconnect: exponential backoff 1 s → 2 s → 5 s → 15 s → 60 s cap;
   try the station's alternate URLs/mounts before surfacing failure;
   visible "reconnecting…" state, never a silent stall.
