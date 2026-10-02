@@ -503,8 +503,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -1117,6 +1119,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "feed-rs"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1b8e25998007f8af0befc64e16ac2dd23cc0d5b76052d52d0b15d5acd7ed908"
+dependencies = [
+ "chrono",
+ "mediatype",
+ "quick-xml",
+ "regex",
+ "serde",
+ "serde_json",
+ "siphasher",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2224,6 +2243,7 @@ dependencies = [
  "axum",
  "blake3",
  "bytes",
+ "feed-rs",
  "flacenc",
  "kahawai-core",
  "libc",
@@ -2448,6 +2468,15 @@ checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
 dependencies = [
  "cfg-if",
  "digest",
+]
+
+[[package]]
+name = "mediatype"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0695a693e38d35838dd34bc3ab19911395f6837ccf55c7271189cfb12cb8b57f"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -3231,6 +3260,7 @@ version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
+ "encoding_rs",
  "memchr",
 ]
 

@@ -34,6 +34,9 @@ impl IntoResponse for ApiError {
             MusicError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             MusicError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             MusicError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            // A feed, directory or station that could not be reached: the reason
+            // is the message, not an internal fault.
+            MusicError::Http(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             MusicError::BadRange => (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 "unsatisfiable byte range".to_string(),

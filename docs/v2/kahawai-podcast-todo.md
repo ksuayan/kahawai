@@ -5,13 +5,13 @@ Sizes: XS < S < M < L. Spec: `kahawai-podcast-spec.md` (2026-10-02).
 
 | # | Feature | Size | Status | Notes |
 |---|---------|------|--------|-------|
-| 1 | `podcast_feeds` table + subscribe/unsubscribe API + URL probe | S | Not started | D1 |
-| 2 | RSS 2.0 + Atom parser; iTunes namespace (`duration`, `image`, `explicit`); Podlove chapters stored | M | Not started | D1; chapters stored, UI later |
-| 3 | OPML import + export | S | Not started | D1; never lock in subscriptions |
-| 4 | Background refresh scheduler (persistent jobs; default 6 h, staggered) | M | Not started | D2 |
-| 5 | `podcast_episodes` table; GUID-keyed upsert; feed-truncation handling | S | Not started | D2 |
-| 6 | Episode list API (newest-first, unplayed filter, played state, 97% rule) | S | Not started | D2 |
-| 7 | Failing-feed errors surfaced (`last_error`, UI badge) | XS | Not started | D2; never silently drop |
+| 1 | `podcast_feeds` table + subscribe/unsubscribe API + URL probe | S | Built | `POST/GET/DELETE /api/podcasts/feeds`; fetched and read before saving; duplicate guard on the normalized address; a web page is refused and the feed it points to is named |
+| 2 | RSS 2.0 + Atom parser; iTunes namespace (`duration`, `image`, `explicit`); Podlove chapters stored | M | Built | `feed-rs` plus a cleaning pass (BOM, junk, UTF-16/Windows-1252, bare & and HTML entities, control characters, truncated feeds); `itunes:duration` read by us because `feed-rs` does not; Podlove chapters not stored yet |
+| 3 | OPML import + export | S | Built | `POST /api/podcasts/feeds/import-opml` (file as the body; feeds read in the background, 4 at a time) and `GET .../export-opml` |
+| 4 | Background refresh scheduler (persistent jobs; default 6 h, staggered) | M | Partly built | Manual refresh (`POST /api/podcasts/refresh`, one feed or all, conditional GET with ETag) is done; the 6-hourly staggered background job is not |
+| 5 | `podcast_episodes` table; GUID-keyed upsert; feed-truncation handling | S | Built | `podcast_episodes` keyed by (feed, guid); an entry with no guid is keyed by its audio address; dropped episodes are kept and flagged |
+| 6 | Episode list API (newest-first, unplayed filter, played state, 97% rule) | S | Built | `GET /api/podcasts/feeds/{id}/episodes?unplayed=1`, mark played/unplayed. The 97% auto-played rule comes with playback positions |
+| 7 | Failing-feed errors surfaced (`last_error`, UI badge) | XS | Built | `last_error` is stored on the feed and cleared when it works again; the UI badge comes with the Player views |
 | 8 | Download manager: queued jobs, resume via Range, file layout `Show/date - title.ext` | M | Not started | D3 |
 | 9 | Auto-download rules: keep-N latest unplayed; delete oldest played first | S | Not started | D3 |
 | 10 | Played-file janitor (`delete_played_after_days`, 0 = never) | XS | Not started | D3 |

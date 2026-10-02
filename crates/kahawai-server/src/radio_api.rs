@@ -632,7 +632,7 @@ mod tests {
         let (st, _) = call(&e.app, Method::GET, "/api/radio/search?q=x", None).await;
         assert_eq!(
             st,
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
             "nothing cached, nothing reachable"
         );
         // An old (expired) answer stands in.
@@ -767,7 +767,7 @@ mod tests {
             Some(serde_json::json!({"url": "http://127.0.0.1:1/x"})),
         )
         .await;
-        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(st, StatusCode::BAD_GATEWAY);
         let (_, list) = call(&e.app, Method::GET, "/api/radio/favorites", None).await;
         assert_eq!(list.as_array().unwrap().len(), 1);
     }

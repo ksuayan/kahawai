@@ -25,6 +25,9 @@ mod logfile;
 mod menu;
 mod musicbrainz;
 mod normalize;
+mod podcast_api;
+mod podcast_feed;
+mod podcasts;
 mod radio;
 mod radio_api;
 mod resample;
@@ -173,6 +176,31 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/audiobook-listeners/{id}",
             axum::routing::delete(audiobooks_api::delete_listener),
+        )
+        .route(
+            "/api/podcasts/feeds",
+            get(podcast_api::list_feeds).post(podcast_api::add_feed),
+        )
+        .route(
+            "/api/podcasts/feeds/import-opml",
+            post(podcast_api::import_opml),
+        )
+        .route(
+            "/api/podcasts/feeds/export-opml",
+            get(podcast_api::export_opml),
+        )
+        .route(
+            "/api/podcasts/feeds/{id}",
+            axum::routing::delete(podcast_api::delete_feed),
+        )
+        .route(
+            "/api/podcasts/feeds/{id}/episodes",
+            get(podcast_api::list_episodes),
+        )
+        .route("/api/podcasts/refresh", post(podcast_api::refresh))
+        .route(
+            "/api/podcasts/episodes/{id}/played",
+            post(podcast_api::mark_played),
         )
         .route("/api/radio/search", get(radio_api::search))
         .route("/api/radio/facets/{kind}", get(radio_api::facets))
