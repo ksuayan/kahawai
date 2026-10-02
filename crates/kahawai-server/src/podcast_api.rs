@@ -706,32 +706,25 @@ mod tests {
         .await;
         let again: serde_json::Value = serde_json::from_slice(&b).unwrap();
         assert_eq!(again["already_subscribed"], 2);
-        // The background read fills them in.
-        let mut named_ok = false;
-        for _ in 0..100 {
+        // The background read fills them in: the good feed gets its episodes,
+        // the dead one its error. Wait for both, they run side by side.
+        let mut settled = false;
+        for _ in 0..200 {
             let (_, f) = call(&e.app, Method::GET, "/api/podcasts/feeds", None).await;
-            named_ok = f
-                .as_array()
-                .unwrap()
+            let list = f.as_array().unwrap();
+            let good = list
                 .iter()
                 .any(|x| x["title"] == "From OPML" && x["episode_count"] == 1);
-            if named_ok {
+            let dead = list
+                .iter()
+                .any(|x| x["title"] == "Dead" && x["last_error"].as_str().is_some());
+            if good && dead {
+                settled = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert!(named_ok, "the imported feed was read");
-        let (_, f) = call(&e.app, Method::GET, "/api/podcasts/feeds", None).await;
-        let dead = f
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["title"] == "Dead")
-            .unwrap();
-        assert!(
-            dead["last_error"].as_str().is_some(),
-            "a dead feed shows its error: {dead}"
-        );
+        assert!(settled, "both imported feeds were read in the background");
         let (st, xml) =
             call_raw(&e.app, Method::GET, "/api/podcasts/feeds/export-opml", None).await;
         assert_eq!(st, StatusCode::OK);
