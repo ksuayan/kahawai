@@ -4,6 +4,12 @@
 import type {
   Album,
   Artist,
+  Audiobook,
+  AudiobookBookmark,
+  AudiobookDetail,
+  AudiobookRoot,
+  AudiobookSession,
+  AudiobookSettings,
   Genre,
   ImportPlaylistResult,
   JobInfo,
@@ -480,3 +486,102 @@ export function describeServer(id: ServerIdentity): string {
 }
 
 export { put };
+
+// --- Audiobooks ---------------------------------------------------------------
+
+export interface AudiobookQuery {
+  /** "continue": books you have started, unfinished first, newest first. */
+  shelf?: "continue";
+  q?: string;
+  author?: string;
+  series?: string;
+  finished?: boolean;
+}
+
+export async function fetchAudiobooks(query: AudiobookQuery = {}): Promise<Audiobook[]> {
+  const p = new URLSearchParams();
+  if (query.shelf) p.set("shelf", query.shelf);
+  if (query.q?.trim()) p.set("q", query.q.trim());
+  if (query.author) p.set("author", query.author);
+  if (query.series) p.set("series", query.series);
+  if (query.finished !== undefined) p.set("finished", String(query.finished));
+  const qs = p.toString();
+  return get<Audiobook[]>(`/api/audiobooks${qs ? `?${qs}` : ""}`);
+}
+
+export async function fetchAudiobook(id: number): Promise<AudiobookDetail> {
+  return get<AudiobookDetail>(`/api/audiobooks/${id}`);
+}
+
+export async function saveAudiobookPosition(
+  id: number,
+  bookOffsetMs: number,
+): Promise<{ book_offset_ms: number; updated_at: number; finished: boolean }> {
+  return put(`/api/audiobooks/${id}/position`, { book_offset_ms: Math.max(0, Math.round(bookOffsetMs)) });
+}
+
+export async function markAudiobookFinished(id: number, finished = true): Promise<Audiobook> {
+  return post<Audiobook>(`/api/audiobooks/${id}/finished`, { finished });
+}
+
+export async function fetchAudiobookHistory(id: number): Promise<AudiobookSession[]> {
+  return get<AudiobookSession[]>(`/api/audiobooks/${id}/history`);
+}
+
+export async function addAudiobookBookmark(
+  id: number,
+  bookOffsetMs: number,
+  name?: string,
+  note?: string,
+): Promise<AudiobookBookmark> {
+  return post<AudiobookBookmark>(`/api/audiobooks/${id}/bookmarks`, {
+    book_offset_ms: Math.max(0, Math.round(bookOffsetMs)),
+    name,
+    note,
+  });
+}
+
+export async function editAudiobookBookmark(
+  id: number,
+  bookmarkId: number,
+  edit: { name?: string; note?: string },
+): Promise<AudiobookBookmark> {
+  return patch<AudiobookBookmark>(`/api/audiobooks/${id}/bookmarks/${bookmarkId}`, edit);
+}
+
+export async function deleteAudiobookBookmark(id: number, bookmarkId: number): Promise<void> {
+  return del(`/api/audiobooks/${id}/bookmarks/${bookmarkId}`);
+}
+
+export async function saveAudiobookSettings(id: number, s: Partial<AudiobookSettings>): Promise<AudiobookSettings> {
+  return put<AudiobookSettings>(`/api/audiobooks/${id}/settings`, s);
+}
+
+export interface AudiobookMetaEdit {
+  title?: string;
+  author?: string;
+  narrator?: string;
+  series?: string;
+  series_index?: number;
+  year?: number;
+}
+
+export async function editAudiobook(id: number, edit: AudiobookMetaEdit): Promise<Audiobook> {
+  return patch<Audiobook>(`/api/audiobooks/${id}`, edit);
+}
+
+export async function fetchAudiobookRoots(): Promise<AudiobookRoot[]> {
+  return get<AudiobookRoot[]>("/api/audiobook-roots");
+}
+
+export async function addAudiobookRoot(path: string, name?: string): Promise<AudiobookRoot> {
+  return post<AudiobookRoot>("/api/audiobook-roots", { path, name });
+}
+
+export async function deleteAudiobookRoot(id: number): Promise<void> {
+  return del(`/api/audiobook-roots/${id}`);
+}
+
+export async function scanAudiobooks(): Promise<JobInfo> {
+  return post<JobInfo>("/api/audiobooks/scan", {});
+}

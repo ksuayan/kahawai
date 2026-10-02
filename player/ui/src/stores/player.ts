@@ -119,6 +119,8 @@ export const usePlayerStore = defineStore("player", () => {
   const notice = computed(() => raw.value?.notice ?? null);
   const repeat = computed<RepeatMode>(() => raw.value?.repeat ?? "off");
   const shuffle = computed(() => raw.value?.shuffle ?? false);
+  /** Playback speed (1 = as recorded). */
+  const playbackRate = computed(() => raw.value?.playback_rate ?? 1);
 
   /** Interpolated position between core events; clamps at duration. */
   const positionMs = computed(() => {
@@ -126,7 +128,8 @@ export const usePlayerStore = defineStore("player", () => {
     const s = raw.value;
     if (!s) return 0;
     let pos = s.position_ms;
-    if (s.status === "playing") pos += Date.now() - lastEventAt.value;
+    // The playhead is media time, which runs at the playback speed.
+    if (s.status === "playing") pos += (Date.now() - lastEventAt.value) * (s.playback_rate ?? 1);
     if (s.duration_ms != null) pos = Math.min(pos, s.duration_ms);
     return Math.max(0, Math.floor(pos));
   });
@@ -220,6 +223,7 @@ export const usePlayerStore = defineStore("player", () => {
     notice,
     repeat,
     shuffle,
+    playbackRate,
     init,
     dispose,
     toggle,

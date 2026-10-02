@@ -59,6 +59,14 @@ describe("position", () => {
     expect(p.positionMs).toBe(11_500);
   });
 
+  it("interpolates at the playback speed (the playhead is media time)", async () => {
+    const p = await ready(makeState({ status: "playing", position_ms: 10_000, playback_rate: 2 }));
+    expect(p.playbackRate).toBe(2);
+    vi.setSystemTime(T0 + 1000);
+    vi.advanceTimersByTime(500);
+    expect(p.positionMs).toBe(13_000); // 1.5 s of wall clock at 2x
+  });
+
   it("does not advance while paused or stopped", async () => {
     const p = await ready(makeState({ status: "paused", position_ms: 10_000 }));
     vi.setSystemTime(T0 + 5000);

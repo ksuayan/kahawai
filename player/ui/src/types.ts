@@ -830,3 +830,79 @@ export interface ImportPlaylistResult {
   matched: number;
   unmatched: string[];
 }
+
+// --- Audiobooks (docs/v1/kahawai-audiobook-spec.md) ---------------------------
+
+/** A book in the library list. A position is always `book_offset_ms`: ms from the start of the book. */
+export interface Audiobook {
+  id: number;
+  root_id: number;
+  title: string;
+  author: string | null;
+  narrator: string | null;
+  series: string | null;
+  series_index: number | null;
+  year: number | null;
+  cover_hash: string | null;
+  duration_ms: number;
+  added_at: number;
+  finished_at: number | null;
+  position_ms: number;
+  last_played_at: number | null;
+  /** 0 to 1. */
+  progress: number;
+}
+
+export interface AudiobookPart {
+  id: number;
+  track_id: number;
+  part_index: number;
+  title: string | null;
+  start_offset_ms: number;
+  duration_ms: number;
+}
+
+export interface AudiobookChapter {
+  id: number;
+  part_id: number;
+  title: string;
+  start_offset_ms: number;
+  duration_ms: number;
+}
+
+export interface AudiobookBookmark {
+  id: number;
+  book_id: number;
+  book_offset_ms: number;
+  name: string;
+  note: string;
+  created_at: number;
+}
+
+export interface AudiobookSettings {
+  speed: number;
+  skip_back_s: number;
+  skip_forward_s: number;
+}
+
+export interface AudiobookDetail extends Audiobook {
+  parts: AudiobookPart[];
+  chapters: AudiobookChapter[];
+  bookmarks: AudiobookBookmark[];
+  settings: AudiobookSettings;
+}
+
+export interface AudiobookSession {
+  id: number;
+  started_at: number;
+  ended_at: number;
+  start_offset_ms: number;
+  end_offset_ms: number;
+  listened_ms: number;
+}
+
+export interface AudiobookRoot {
+  id: number;
+  path: string;
+  name: string;
+}
