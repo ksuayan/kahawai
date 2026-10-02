@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { useAudiobooksStore } from "../stores/audiobooks";
 import { usePlayerStore } from "../stores/player";
+import { useRadioStore } from "../stores/radio";
 import { formatDuration } from "../types";
 import UiSlider from "../ui/UiSlider.vue";
 
@@ -19,6 +20,9 @@ const props = withDefaults(defineProps<{ disabled?: boolean; size?: "sm" | "md" 
 
 const player = usePlayerStore();
 const books = useAudiobooksStore();
+const radio = useRadioStore();
+/** A radio station has no timeline: no seeking, no duration. */
+const live = computed(() => radio.isPlaying);
 /** A book plays as one piece: the bar spans the whole book, not the file. */
 const book = computed(() => (books.isActive ? books.active : null));
 const scrubbing = ref(false);
@@ -26,7 +30,7 @@ const scrubValue = ref(0);
 
 const duration = computed(() => (book.value ? book.value.duration_ms : (player.durationMs ?? 0)));
 const shown = computed(() => (scrubbing.value ? scrubValue.value : book.value ? books.offsetMs : player.positionMs));
-const isDisabled = computed(() => props.disabled || duration.value <= 0);
+const isDisabled = computed(() => props.disabled || live.value || duration.value <= 0);
 
 function onUpdate(v: number): void {
   scrubbing.value = true;
@@ -48,7 +52,7 @@ const timeClass = computed(() =>
 
 <template>
   <div class="flex items-center" :class="size === 'md' ? 'gap-3' : 'gap-2'">
-    <span :class="timeClass" data-testid="elapsed">{{ formatDuration(shown) }}</span>
+    <span :class="timeClass" data-testid="elapsed">{{ live ? "LIVE" : formatDuration(shown) }}</span>
     <UiSlider
       class="flex-1"
       aria-label="Seek"
@@ -61,6 +65,6 @@ const timeClass = computed(() =>
       @update:model-value="onUpdate"
       @commit="onCommit"
     />
-    <span :class="timeClass" data-testid="duration">{{ formatDuration(duration || null) }}</span>
+    <span :class="timeClass" data-testid="duration">{{ live ? "" : formatDuration(duration || null) }}</span>
   </div>
 </template>

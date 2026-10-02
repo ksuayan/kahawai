@@ -5,6 +5,7 @@ import { useAudiobooksStore } from "../stores/audiobooks";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
+import { useRadioStore } from "../stores/radio";
 import { trackTitle } from "../types";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
@@ -20,6 +21,7 @@ const player = usePlayerStore();
 const lib = useLibraryStore();
 const nav = useNavStore();
 const books = useAudiobooksStore();
+const radio = useRadioStore();
 
 const track = computed(() => player.currentTrack);
 const artworkHash = computed(() => {
@@ -44,6 +46,17 @@ function goNowPlaying(): void {
     >
       <TriangleAlert class="size-3.5 shrink-0" />
       <span class="truncate">{{ player.error }}</span>
+    </div>
+    <div
+      v-else-if="radio.now?.reconnecting"
+      class="flex items-center gap-1.5 bg-accent/10 px-4 py-1.5 text-xs text-dim"
+      role="status"
+      data-testid="radio-reconnecting"
+    >
+      <Info class="size-3.5 shrink-0" />
+      <span class="truncate">
+        Lost the connection to {{ radio.stationName }}. Trying again… (try {{ radio.now.attempt }})
+      </span>
     </div>
     <div
       v-else-if="player.notice"
@@ -71,6 +84,7 @@ function goNowPlaying(): void {
           </div>
           <div class="truncate text-xs text-dim" data-testid="artist">
             <template v-if="books.isActive">{{ books.chapter?.title ?? books.active?.title }} · {{ books.active?.author ?? "" }}</template>
+            <template v-else-if="radio.isPlaying">{{ radio.now?.title ?? "Live radio" }}</template>
             <template v-else>{{ track?.artist ?? "—" }}</template>
           </div>
         </div>

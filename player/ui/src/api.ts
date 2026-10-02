@@ -16,6 +16,11 @@ import type {
   JobKind,
   Page,
   Playlist,
+  RadioFacet,
+  RadioFavorite,
+  RadioPlayInfo,
+  RadioQuery,
+  RadioStation,
   Track,
 } from "./types";
 import { parseSort, type SortKey } from "./lib/sorting";
@@ -599,6 +604,51 @@ export async function addAudiobookListener(name: string): Promise<AudiobookListe
 
 export async function deleteAudiobookListener(id: number): Promise<void> {
   return del(`/api/audiobook-listeners/${id}`);
+}
+
+// --- internet radio ------------------------------------------------------------
+
+export async function searchRadio(q: RadioQuery): Promise<RadioStation[]> {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") p.set(k, String(v));
+  const qs = p.toString();
+  return get<RadioStation[]>(`/api/radio/search${qs ? `?${qs}` : ""}`);
+}
+
+export async function fetchRadioFacets(kind: "tags" | "countries" | "languages"): Promise<RadioFacet[]> {
+  return get<RadioFacet[]>(`/api/radio/facets/${kind}`);
+}
+
+export async function fetchRadioFavorites(): Promise<RadioFavorite[]> {
+  return get<RadioFavorite[]>("/api/radio/favorites");
+}
+
+/** Save a directory station, or add one by address (`url` only). */
+export async function addRadioFavorite(
+  body: Partial<Omit<RadioFavorite, "id" | "manual" | "sort_order" | "added_at">> & { url: string },
+): Promise<RadioFavorite> {
+  return post<RadioFavorite>("/api/radio/favorites", body);
+}
+
+export async function renameRadioFavorite(id: number, name: string): Promise<RadioFavorite> {
+  return patch<RadioFavorite>(`/api/radio/favorites/${id}`, { name });
+}
+
+export async function deleteRadioFavorite(id: number): Promise<void> {
+  return del(`/api/radio/favorites/${id}`);
+}
+
+export async function reorderRadioFavorites(ids: number[]): Promise<RadioFavorite[]> {
+  return put<RadioFavorite[]>("/api/radio/favorites/order", { ids });
+}
+
+/** The address to connect to (the directory's fresh one when it is on). */
+export async function playRadioFavorite(id: number): Promise<RadioPlayInfo> {
+  return post<RadioPlayInfo>(`/api/radio/favorites/${id}/play`, {});
+}
+
+export async function logRadioHeard(stationName: string, streamTitle: string): Promise<void> {
+  await post("/api/radio/history", { station_name: stationName, stream_title: streamTitle }).catch(() => undefined);
 }
 
 export async function fetchAudiobookRoots(): Promise<AudiobookRoot[]> {

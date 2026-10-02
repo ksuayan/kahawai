@@ -9,14 +9,14 @@ Sizes: XS < S < M < L. Spec: `kahawai-radio-spec.md` (2026-10-02).
 | 2 | Station URL resolve via `/json/url/{uuid}` (counts the click) | XS | Built (`POST /api/radio/favorites/{id}/play`) | D1 |
 | 3 | `radio_favorites` table + CRUD/reorder API | S | Built | D2 |
 | 4 | Manual station add + stream probe (codec/bitrate sniff) | S | Built | D2; `station_uuid` NULL = manual |
-| 5 | Favorites sync to player + offline list cache | S | Not started | D2 |
-| 6 | Direct stream connect + ICY metadata parsing (`StreamTitle`) | M | Not started | D3; tolerate metadata-less stations |
-| 7 | StreamTitle → now-playing + `radio_history` logging | S | Not started | D3 |
-| 8 | Codec verification: AAC/AAC+ through existing decode pipeline | S | Spike done | D3; Symphonia 0.6 is AAC-LC only. Pure-Rust `syom` crate decodes HE-AAC (matches ffmpeg to ~108 dB on a synthetic stream); needs real-station captures. Fallback: optional server ffmpeg relay |
-| 9 | Auto-reconnect (exp backoff) + alternate-URL fallback | S | Not started | D3; visible reconnecting state |
-| 10 | Player: directory browse/search UI (genre/country/language) | M | Not started | D4 |
-| 11 | Player: favorites view + reorder + one-tap play | S | Not started | D4 |
-| 12 | Player: radio now-playing (art, live title, session history, bitrate badge) | S | Not started | D4 |
+| 5 | Favorites sync to player + offline list cache | S | Built | Favorites come from the server on each visit; the list is not cached for offline use yet |
+| 6 | Direct stream connect + ICY metadata parsing (`StreamTitle`) | M | Built | Shoutcast v1 `ICY 200 OK` handled by a hand-rolled http client; https via ureq; titles read as Latin-1 or UTF-8 |
+| 7 | StreamTitle → now-playing + `radio_history` logging | S | Built | Title shown in the bar and in a "heard" list; logged to the server, repeats skipped |
+| 8 | Codec verification: AAC/AAC+ through existing decode pipeline | S | Built, needs real captures | AAC/AAC+ (ADTS/LOAS) via the pure-Rust `syom` crate; Symphonia keeps MP3/Ogg/FLAC/Opus. Verify on real AAC+ stations (macOS) |
+| 9 | Auto-reconnect (exp backoff) + alternate-URL fallback | S | Built (alternate URLs not yet) | Backoff 1/2/5/15/60 s with a visible "trying again" banner; a station that never played gives up after 3 tries. Falling back to the station's other address is not done |
+| 10 | Player: directory browse/search UI (genre/country/language) | M | Built | Search, genre/country/language pickers, sort; opt-in message when the server's directory is off |
+| 11 | Player: favorites view + reorder + one-tap play | S | Built (up/down buttons, no drag) |  |
+| 12 | Player: radio now-playing (art, live title, session history, bitrate badge) | S | Partly built | Station name, live title, heard list, LIVE bar, reconnect banner. Not yet: station art in the bar, bitrate/codec badge there |
 | 13 | Keyboard shortcuts (play/pause, mute, favorite) | XS | Not started | D4 |
 | 14 | Recording: raw stream bytes to disk, user-chosen folder | S | Not started | D5; no re-encode |
 | 15 | Recording: split-on-title into `Artist - Title.ext` | S | Not started | D5; best-effort, cap splits/hour |

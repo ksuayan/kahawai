@@ -8,6 +8,7 @@ export type ViewName =
   | "genres"
   | "playlists"
   | "audiobooks"
+  | "radio"
   | "search"
   | "queue"
   | "settings";
@@ -20,7 +21,7 @@ export interface NavState {
 }
 
 const KEY = "kahawai.nav";
-const LISTS = ["albums", "artists", "genres", "playlists", "audiobooks", "search", "queue", "settings", "nowplaying"];
+const LISTS = ["albums", "artists", "genres", "playlists", "audiobooks", "radio", "search", "queue", "settings", "nowplaying"];
 const BY_ID = ["album", "artist", "playlist", "audiobook"];
 
 /** The view the app was on when it quit, if it still makes sense. */

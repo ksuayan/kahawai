@@ -130,6 +130,8 @@ export interface PlayerState {
   limiter_gr_db?: number | null;
   /** Playback speed (1 = as recorded); pitch is kept at any speed. */
   playback_rate?: number;
+  /** The radio station playing: its song title and connection state; null otherwise. */
+  radio?: RadioNow | null;
   format: string | null;
   chain: string | null;
   /** "pcm-shared" (DSP chain active) or "dop-exclusive" (bit-perfect). */
@@ -905,4 +907,85 @@ export interface AudiobookRoot {
   id: number;
   path: string;
   name: string;
+}
+
+// --- internet radio -------------------------------------------------------------
+
+/** `player-state.radio`: what the playing station says, and whether the connection is up. */
+export interface RadioNow {
+  title: string | null;
+  reconnecting: boolean;
+  attempt: number;
+  bitrate_kbps: number | null;
+  reason: string | null;
+}
+
+/** A station from the online directory (`GET /api/radio/search`). */
+export interface RadioStation {
+  station_uuid: string;
+  name: string;
+  url: string;
+  url_resolved: string | null;
+  homepage: string | null;
+  favicon: string | null;
+  tags: string | null;
+  country: string | null;
+  language: string | null;
+  codec: string | null;
+  bitrate: number | null;
+  clicks: number;
+  /** HLS (.m3u8): not playable yet. */
+  hls: boolean;
+  needs_relay: boolean;
+}
+
+/** A saved station (`/api/radio/favorites`). */
+export interface RadioFavorite {
+  id: number;
+  station_uuid: string | null;
+  name: string;
+  url: string;
+  url_resolved: string | null;
+  homepage: string | null;
+  favicon: string | null;
+  tags: string | null;
+  country: string | null;
+  language: string | null;
+  bitrate: number | null;
+  codec: string | null;
+  manual: boolean;
+  sort_order: number;
+  added_at: number;
+}
+
+export interface RadioPlayInfo {
+  name: string;
+  url: string;
+  codec: string | null;
+  bitrate: number | null;
+  needs_relay: boolean;
+}
+
+export interface RadioFacet {
+  name: string;
+  stations: number;
+}
+
+export interface RadioHeard {
+  id: number;
+  station_name: string;
+  stream_title: string;
+  played_at: number;
+}
+
+export type RadioOrder = "clickcount" | "votes" | "name" | "bitrate";
+
+export interface RadioQuery {
+  q?: string;
+  tag?: string;
+  country?: string;
+  language?: string;
+  order?: RadioOrder;
+  limit?: number;
+  offset?: number;
 }

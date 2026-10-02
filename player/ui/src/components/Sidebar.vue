@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { BookOpen, Disc3, Info, Tags, ListMusic, ListOrdered, MicVocal, Moon, Search, Settings, Sun } from "lucide-vue-next";
+import { BookOpen, Disc3, Info, Tags, ListMusic, ListOrdered, MicVocal, Moon, Radio, Search, Settings, Sun } from "lucide-vue-next";
 import { useNavStore, type NavState } from "../stores/nav";
 import { useOverlaysStore } from "../stores/overlays";
 import { useQueueStore } from "../stores/queue";
@@ -18,6 +18,7 @@ const items: { name: NavState["name"]; label: string; key: string; icon: Compone
   { name: "genres", label: "Genres", key: "g", icon: Tags },
   { name: "playlists", label: "Playlists", key: "3", icon: ListMusic },
   { name: "audiobooks", label: "Audiobooks", key: "7", icon: BookOpen },
+  { name: "radio", label: "Radio", key: "8", icon: Radio },
   { name: "search", label: "Search", key: "4", icon: Search },
   { name: "queue", label: "Queue", key: "5", icon: ListOrdered },
 ];
