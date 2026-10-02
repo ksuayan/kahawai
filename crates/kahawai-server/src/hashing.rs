@@ -71,11 +71,13 @@ pub fn hash_file(path: &Path) -> io::Result<String> {
 
 /// Tracks on disk still waiting for their hash.
 pub async fn pending_count(pool: &SqlitePool) -> Result<u64, MusicError> {
-    let n: i64 = sqlx::query("SELECT COUNT(*) FROM tracks WHERE hash IS NULL AND missing = 0")
-        .fetch_one(pool)
-        .await
-        .map_err(db::cvt)?
-        .get(0);
+    let n: i64 = sqlx::query(
+        "SELECT COUNT(*) FROM tracks WHERE hash IS NULL AND missing = 0 AND kind = 'music'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(db::cvt)?
+    .get(0);
     Ok(n as u64)
 }
 
@@ -119,7 +121,7 @@ pub async fn hash_pending(
         if queue.is_empty() && !exhausted {
             let rows = sqlx::query(
                 "SELECT id, path, file_size, file_mtime FROM tracks
-                 WHERE hash IS NULL AND missing = 0 AND id > ?
+                 WHERE hash IS NULL AND missing = 0 AND kind = 'music' AND id > ?
                  ORDER BY id LIMIT ?",
             )
             .bind(after_id)

@@ -133,7 +133,12 @@ pub async fn catalog_id(pool: &SqlitePool) -> Result<String, MusicError> {
 pub async fn snapshot(pool: &SqlitePool) -> Result<CatalogSnapshot, MusicError> {
     let mut tx = pool.begin().await.map_err(db::cvt)?;
     let (catalog_id, rev) = current(&mut tx).await?;
-    let tracks = db::tracks_where(&mut tx, "missing = ? AND duplicate_of IS NULL", 0).await?;
+    let tracks = db::tracks_where(
+        &mut tx,
+        "missing = ? AND duplicate_of IS NULL AND kind = 'music'",
+        0,
+    )
+    .await?;
     let albums = albums_where(&mut tx, "1 = ?", 1).await?;
     let artists = artists_where(&mut tx, "1 = ?", 1).await?;
     tx.commit().await.map_err(db::cvt)?;
@@ -177,13 +182,18 @@ pub async fn delta(
             ..Default::default()
         });
     }
-    let changed = scalar(&mut tx, "SELECT COUNT(*) FROM tracks WHERE rev > ?", since).await?
+    let changed = scalar(
+        &mut tx,
+        "SELECT COUNT(*) FROM tracks WHERE rev > ? AND kind = 'music'",
+        since,
+    )
+    .await?
         + scalar(&mut tx, "SELECT COUNT(*) FROM albums WHERE rev > ?", since).await?
         + scalar(&mut tx, "SELECT COUNT(*) FROM artists WHERE rev > ?", since).await?;
     if changed > 0 {
         let total = scalar(
             &mut tx,
-            "SELECT COUNT(*) FROM tracks WHERE missing = ? AND duplicate_of IS NULL",
+            "SELECT COUNT(*) FROM tracks WHERE missing = ? AND duplicate_of IS NULL AND kind = 'music'",
             0,
         )
         .await?
@@ -197,7 +207,12 @@ pub async fn delta(
         catalog_id: id,
         rev,
         full_resync: false,
-        tracks: db::tracks_where(&mut tx, "rev > ? AND duplicate_of IS NULL", since).await?,
+        tracks: db::tracks_where(
+            &mut tx,
+            "rev > ? AND duplicate_of IS NULL AND kind = 'music'",
+            since,
+        )
+        .await?,
         albums: albums_where(&mut tx, "rev > ?", since).await?,
         artists: artists_where(&mut tx, "rev > ?", since).await?,
         removed_tracks: removed_tracks(&mut tx, since).await?,

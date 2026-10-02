@@ -159,6 +159,19 @@ pub fn is_disc_folder(name: &str) -> bool {
     false
 }
 
+/// The disc number a file's `Disc N` / `CD N` folder names, if it is in one.
+pub fn disc_from_path(file: &Path) -> Option<u32> {
+    let name = file.parent()?.file_name()?.to_str()?;
+    if !is_disc_folder(name) {
+        return None;
+    }
+    name.chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
 /// The directory that stands for the book a file belongs to: its own
 /// directory, or the parent when that directory is a `Disc N` / `CD N`
 /// folder (and again if discs are nested).
@@ -234,8 +247,11 @@ pub fn order_parts(parts: &mut [PartInput]) {
     let all_tagged = parts.iter().all(|p| p.track.is_some());
     if all_tagged {
         parts.sort_by(|a, b| {
-            (a.disc.unwrap_or(1), a.track)
-                .cmp(&(b.disc.unwrap_or(1), b.track))
+            // Track numbers that restart in each disc folder need the folder's
+            // disc number when the tags carry none.
+            let disc = |p: &PartInput| p.disc.or_else(|| disc_from_path(&p.path)).unwrap_or(1);
+            (disc(a), a.track)
+                .cmp(&(disc(b), b.track))
                 .then_with(|| natural_cmp(&a.path.to_string_lossy(), &b.path.to_string_lossy()))
         });
     } else {
@@ -328,7 +344,9 @@ pub fn parse_chpl(moov: &[u8]) -> Vec<FileChapter> {
                 if at + len > chpl.len() {
                     break;
                 }
-                let title = String::from_utf8_lossy(&chpl[at..at + len]).trim().to_string();
+                let title = String::from_utf8_lossy(&chpl[at..at + len])
+                    .trim()
+                    .to_string();
                 at += len;
                 out.push(FileChapter {
                     title,
@@ -421,7 +439,11 @@ pub fn build_chapters(
             .unwrap_or_else(|| format!("Part {}", i + 1));
         let chaps: Vec<&FileChapter> = embedded
             .get(i)
-            .map(|c| c.iter().filter(|c| c.start_ms < p.duration_ms.max(1)).collect())
+            .map(|c| {
+                c.iter()
+                    .filter(|c| c.start_ms < p.duration_ms.max(1))
+                    .collect()
+            })
             .unwrap_or_default();
         if chaps.is_empty() {
             out.push(ChapterOut {
@@ -623,7 +645,11 @@ mod pure_tests {
         ];
         order_parts(&mut p);
         let names: Vec<_> = p.iter().map(|x| x.path.to_str().unwrap()).collect();
-        assert_eq!(names, ["/b/m.mp3", "/b/z.mp3", "/b/a.mp3"], "by disc, track");
+        assert_eq!(
+            names,
+            ["/b/m.mp3", "/b/z.mp3", "/b/a.mp3"],
+            "by disc, track"
+        );
 
         let mut p = vec![
             part("/b/Part 10.mp3", None, None, 10),
@@ -646,6 +672,23 @@ mod pure_tests {
         order_parts(&mut p);
         let names: Vec<_> = p.iter().map(|x| x.path.to_str().unwrap()).collect();
         assert_eq!(names, ["/b/CD1/01.mp3", "/b/CD1/02.mp3", "/b/CD2/01.mp3"]);
+    }
+
+    #[test]
+    fn track_numbers_that_restart_per_disc_folder_still_order_correctly() {
+        let mut p = vec![
+            part("/b/CD 2/01.mp3", None, Some(1), 10),
+            part("/b/CD 1/02.mp3", None, Some(2), 10),
+            part("/b/CD 1/01.mp3", None, Some(1), 10),
+        ];
+        order_parts(&mut p);
+        let names: Vec<_> = p.iter().map(|x| x.path.to_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            ["/b/CD 1/01.mp3", "/b/CD 1/02.mp3", "/b/CD 2/01.mp3"]
+        );
+        assert_eq!(disc_from_path(Path::new("/b/Disc 03/x.mp3")), Some(3));
+        assert_eq!(disc_from_path(Path::new("/b/x.mp3")), None);
     }
 
     #[test]
@@ -696,9 +739,18 @@ mod pure_tests {
             assert_eq!(
                 c,
                 vec![
-                    FileChapter { title: "Intro".into(), start_ms: 0 },
-                    FileChapter { title: "One".into(), start_ms: 60_000 },
-                    FileChapter { title: "Two".into(), start_ms: 185_500 },
+                    FileChapter {
+                        title: "Intro".into(),
+                        start_ms: 0
+                    },
+                    FileChapter {
+                        title: "One".into(),
+                        start_ms: 60_000
+                    },
+                    FileChapter {
+                        title: "Two".into(),
+                        start_ms: 185_500
+                    },
                 ],
                 "chpl v{version}"
             );
@@ -718,20 +770,38 @@ mod pure_tests {
 
     #[test]
     fn chapters_run_to_the_next_start_and_a_part_without_any_is_one_chapter() {
-        let parts = vec![part("/b/one.m4b", None, None, 100_000), part("/b/two.mp3", None, None, 50_000)];
+        let parts = vec![
+            part("/b/one.m4b", None, None, 100_000),
+            part("/b/two.mp3", None, None, 50_000),
+        ];
         let starts = start_offsets(&parts);
         let embedded = vec![
             vec![
-                FileChapter { title: "A".into(), start_ms: 0 },
-                FileChapter { title: "B".into(), start_ms: 40_000 },
+                FileChapter {
+                    title: "A".into(),
+                    start_ms: 0,
+                },
+                FileChapter {
+                    title: "B".into(),
+                    start_ms: 40_000,
+                },
             ],
             vec![],
         ];
         let c = build_chapters(&parts, &starts, &embedded);
         assert_eq!(c.len(), 3);
-        assert_eq!((c[0].title.as_str(), c[0].start_offset_ms, c[0].duration_ms), ("A", 0, 40_000));
-        assert_eq!((c[1].title.as_str(), c[1].start_offset_ms, c[1].duration_ms), ("B", 40_000, 60_000));
-        assert_eq!((c[2].title.as_str(), c[2].start_offset_ms, c[2].duration_ms), ("two", 100_000, 50_000));
+        assert_eq!(
+            (c[0].title.as_str(), c[0].start_offset_ms, c[0].duration_ms),
+            ("A", 0, 40_000)
+        );
+        assert_eq!(
+            (c[1].title.as_str(), c[1].start_offset_ms, c[1].duration_ms),
+            ("B", 40_000, 60_000)
+        );
+        assert_eq!(
+            (c[2].title.as_str(), c[2].start_offset_ms, c[2].duration_ms),
+            ("two", 100_000, 50_000)
+        );
         assert_eq!(c[2].part_index, 1);
     }
 
@@ -739,8 +809,14 @@ mod pure_tests {
     fn a_chapter_past_the_end_of_its_file_is_dropped() {
         let parts = vec![part("/b/x.m4b", None, None, 10_000)];
         let embedded = vec![vec![
-            FileChapter { title: "A".into(), start_ms: 0 },
-            FileChapter { title: "Bogus".into(), start_ms: 99_000 },
+            FileChapter {
+                title: "A".into(),
+                start_ms: 0,
+            },
+            FileChapter {
+                title: "Bogus".into(),
+                start_ms: 99_000,
+            },
         ]];
         let c = build_chapters(&parts, &[0], &embedded);
         assert_eq!(c.len(), 1);
@@ -752,11 +828,23 @@ mod pure_tests {
         let t0 = 1_800_000_000_000i64; // some instant
         let day_start = t0 - t0.rem_euclid(86_400_000);
         let noon = day_start + 12 * 3_600_000;
-        assert!(!starts_new_session(noon, noon + 10_000), "10 s later: same session");
-        assert!(!starts_new_session(noon, noon + SESSION_GAP_MS), "exactly the gap: same");
-        assert!(starts_new_session(noon, noon + SESSION_GAP_MS + 1), "past the gap");
+        assert!(
+            !starts_new_session(noon, noon + 10_000),
+            "10 s later: same session"
+        );
+        assert!(
+            !starts_new_session(noon, noon + SESSION_GAP_MS),
+            "exactly the gap: same"
+        );
+        assert!(
+            starts_new_session(noon, noon + SESSION_GAP_MS + 1),
+            "past the gap"
+        );
         let late = day_start + 86_400_000 - 60_000;
-        assert!(starts_new_session(late, late + 120_000), "across midnight, even a minute apart");
+        assert!(
+            starts_new_session(late, late + 120_000),
+            "across midnight, even a minute apart"
+        );
     }
 
     #[test]
@@ -769,15 +857,640 @@ mod pure_tests {
     #[test]
     fn offsets_resolve_to_a_part_and_a_position_inside_it() {
         let parts = [
-            PartSpan { track_id: 10, start_offset_ms: 0, duration_ms: 1000 },
-            PartSpan { track_id: 11, start_offset_ms: 1000, duration_ms: 2000 },
+            PartSpan {
+                track_id: 10,
+                start_offset_ms: 0,
+                duration_ms: 1000,
+            },
+            PartSpan {
+                track_id: 11,
+                start_offset_ms: 1000,
+                duration_ms: 2000,
+            },
         ];
         assert_eq!(resolve_offset(&parts, 0), Some((10, 0)));
         assert_eq!(resolve_offset(&parts, 999), Some((10, 999)));
-        assert_eq!(resolve_offset(&parts, 1000), Some((11, 0)), "a boundary belongs to the next part");
+        assert_eq!(
+            resolve_offset(&parts, 1000),
+            Some((11, 0)),
+            "a boundary belongs to the next part"
+        );
         assert_eq!(resolve_offset(&parts, 2500), Some((11, 1500)));
-        assert_eq!(resolve_offset(&parts, 9999), Some((11, 2000)), "past the end: the end");
+        assert_eq!(
+            resolve_offset(&parts, 9999),
+            Some((11, 2000)),
+            "past the end: the end"
+        );
         assert_eq!(resolve_offset(&parts, -5), Some((10, 0)));
         assert_eq!(resolve_offset(&[], 5), None);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Database: roots, scan, books
+// ---------------------------------------------------------------------------
+
+use kahawai_core::{AudioFormat, MusicError};
+use lofty::prelude::*;
+use lofty::tag::ItemKey;
+use serde::Serialize;
+use sqlx::{Row, SqlitePool};
+use tracing::{info, warn};
+
+use crate::db::cvt;
+
+pub fn now_ms() -> i64 {
+    crate::jobs::now_ms()
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Root {
+    pub id: i64,
+    pub path: String,
+    pub name: String,
+}
+
+pub async fn list_roots(pool: &SqlitePool) -> Result<Vec<Root>, MusicError> {
+    let rows = sqlx::query("SELECT id, path, name FROM audiobook_roots ORDER BY name, id")
+        .fetch_all(pool)
+        .await
+        .map_err(cvt)?;
+    Ok(rows
+        .iter()
+        .map(|r| Root {
+            id: r.get("id"),
+            path: r.get("path"),
+            name: r.get("name"),
+        })
+        .collect())
+}
+
+/// The audiobook folders, for the music scan to leave alone.
+pub async fn root_paths(pool: &SqlitePool) -> Result<Vec<PathBuf>, MusicError> {
+    Ok(list_roots(pool)
+        .await?
+        .into_iter()
+        .map(|r| PathBuf::from(r.path))
+        .collect())
+}
+
+/// Register a folder of audiobooks. It must exist, and must not be, contain
+/// or sit inside another audiobook folder (a book would be found twice).
+pub async fn add_root(
+    pool: &SqlitePool,
+    path: &str,
+    name: Option<&str>,
+) -> Result<Root, MusicError> {
+    let p = Path::new(path.trim());
+    let meta = std::fs::metadata(p)
+        .map_err(|_| MusicError::BadRequest(format!("{} is not a folder", p.display())))?;
+    if !meta.is_dir() {
+        return Err(MusicError::BadRequest(format!(
+            "{} is not a folder",
+            p.display()
+        )));
+    }
+    let canon = std::fs::canonicalize(p)
+        .map_err(|e| MusicError::BadRequest(format!("{}: {e}", p.display())))?;
+    for r in list_roots(pool).await? {
+        let other = PathBuf::from(&r.path);
+        if canon == other {
+            return Err(MusicError::Conflict(
+                "that folder is already an audiobook folder".into(),
+            ));
+        }
+        if canon.starts_with(&other) || other.starts_with(&canon) {
+            return Err(MusicError::Conflict(format!(
+                "that folder overlaps the audiobook folder {}",
+                r.path
+            )));
+        }
+    }
+    let name = name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            canon
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "Audiobooks".to_string());
+    let id: i64 =
+        sqlx::query("INSERT INTO audiobook_roots (path, name) VALUES (?, ?) RETURNING id")
+            .bind(canon.to_string_lossy().to_string())
+            .bind(&name)
+            .fetch_one(pool)
+            .await
+            .map_err(cvt)?
+            .get(0);
+    Ok(Root {
+        id,
+        path: canon.to_string_lossy().to_string(),
+        name,
+    })
+}
+
+/// Forget a folder, its books, and their positions, bookmarks and history.
+/// The files stay on disk; their track rows are removed.
+pub async fn delete_root(pool: &SqlitePool, id: i64) -> Result<(), MusicError> {
+    let mut tx = pool.begin().await.map_err(cvt)?;
+    let found = sqlx::query("SELECT 1 FROM audiobook_roots WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    if found.is_none() {
+        return Err(MusicError::NotFound(format!("audiobook folder {id}")));
+    }
+    // Foreign keys cascade from the books; the track rows are ours to remove.
+    let track_ids: Vec<i64> = sqlx::query(
+        "SELECT p.track_id FROM audiobook_parts p JOIN audiobooks b ON b.id = p.book_id WHERE b.root_id = ?",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(cvt)?
+    .iter()
+    .map(|r| r.get(0))
+    .collect();
+    sqlx::query("DELETE FROM audiobooks WHERE root_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    for t in track_ids {
+        sqlx::query("DELETE FROM tracks WHERE id = ? AND kind = 'audiobook'")
+            .bind(t)
+            .execute(&mut *tx)
+            .await
+            .map_err(cvt)?;
+    }
+    sqlx::query("DELETE FROM audiobook_roots WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    tx.commit().await.map_err(cvt)?;
+    Ok(())
+}
+
+/// Audio extensions an audiobook folder may hold: everything the music
+/// scanner knows except SACD images, plus `.m4b`.
+fn book_audio_format(path: &Path) -> Option<AudioFormat> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if ext == "m4b" {
+        return Some(AudioFormat::M4a);
+    }
+    match AudioFormat::from_extension(&ext) {
+        AudioFormat::Unknown | AudioFormat::SacdIso => None,
+        f => Some(f),
+    }
+}
+
+/// Everything one file tells us.
+struct FileInfo {
+    path: PathBuf,
+    format: AudioFormat,
+    size: i64,
+    mtime: Option<i64>,
+    part: PartInput,
+    sample_rate: Option<u32>,
+    bit_depth: Option<u8>,
+    channels: Option<u8>,
+    bitrate: Option<u32>,
+    album: Option<String>,
+    artist: Option<String>,
+    album_artist: Option<String>,
+    narrator: Option<String>,
+    series: Option<String>,
+    series_index: Option<f64>,
+    year: Option<u16>,
+    cover: Option<(String, Vec<u8>)>,
+    chapters: Vec<FileChapter>,
+}
+
+fn read_file(path: &Path, format: AudioFormat, size: i64, mtime: Option<i64>) -> FileInfo {
+    let mut f = FileInfo {
+        path: path.to_path_buf(),
+        format,
+        size,
+        mtime,
+        part: PartInput {
+            path: path.to_path_buf(),
+            disc: None,
+            track: None,
+            duration_ms: 0,
+            title: None,
+        },
+        sample_rate: None,
+        bit_depth: None,
+        channels: None,
+        bitrate: None,
+        album: None,
+        artist: None,
+        album_artist: None,
+        narrator: None,
+        series: None,
+        series_index: None,
+        year: None,
+        cover: None,
+        chapters: Vec::new(),
+    };
+    match lofty::read_from_path(path) {
+        Ok(tagged) => {
+            let props = tagged.properties();
+            f.part.duration_ms = props.duration().as_millis() as u64;
+            f.sample_rate = props.sample_rate();
+            f.bit_depth = props.bit_depth();
+            f.channels = props.channels();
+            f.bitrate = props.audio_bitrate();
+            if let Some(tag) = tagged.primary_tag() {
+                f.part.title = tag.title().map(|c| c.into_owned());
+                f.part.track = tag.track();
+                f.part.disc = tag.disk();
+                f.album = tag.album().map(|c| c.into_owned());
+                f.artist = tag.artist().map(|c| c.into_owned());
+                f.album_artist = tag.get_string(&ItemKey::AlbumArtist).map(str::to_string);
+                // Narrators are most often tagged as the composer.
+                f.narrator = tag.get_string(&ItemKey::Composer).map(str::to_string);
+                f.series = tag.get_string(&ItemKey::Movement).map(str::to_string);
+                f.series_index = tag
+                    .get_string(&ItemKey::MovementNumber)
+                    .and_then(|s| s.trim().parse().ok());
+                f.year = crate::normalize::sane_year(
+                    tag.year().and_then(|y| u16::try_from(y).ok()),
+                    crate::normalize::current_year(),
+                );
+                if let Some(pic) = tag.pictures().iter().find(|p| !p.data().is_empty()) {
+                    let mime = pic
+                        .mime_type()
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_else(|| "image/jpeg".to_string());
+                    f.cover = Some((mime, pic.data().to_vec()));
+                }
+            }
+        }
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "audiobook: unreadable file; cataloged without tags")
+        }
+    }
+    if matches!(format, AudioFormat::M4a) {
+        f.chapters = read_mp4_chapters(path);
+    }
+    if f.part.title.is_none() {
+        f.part.title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string);
+    }
+    f
+}
+
+/// Result of one audiobook scan.
+#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+pub struct ScanSummary {
+    pub books: u64,
+    pub files: u64,
+    pub unreadable_roots: u64,
+}
+
+/// A cover picture beside the audio.
+fn folder_cover(dir: &Path) -> Option<(String, Vec<u8>)> {
+    for stem in ["cover", "folder", "front", "poster"] {
+        for (ext, mime) in [
+            ("jpg", "image/jpeg"),
+            ("jpeg", "image/jpeg"),
+            ("png", "image/png"),
+        ] {
+            let p = dir.join(format!("{stem}.{ext}"));
+            if let Ok(bytes) = std::fs::read(&p) {
+                if !bytes.is_empty() {
+                    return Some((mime.to_string(), bytes));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Walk one root and read every audio file, grouped by book directory.
+/// Blocking.
+fn walk_root(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<FileInfo>> {
+    let mut books: std::collections::BTreeMap<PathBuf, Vec<FileInfo>> = Default::default();
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(root = %root.display(), error = %e, "audiobook walk error; entry skipped");
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(format) = book_audio_format(entry.path()) else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let info = read_file(
+            entry.path(),
+            format,
+            meta.len() as i64,
+            crate::scanner::mtime_secs(&meta),
+        );
+        books.entry(book_dir(entry.path())).or_default().push(info);
+    }
+    books
+}
+
+/// Scan every audiobook folder: files become `tracks` rows
+/// (`kind = 'audiobook'`), directories become books with ordered parts and
+/// chapters. Rescans keep each book's id, so positions, bookmarks and
+/// history survive; fields the user edited by hand are left alone.
+pub async fn scan(pool: &SqlitePool) -> Result<ScanSummary, MusicError> {
+    let mut summary = ScanSummary::default();
+    for root in list_roots(pool).await? {
+        let root_path = PathBuf::from(&root.path);
+        // An unmounted drive must not look like a deleted library.
+        if !root_path.is_dir() {
+            warn!(root = %root.path, "audiobook folder is missing; left as it was");
+            summary.unreadable_roots += 1;
+            continue;
+        }
+        let walked = {
+            let rp = root_path.clone();
+            tokio::task::spawn_blocking(move || walk_root(&rp))
+                .await
+                .map_err(|e| MusicError::JobFailed(format!("audiobook walk: {e}")))?
+        };
+        let mut seen_tracks: Vec<i64> = Vec::new();
+        for (dir, files) in walked {
+            summary.files += files.len() as u64;
+            let (book_id, track_ids) = store_book(pool, &root, &root_path, &dir, files).await?;
+            seen_tracks.extend(track_ids);
+            let _ = book_id;
+            summary.books += 1;
+        }
+        // Files gone from disk: mark missing, keep the rows (and with them
+        // positions and bookmarks) in case they come back.
+        let present: std::collections::HashSet<i64> = seen_tracks.into_iter().collect();
+        let rows = sqlx::query(
+            "SELECT p.track_id FROM audiobook_parts p JOIN audiobooks b ON b.id = p.book_id
+             WHERE b.root_id = ?",
+        )
+        .bind(root.id)
+        .fetch_all(pool)
+        .await
+        .map_err(cvt)?;
+        for r in rows {
+            let t: i64 = r.get(0);
+            if !present.contains(&t) {
+                sqlx::query("UPDATE tracks SET missing = 1 WHERE id = ? AND kind = 'audiobook'")
+                    .bind(t)
+                    .execute(pool)
+                    .await
+                    .map_err(cvt)?;
+            }
+        }
+    }
+    info!(
+        books = summary.books,
+        files = summary.files,
+        "audiobook scan complete"
+    );
+    Ok(summary)
+}
+
+async fn store_book(
+    pool: &SqlitePool,
+    root: &Root,
+    root_path: &Path,
+    dir: &Path,
+    files: Vec<FileInfo>,
+) -> Result<(i64, Vec<i64>), MusicError> {
+    let mut files = files;
+    // Order the parts, then carry the file info along in that order.
+    let mut inputs: Vec<PartInput> = files.iter().map(|f| f.part.clone()).collect();
+    order_parts(&mut inputs);
+    let pos: std::collections::HashMap<&PathBuf, usize> = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (&p.path, i))
+        .collect();
+    files.sort_by_key(|f| pos[&f.path]);
+    let starts = start_offsets(&inputs);
+    let embedded: Vec<Vec<FileChapter>> = files.iter().map(|f| f.chapters.clone()).collect();
+    let chapters = build_chapters(&inputs, &starts, &embedded);
+    let total: u64 = inputs.iter().map(|p| p.duration_ms).sum();
+
+    // Book fields: tags win, the folder fills blanks, series prefer the folder.
+    let rel: Vec<String> = dir
+        .strip_prefix(root_path)
+        .unwrap_or(dir)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    // A book directly in the root has no folder metadata beyond its name.
+    let rel = if rel.is_empty() {
+        vec![dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| root.name.clone())]
+    } else {
+        rel
+    };
+    let folder = parse_folder(&rel);
+    let first = |f: &dyn Fn(&FileInfo) -> Option<String>| files.iter().find_map(f);
+    let tag_album = first(&|f| f.album.clone());
+    let tag_author = first(&|f| f.album_artist.clone()).or_else(|| first(&|f| f.artist.clone()));
+    let tag_narrator = first(&|f| f.narrator.clone());
+    let title = merge_field(tag_album, folder.title.clone())
+        .unwrap_or_else(|| rel.last().cloned().unwrap_or_default());
+    let author = merge_field(tag_author, folder.author.clone());
+    let narrator = merge_field(tag_narrator, folder.narrator.clone());
+    let series = folder
+        .series
+        .clone()
+        .or_else(|| first(&|f| f.series.clone()).and_then(|s| clean(&s)));
+    let series_index = folder
+        .series_index
+        .or_else(|| files.iter().find_map(|f| f.series_index));
+    let year = folder.year.or_else(|| files.iter().find_map(|f| f.year));
+    let cover = files
+        .iter()
+        .find_map(|f| f.cover.clone())
+        .or_else(|| folder_cover(dir));
+
+    let mut tx = pool.begin().await.map_err(cvt)?;
+    // Cover.
+    let cover_hash = if let Some((mime, bytes)) = cover {
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        sqlx::query("INSERT OR IGNORE INTO artwork (hash, mime, bytes) VALUES (?, ?, ?)")
+            .bind(&hash)
+            .bind(mime)
+            .bind(bytes)
+            .execute(&mut *tx)
+            .await
+            .map_err(cvt)?;
+        Some(hash)
+    } else {
+        None
+    };
+    // The book row, keeping its id (and so everything hung on it).
+    let dir_s = dir.to_string_lossy().to_string();
+    let existing = sqlx::query("SELECT id, meta_edited FROM audiobooks WHERE path = ?")
+        .bind(&dir_s)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    let book_id: i64 = match existing {
+        Some(r) => {
+            let id: i64 = r.get("id");
+            let edited: i64 = r.get("meta_edited");
+            if edited == 0 {
+                sqlx::query(
+                    "UPDATE audiobooks SET root_id = ?, title = ?, author = ?, narrator = ?, series = ?,
+                       series_index = ?, year = ?, cover_hash = ?, duration_ms = ? WHERE id = ?",
+                )
+                .bind(root.id)
+                .bind(&title)
+                .bind(&author)
+                .bind(&narrator)
+                .bind(&series)
+                .bind(series_index)
+                .bind(year.map(i64::from))
+                .bind(&cover_hash)
+                .bind(total as i64)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(cvt)?;
+            } else {
+                sqlx::query("UPDATE audiobooks SET root_id = ?, duration_ms = ?, cover_hash = COALESCE(cover_hash, ?) WHERE id = ?")
+                    .bind(root.id)
+                    .bind(total as i64)
+                    .bind(&cover_hash)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(cvt)?;
+            }
+            id
+        }
+        None => sqlx::query(
+            "INSERT INTO audiobooks (root_id, path, title, author, narrator, series, series_index,
+                                     year, cover_hash, duration_ms, added_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(root.id)
+        .bind(&dir_s)
+        .bind(&title)
+        .bind(&author)
+        .bind(&narrator)
+        .bind(&series)
+        .bind(series_index)
+        .bind(year.map(i64::from))
+        .bind(&cover_hash)
+        .bind(total as i64)
+        .bind(now_ms())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(cvt)?
+        .get(0),
+    };
+
+    // Track rows for the files, then the book's parts and chapters.
+    let mut track_ids = Vec::with_capacity(files.len());
+    for f in &files {
+        let id: i64 = sqlx::query(
+            "INSERT INTO tracks (path, format, kind, file_size, file_mtime, duration_ms, sample_rate,
+                                 bit_depth, channels, bitrate, title, album, artist, track_no, disc_no,
+                                 missing, decodable, mqa_checked, mbid_checked)
+             VALUES (?, ?, 'audiobook', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 1, 1)
+             ON CONFLICT(path) DO UPDATE SET
+               format = excluded.format, kind = 'audiobook', file_size = excluded.file_size,
+               file_mtime = excluded.file_mtime, duration_ms = excluded.duration_ms,
+               sample_rate = excluded.sample_rate, bit_depth = excluded.bit_depth,
+               channels = excluded.channels, bitrate = excluded.bitrate, title = excluded.title,
+               album = excluded.album, artist = excluded.artist, track_no = excluded.track_no,
+               disc_no = excluded.disc_no, missing = 0, decodable = 1
+             RETURNING id",
+        )
+        .bind(f.path.to_string_lossy().to_string())
+        .bind(f.format.wire_name())
+        .bind(f.size)
+        .bind(f.mtime)
+        .bind(f.part.duration_ms as i64)
+        .bind(f.sample_rate.map(i64::from))
+        .bind(f.bit_depth.map(i64::from))
+        .bind(f.channels.map(i64::from))
+        .bind(f.bitrate.map(i64::from))
+        .bind(&f.part.title)
+        .bind(&title)
+        .bind(&author)
+        .bind(f.part.track.map(i64::from))
+        .bind(f.part.disc.map(i64::from))
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(cvt)?
+        .get(0);
+        track_ids.push(id);
+    }
+    // Free the parts this book had and any other book held for these files
+    // (a file that moved between folders), then lay the parts out again.
+    sqlx::query("DELETE FROM audiobook_chapters WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    sqlx::query("DELETE FROM audiobook_parts WHERE book_id = ?")
+        .bind(book_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    for t in &track_ids {
+        sqlx::query("DELETE FROM audiobook_parts WHERE track_id = ?")
+            .bind(t)
+            .execute(&mut *tx)
+            .await
+            .map_err(cvt)?;
+    }
+    let mut part_ids = Vec::with_capacity(files.len());
+    for (i, (f, t)) in files.iter().zip(&track_ids).enumerate() {
+        let pid: i64 = sqlx::query(
+            "INSERT INTO audiobook_parts (book_id, track_id, part_index, title, start_offset_ms, duration_ms)
+             VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(book_id)
+        .bind(t)
+        .bind(i as i64)
+        .bind(&f.part.title)
+        .bind(starts[i] as i64)
+        .bind(f.part.duration_ms as i64)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(cvt)?
+        .get(0);
+        part_ids.push(pid);
+    }
+    for c in &chapters {
+        sqlx::query(
+            "INSERT INTO audiobook_chapters (book_id, part_id, title, start_offset_ms, duration_ms)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(book_id)
+        .bind(part_ids[c.part_index])
+        .bind(&c.title)
+        .bind(c.start_offset_ms as i64)
+        .bind(c.duration_ms as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(cvt)?;
+    }
+    tx.commit().await.map_err(cvt)?;
+    Ok((book_id, track_ids))
 }

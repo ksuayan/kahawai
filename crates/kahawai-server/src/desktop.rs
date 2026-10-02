@@ -372,7 +372,7 @@ pub async fn setup_live_scan_stats(
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
-    let tracks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
+    let tracks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE kind = 'music'")
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;

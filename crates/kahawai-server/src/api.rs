@@ -517,7 +517,7 @@ const REPORT_LIMIT: i64 = 200;
 
 async fn raw_genres(pool: &SqlitePool, how: &str) -> Result<Vec<RawGenre>, MusicError> {
     let rows = sqlx::query(
-        "SELECT m.raw, (SELECT COUNT(*) FROM tracks t WHERE t.genre = m.raw AND t.missing = 0) AS n,
+        "SELECT m.raw, (SELECT COUNT(*) FROM tracks t WHERE t.genre = m.raw AND t.missing = 0 AND t.kind = 'music') AS n,
                 GROUP_CONCAT(m.genre, char(31)) AS genres
          FROM genre_map m WHERE m.how = ?
          GROUP BY m.raw ORDER BY n DESC, m.raw LIMIT ?",
@@ -1130,6 +1130,11 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
                     )),
                 )
                 .await;
+                // Audiobook folders ride along: a rescan of the music finds
+                // new books too. A failure here must not fail the music scan.
+                if let Err(e) = crate::audiobooks::scan(&s.pool).await {
+                    tracing::warn!(error = %e, "audiobook scan failed");
+                }
                 // The catalog changed: tell already-connected clients (SSE)
                 // rather than leaving them to notice on their next poll —
                 // a scan triggered from the desktop app while a Player is
@@ -1687,7 +1692,7 @@ pub async fn stream_track(
 
     let fmt: AudioFormat = track.format;
     // S10: the catalog path must canonicalize inside a configured music root.
-    let path = ensure_within_roots(std::path::Path::new(&track.path), &s.music_dirs())?;
+    let path = ensure_within_roots(std::path::Path::new(&track.path), &s.track_roots().await?)?;
 
     // Resolve the rendition (S13): explicit ?format= wins, otherwise the
     // server ladder. Ok(None) = passthrough. Errors: 501 for disabled
@@ -1890,7 +1895,7 @@ async fn stream_dop(
     let mut plans = vec![plan];
     if let Some(nt) = next {
         let nfmt: AudioFormat = nt.format;
-        let npath = ensure_within_roots(std::path::Path::new(&nt.path), &s.music_dirs())?;
+        let npath = ensure_within_roots(std::path::Path::new(&nt.path), &s.track_roots().await?)?;
         let nplan = transcode::resolve_plan(
             nfmt,
             npath,
@@ -1970,7 +1975,7 @@ async fn stream_transcode(
     let mut plans = vec![plan];
     if let Some(nt) = next {
         let nfmt: AudioFormat = nt.format;
-        let npath = ensure_within_roots(std::path::Path::new(&nt.path), &s.music_dirs())?;
+        let npath = ensure_within_roots(std::path::Path::new(&nt.path), &s.track_roots().await?)?;
         match transcode::resolve_plan(
             nfmt,
             npath.clone(),
@@ -2071,7 +2076,7 @@ pub async fn stream_head(
             .ok_or_else(|| MusicError::NotFound(format!("next track {next_id}")))?;
     }
     let fmt: AudioFormat = track.format;
-    let path = ensure_within_roots(std::path::Path::new(&track.path), &s.music_dirs())?;
+    let path = ensure_within_roots(std::path::Path::new(&track.path), &s.track_roots().await?)?;
     let plan = transcode::resolve_plan(
         fmt,
         path.clone(),

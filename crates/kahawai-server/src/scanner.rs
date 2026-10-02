@@ -223,10 +223,11 @@ async fn scan_with_workers(
             .get("id");
 
     // path -> (size, mtime, missing) for change detection.
-    let rows = sqlx::query("SELECT path, file_size, file_mtime, missing FROM tracks")
-        .fetch_all(pool)
-        .await
-        .map_err(db::cvt)?;
+    let rows =
+        sqlx::query("SELECT path, file_size, file_mtime, missing FROM tracks WHERE kind = 'music'")
+            .fetch_all(pool)
+            .await
+            .map_err(db::cvt)?;
     let mut known: HashMap<String, (Option<i64>, Option<i64>, i64)> =
         HashMap::with_capacity(rows.len());
     for r in &rows {
@@ -238,7 +239,7 @@ async fn scan_with_workers(
     // DSD rows cataloged before DSD support (no rate = never analyzed) are
     // re-read even though the file itself is unchanged.
     let stale: HashSet<String> = sqlx::query(
-        "SELECT path FROM tracks WHERE format IN ('dsf', 'dff') AND sample_rate IS NULL",
+        "SELECT path FROM tracks WHERE kind = 'music' AND format IN ('dsf', 'dff') AND sample_rate IS NULL",
     )
     .fetch_all(pool)
     .await
@@ -254,14 +255,15 @@ async fn scan_with_workers(
     crate::genre::refresh_genres(pool).await?;
     // Rows whose tags were read before MQA detection or MusicBrainz IDs
     // existed: tags are read the next time the file is visited.
-    let mut tags_unchecked: HashSet<String> =
-        sqlx::query("SELECT path FROM tracks WHERE mqa_checked = 0 OR mbid_checked = 0")
-            .fetch_all(pool)
-            .await
-            .map_err(db::cvt)?
-            .iter()
-            .map(|r| r.get::<String, _>("path"))
-            .collect();
+    let mut tags_unchecked: HashSet<String> = sqlx::query(
+        "SELECT path FROM tracks WHERE kind = 'music' AND (mqa_checked = 0 OR mbid_checked = 0)",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db::cvt)?
+    .iter()
+    .map(|r| r.get::<String, _>("path"))
+    .collect();
     let estimate = known
         .values()
         .filter(|(_, _, missing)| *missing == 0)
@@ -271,7 +273,8 @@ async fn scan_with_workers(
     let metrics = Arc::new(ScanMetrics::default());
     let (walk_tx, mut walk_rx) = mpsc::channel::<Walked>(1024);
     let walk_dirs = dirs.to_vec();
-    let walker = tokio::task::spawn_blocking(move || walk(&walk_dirs, &walk_tx));
+    let skip_dirs = crate::audiobooks::root_paths(pool).await?;
+    let walker = tokio::task::spawn_blocking(move || walk(&walk_dirs, &skip_dirs, &walk_tx));
     let (write_tx, write_rx) = mpsc::channel::<CatalogWrite>(WRITE_BATCH * 2);
     let writer = tokio::spawn(write_catalog(pool.clone(), write_rx, metrics.clone()));
     let workers = Arc::new(Semaphore::new(workers.max(1)));
@@ -412,10 +415,16 @@ async fn scan_with_workers(
 /// The single walk over `dirs` (blocking). Sends every audio file on, with
 /// the stat walkdir already has; counts everything else. Unreadable entries
 /// are logged and counted rather than silently dropped.
-fn walk(dirs: &[PathBuf], tx: &mpsc::Sender<Walked>) -> WalkTotals {
+fn walk(dirs: &[PathBuf], skip: &[PathBuf], tx: &mpsc::Sender<Walked>) -> WalkTotals {
     let mut totals = WalkTotals::default();
     'dirs: for dir in dirs {
-        for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+        // Audiobook folders belong to the audiobook scan, even when one sits
+        // inside a music folder.
+        let walker = walkdir::WalkDir::new(dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !skip.iter().any(|s| e.path().starts_with(s)));
+        for entry in walker {
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {

@@ -190,7 +190,7 @@ pub fn normalize_genre(raw: &str) -> Vec<String> {
 /// library), so this is cheap enough to run after every scan.
 pub async fn refresh_genres(pool: &SqlitePool) -> Result<(), MusicError> {
     let raws: Vec<String> =
-        sqlx::query("SELECT DISTINCT genre FROM tracks WHERE genre IS NOT NULL")
+        sqlx::query("SELECT DISTINCT genre FROM tracks WHERE genre IS NOT NULL AND kind = 'music'")
             .fetch_all(pool)
             .await
             .map_err(db::cvt)?
@@ -231,7 +231,8 @@ pub async fn refresh_genres(pool: &SqlitePool) -> Result<(), MusicError> {
     let linked = sqlx::query(
         "INSERT OR IGNORE INTO track_genres (track_id, genre)
          SELECT t.id, m.genre FROM tracks t JOIN genre_map m ON m.raw = t.genre
-         WHERE m.genre IS NOT NULL AND t.missing = 0 AND t.duplicate_of IS NULL",
+         WHERE m.genre IS NOT NULL AND t.missing = 0 AND t.duplicate_of IS NULL
+           AND t.kind = 'music'",
     )
     .execute(&mut *tx)
     .await

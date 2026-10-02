@@ -3,6 +3,7 @@
 
 mod api;
 mod audiobooks;
+mod audiobooks_api;
 mod catalog;
 mod db;
 #[cfg(target_os = "macos")]
@@ -84,6 +85,13 @@ impl AppState {
     pub fn music_dirs(&self) -> Vec<std::path::PathBuf> {
         self.config.read().unwrap().music_dirs.clone()
     }
+    /// Where a catalog track's file may live: the music folders, and the
+    /// audiobook folders (S10 root enforcement for `/stream`).
+    pub async fn track_roots(&self) -> Result<Vec<std::path::PathBuf>, kahawai_core::MusicError> {
+        let mut roots = self.music_dirs();
+        roots.extend(audiobooks::root_paths(&self.pool).await?);
+        Ok(roots)
+    }
     pub fn preferred_ladder(&self) -> Vec<kahawai_core::StreamFormat> {
         self.config.read().unwrap().preferred_ladder.clone()
     }
@@ -147,6 +155,43 @@ pub fn app(state: AppState) -> Router {
         .route("/api/playlists/{id}/export", get(export::export_playlist))
         .route("/api/artwork/{hash}", get(api::artwork))
         .route("/api/scan", post(api::trigger_scan))
+        .route(
+            "/api/audiobook-roots",
+            get(audiobooks_api::list_roots).post(audiobooks_api::add_root),
+        )
+        .route(
+            "/api/audiobook-roots/{id}",
+            axum::routing::delete(audiobooks_api::delete_root),
+        )
+        .route("/api/audiobooks", get(audiobooks_api::list_books))
+        .route("/api/audiobooks/scan", post(audiobooks_api::trigger_scan))
+        .route(
+            "/api/audiobooks/{id}",
+            get(audiobooks_api::book_detail).patch(audiobooks_api::edit_book),
+        )
+        .route(
+            "/api/audiobooks/{id}/position",
+            put(audiobooks_api::put_position),
+        )
+        .route(
+            "/api/audiobooks/{id}/finished",
+            post(audiobooks_api::mark_finished),
+        )
+        .route("/api/audiobooks/{id}/history", get(audiobooks_api::history))
+        .route("/api/audiobooks/{id}/resolve", get(audiobooks_api::resolve))
+        .route(
+            "/api/audiobooks/{id}/settings",
+            put(audiobooks_api::put_settings),
+        )
+        .route(
+            "/api/audiobooks/{id}/bookmarks",
+            get(audiobooks_api::list_bookmarks).post(audiobooks_api::add_bookmark),
+        )
+        .route(
+            "/api/audiobooks/{id}/bookmarks/{bid}",
+            axum::routing::patch(audiobooks_api::edit_bookmark)
+                .delete(audiobooks_api::delete_bookmark),
+        )
         .route("/api/jobs", get(api::list_jobs).post(api::create_job))
         .route("/api/jobs/{id}", get(api::get_job))
         .route("/api/jobs/{id}/pause", post(api::pause_job))
