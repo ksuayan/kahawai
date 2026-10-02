@@ -1,4 +1,4 @@
--- Genre normalization (docs/v2/kahawai-genre-normalization-spec.md).
+-- Genre normalization (docs/v1/kahawai-genre-normalization-spec.md).
 --
 -- tracks.genre keeps the raw tag, untouched. genre_map says which canonical
 -- genres each distinct raw value maps to (genre NULL when the value is not a

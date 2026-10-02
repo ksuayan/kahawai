@@ -1,6 +1,6 @@
 # Kahawai Audiobook Support — Spec
 
-Date: 2026-10-01. Status: spec only, not implemented.
+Date: 2026-10-01. Status: **built** on `claude/audiobook` (see [the build list](kahawai-audiobook-todo.md) for what each item became); not yet listened to or tried on the Mac.
 Style: compact, agent-ready. Sizes: XS < S < M < L.
 
 ## Goal
@@ -164,3 +164,13 @@ gap: no open, audiobook-specific, community-curated database exists.
 Zero warnings, green tests, clippy clean per phase, as usual.
 v1 = D1–D5 + D7 + D6-local (tags/folder/manual). Online enrichment (D6)
 follows as a fast follow.
+
+## Where the build differs from this spec
+
+- **Time stretch** is `timestretch.rs` with its own `process` that appends to an output buffer, not an in-place `DspStage`: a stretch changes the frame count. It is first in the chain after decode and resampling. Leaving it for exactly 1.0 hands the audio over raw, with no seam.
+- **Chapters** come from Nero `chpl` atoms only. QuickTime chapter text tracks are not read.
+- **Sessions** are derived on each position update (the latest session ends at the last update), and a day is a UTC day on the server; the player groups by local day.
+- **Extra columns:** `audiobooks.path` (the book's folder), `year`, `meta_edited` (a hand edit is kept across rescans and lookups), `enriched_at` (asked once).
+- **Hashing:** audiobook files are not content-hashed (they are many GB, and duplicate detection is by album).
+- **Online lookup** needs the existing `enrichment_enabled` switch (off by default), because it sends titles off the LAN.
+- **Playback speed** is not a saved engine setting: the book being played decides it, and the engine returns to 1.0 for music. Anything but 1.0 holds exclusive (bit-perfect) output back, like the EQ does.

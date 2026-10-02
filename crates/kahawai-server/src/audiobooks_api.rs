@@ -1,4 +1,4 @@
-//! HTTP side of audiobooks (docs/v2/kahawai-audiobook-spec.md): the folders,
+//! HTTP side of audiobooks (docs/v1/kahawai-audiobook-spec.md): the folders,
 //! the library and book detail, and the position, bookmark, history and
 //! settings stores. All positions are `book_offset_ms`.
 

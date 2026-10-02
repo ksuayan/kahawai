@@ -137,6 +137,7 @@ New here? Read top to bottom. Already know the codebase? Jump to whichever group
 - `docs/v1/kahawai-genre-normalization-spec.md` — genre normalization + browse/search.
 - `docs/v1/kahawai-metadata-enrichment-spec.md` — metadata remapping & external enrichment (Phase C: MusicBrainz and the Cover Art Archive, off by default).
 - `docs/v1/kahawai-player-catalog-cache-spec.md` — the player's local catalog cache: a snapshot, then only what changed (catalog revisions and deltas).
+- `docs/v1/kahawai-audiobook-spec.md` and `docs/v1/kahawai-audiobook-todo.md` — audiobooks: separate library, multi-part books and chapters, pitch-preserving speed, bookmarks and history, sleep timer, optional online details (built; not yet tried on the Mac).
 - `player/DATABASE.md` — the player's schema, its key queries (its own and the server's), the indexes that serve them, and best practices.
 
 **Planning & scope**

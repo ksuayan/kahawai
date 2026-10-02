@@ -1,5 +1,5 @@
 -- Catalog revisions for the player's cache
--- (docs/v2/kahawai-player-catalog-cache-spec.md).
+-- (docs/v1/kahawai-player-catalog-cache-spec.md).
 --
 -- meta.catalog_rev is a counter that only goes up. Every change to a track,
 -- album or artist field a player shows takes the next value and stores it

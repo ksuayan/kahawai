@@ -1,4 +1,4 @@
--- External metadata enrichment (docs/v2/kahawai-metadata-enrichment-spec.md,
+-- External metadata enrichment (docs/v1/kahawai-metadata-enrichment-spec.md,
 -- MusicBrainz and Cover Art Archive part).
 --
 -- enrich_attempts counts lookups that failed with an error, so a flaky

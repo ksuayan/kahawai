@@ -1,5 +1,5 @@
 -- Metadata cleanup and embedded MusicBrainz IDs
--- (docs/v2/kahawai-metadata-enrichment-spec.md, local part of Phase C).
+-- (docs/v1/kahawai-metadata-enrichment-spec.md, local part of Phase C).
 --
 -- Grouping keys (case and whitespace collapsed) decide which album a track
 -- joins, sort keys ("Beatles, The") order the lists, and display strings are

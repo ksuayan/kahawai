@@ -1,4 +1,4 @@
--- Audiobooks (docs/v2/kahawai-audiobook-spec.md). Books live beside the music
+-- Audiobooks (docs/v1/kahawai-audiobook-spec.md). Books live beside the music
 -- catalog: their files are ordinary rows in tracks with kind = 'audiobook',
 -- so streaming works unchanged, and the music paths leave them out.
 -- A position is always book_offset_ms, the time from the start of the book.

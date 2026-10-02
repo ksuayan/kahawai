@@ -1,4 +1,4 @@
-//! Audiobooks (docs/v2/kahawai-audiobook-spec.md): scanning book folders into
+//! Audiobooks (docs/v1/kahawai-audiobook-spec.md): scanning book folders into
 //! books, parts and chapters, and the position, bookmark and history store.
 //!
 //! A position is always `book_offset_ms`, the time from the start of the
