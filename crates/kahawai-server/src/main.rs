@@ -284,8 +284,12 @@ fn main() {
             desktop::setup_save_config,
             desktop::setup_get_running_config,
             desktop::setup_apply_config,
+            desktop::setup_audiobook_folders,
+            desktop::setup_add_audiobook_folder,
+            desktop::setup_remove_audiobook_folder,
             desktop::setup_recent_scans,
             desktop::setup_active_hash_job,
+            desktop::setup_active_book_lookup,
             desktop::setup_live_scan_stats,
             desktop::setup_enrichment_status,
             desktop::setup_set_enrichment,
@@ -391,6 +395,35 @@ pub async fn run_server_with_ready(
     };
     if let Some(tx) = ready {
         let _ = tx.send(state.clone());
+    }
+
+    // The config's audiobook folders join the catalog's, and a book scan runs
+    // unless the startup music scan below is going to run it.
+    let audiobook_added = audiobooks::sync_roots(&state.pool, &config.audiobook_dirs)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "could not read the audiobook folders");
+            0
+        });
+    let music_scan_at_start = config.scan_on_startup && !config.music_dirs.is_empty();
+    if !music_scan_at_start
+        && (audiobook_added > 0
+            || !audiobooks::root_paths(&state.pool)
+                .await
+                .unwrap_or_default()
+                .is_empty())
+    {
+        if let Ok(guard) = state.scan_lock.clone().try_lock_owned() {
+            let job = state
+                .jobs
+                .create(
+                    kahawai_core::JobKind::Scan,
+                    "Audiobook scan".to_string(),
+                    None,
+                )
+                .await;
+            audiobooks_api::spawn_audiobook_scan(state.clone(), job.id, guard);
+        }
     }
 
     // S9: the startup scan is a real persisted job (visible in /api/jobs),

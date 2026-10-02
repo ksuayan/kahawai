@@ -3,6 +3,7 @@
 
 export interface ServerConfigShape {
   music_dirs: string[];
+  audiobook_dirs?: string[];
   bind: string;
   db_path: string;
   preferred_ladder: string[];
@@ -68,6 +69,7 @@ export interface MusicDirEntry {
 
 export interface SetupInput {
   music_dirs: string[];
+  audiobook_dirs?: string[];
   db_dir: string;
   bind: string;
 }
@@ -94,6 +96,8 @@ export function describeServer(id: ServerIdentity): string {
 
 export interface ServerStatus {
   running: boolean;
+  /** Opening the catalog, not serving yet: shown as starting, not as not running. */
+  starting?: boolean;
   bind: string;
   /** The other Kahawai Server holding the port, when that's why this one
    *  isn't running. */
@@ -110,6 +114,8 @@ export interface ApplyConfigInput {
 }
 
 export interface LiveScanStats {
+  /** Audiobooks cataloged so far. */
+  audiobooks?: number;
   albums: number;
   artists: number;
   tracks: number;
@@ -123,7 +129,7 @@ export type JobStatus = "queued" | "running" | "done" | "failed" | "paused" | "c
 
 export interface ScanJob {
   id: string;
-  kind: "scan" | "hash_files";
+  kind: "scan" | "hash_files" | "enrich_books";
   label: string;
   progress: number;
   status: JobStatus;
@@ -234,3 +240,10 @@ export const CONFIDENCE_LEVELS: { value: number; label: string }[] = [
   { value: 0.9, label: "Balanced (90%)" },
   { value: 0.95, label: "Strict (95%)" },
 ];
+
+/** An audiobook folder of the running server (`setup_audiobook_folders`). */
+export interface AudiobookRoot {
+  id: number;
+  path: string;
+  name: string;
+}

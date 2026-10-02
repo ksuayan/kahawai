@@ -267,3 +267,58 @@ describe("StatusTab: hashing", () => {
     expect(wrapper.find('[data-testid="hashing"]').exists()).toBe(false);
   });
 });
+
+describe("StatusTab: heading while the server starts", () => {
+  it("says starting, not not running, while the server is opening its catalog", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: false, starting: true, bind: "0.0.0.0:8080" };
+    await settle();
+    expect(wrapper.text()).toContain("Server starting…");
+    expect(wrapper.text()).not.toContain("Server not running");
+    setup.serverStatus = { running: true, starting: false, bind: "0.0.0.0:8080" };
+    await settle();
+    expect(wrapper.text()).toContain("Server running");
+  });
+});
+
+describe("StatusTab: audiobook scanning", () => {
+  it("says it is scanning audiobooks, counts books, and shows the files read", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    setup.recentScans = [
+      { id: "job-3", kind: "scan", label: "Audiobook scan", progress: 0.4, status: "running", started_at: Date.now() - 4000, files: { done: 40, total: 100, per_sec: 8, eta_at: Date.now() + 8000 } },
+    ] as never;
+    setup.liveScanStats = { albums: 100, artists: 20, tracks: 900, audiobooks: 12 } as never;
+    await settle();
+    expect(wrapper.get('[data-testid="scan-heading"]').text()).toBe("Scanning audiobooks…");
+    expect(wrapper.get('[data-testid="books-count"]').text()).toContain("12");
+    expect(wrapper.text()).not.toContain("Albums");
+    expect(wrapper.get('[data-testid="files-remaining"]').text()).toBe("60");
+  });
+
+  it("a music scan keeps its tally, and shows the book count only once there are books", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    setup.recentScans = [{ id: "job-1", kind: "scan", label: "Library scan", progress: 0, status: "running", started_at: Date.now() }] as never;
+    setup.liveScanStats = { albums: 5, artists: 2, tracks: 40, audiobooks: 0 } as never;
+    await settle();
+    expect(wrapper.get('[data-testid="scan-heading"]').text()).toBe("Scanning…");
+    expect(wrapper.text()).toContain("Albums");
+    expect(wrapper.find('[data-testid="books-count"]').exists()).toBe(false);
+  });
+
+  it("shows the online details lookup while it runs", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    setup.bookLookupJob = { id: "job-9", kind: "enrich_books", label: "Audiobook info lookup", progress: 0.25, status: "running" } as never;
+    await settle();
+    expect(wrapper.get('[data-testid="lookup-percent"]').text()).toBe("25%");
+    setup.bookLookupJob = null;
+    await settle();
+    expect(wrapper.find('[data-testid="book-lookup"]').exists()).toBe(false);
+  });
+});

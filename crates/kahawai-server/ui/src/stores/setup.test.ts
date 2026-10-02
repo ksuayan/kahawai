@@ -152,7 +152,7 @@ describe("setup store: save", () => {
     expect(ok).toBe(true);
     expect(setup.saveError).toBeNull();
     expect(tauri.callsTo("setup_save_config")).toEqual([
-      { input: { music_dirs: ["/music/a"], db_dir: "/data", bind: "0.0.0.0:8080" } },
+      { input: { music_dirs: ["/music/a"], audiobook_dirs: [], db_dir: "/data", bind: "0.0.0.0:8080" } },
     ]);
   });
 
@@ -351,5 +351,94 @@ describe("setup store: live config (running server)", () => {
     await setup.applyAndRescan();
     expect(setup.applying).toBe(false);
     expect(setup.applyError).toContain("the server is not running");
+  });
+});
+
+describe("setup store: audiobook folders", () => {
+  it("the wizard's list is optional, kept apart, and saved with the config", async () => {
+    inTauri();
+    tauri.on("setup_save_config", undefined);
+    tauri.on("setup_validate_dir", { exists: true, is_dir: true, readable: true, writable: false, audio_files: 0, truncated: false });
+    const setup = useSetupStore();
+    setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
+    setup.dbDir = "/data";
+    dialog.nextPath = "/books";
+    await setup.addAudiobookDirFromPicker();
+    expect(setup.audiobookDirs).toHaveLength(1);
+    expect(setup.dirs).toHaveLength(1);
+    await setup.addAudiobookDirFromPicker(); // the same folder again: ignored
+    expect(setup.audiobookDirs).toHaveLength(1);
+    await setup.save();
+    expect(tauri.callsTo("setup_save_config")[0]).toMatchObject({ input: { music_dirs: ["/music/a"], audiobook_dirs: ["/books"] } });
+    setup.removeAudiobookDir("/books");
+    expect(setup.audiobookDirs).toHaveLength(0);
+  });
+
+  it("a folder that is not a folder is left out of the saved config", async () => {
+    tauri.on("setup_save_config", undefined);
+    const setup = useSetupStore();
+    setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
+    setup.dbDir = "/data";
+    setup.audiobookDirs = [{ path: "/gone", validating: false, validation: { exists: false, is_dir: false, readable: false, writable: false, audio_files: 0, truncated: false } }];
+    await setup.save();
+    expect(tauri.callsTo("setup_save_config")[0]).toMatchObject({ input: { audiobook_dirs: [] } });
+  });
+
+  it("the running list adds and removes at once, and shows the server's refusal", async () => {
+    inTauri();
+    const setup = useSetupStore();
+    let roots = [{ id: 1, path: "/srv/books", name: "books" }];
+    tauri.on("setup_audiobook_folders", () => roots);
+    tauri.on("setup_add_audiobook_folder", (a?: Record<string, unknown>) => {
+      if (a?.path === "/srv/books/inner") throw "that folder overlaps the audiobook folder /srv/books";
+      roots = [...roots, { id: 2, path: String(a?.path), name: "more" }];
+      return roots[1];
+    });
+    tauri.on("setup_remove_audiobook_folder", (a?: Record<string, unknown>) => {
+      roots = roots.filter((r) => r.id !== a?.id);
+    });
+    tauri.on("setup_recent_scans", []);
+    await setup.loadAudiobookRoots();
+    expect(setup.audiobookRoots).toHaveLength(1);
+    dialog.nextPath = "/srv/books/inner";
+    await setup.addRunningAudiobookFromPicker();
+    expect(setup.audiobookError).toContain("overlaps");
+    dialog.nextPath = "/srv/more";
+    await setup.addRunningAudiobookFromPicker();
+    expect(setup.audiobookError).toBeNull();
+    expect(setup.audiobookRoots.map((r) => r.path)).toEqual(["/srv/books", "/srv/more"]);
+    await setup.removeRunningAudiobook(1);
+    expect(setup.audiobookRoots.map((r) => r.id)).toEqual([2]);
+  });
+});
+
+describe("setup store: the Status tab follows the server", () => {
+  it("a server that was still starting when the tab opened is shown running once it is", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+    try {
+      let status: Record<string, unknown> = { running: false, starting: true, bind: "0.0.0.0:8080" };
+      tauri
+        .on("setup_get_state", { config_path: "/c.toml", config_exists: true, config: { music_dirs: ["/m"], bind: "0.0.0.0:8080", db_path: "/d/music.db", preferred_ladder: [], dsd_story: "pcm", scan_on_startup: false } })
+        .on("setup_server_status", () => status)
+        .on("setup_get_running_config", undefined)
+        .on("setup_recent_scans", [])
+        .on("setup_audiobook_folders", [{ id: 1, path: "/srv/books", name: "books" }])
+        .on("setup_server_identity", undefined);
+      const setup = useSetupStore();
+      await setup.init();
+      expect(setup.serverStatus).toMatchObject({ running: false, starting: true });
+      expect(setup.audiobookRoots).toEqual([{ id: 1, path: "/srv/books", name: "books" }]);
+      status = { running: true, starting: false, bind: "0.0.0.0:8080" };
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(setup.serverStatus?.running).toBe(true);
+      // Reading what needs a server happens when it comes up, not only at launch.
+      expect(tauri.callsTo("setup_get_running_config").length).toBeGreaterThanOrEqual(2);
+      // And it is noticed when it stops again.
+      status = { running: false, starting: false, bind: "0.0.0.0:8080" };
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(setup.serverStatus?.running).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

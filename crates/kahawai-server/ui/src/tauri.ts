@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  AudiobookRoot,
   ApplyConfigInput,
   DirValidation,
   EnrichAction,
@@ -95,6 +96,11 @@ export async function setupActiveHashJob(): Promise<ScanJob | null> {
   return (await cmd<ScanJob | null>("setup_active_hash_job")) ?? null;
 }
 
+/** The audiobook details lookup while it is queued or running, else null. */
+export async function setupActiveBookLookup(): Promise<ScanJob | null> {
+  return (await cmd<ScanJob | null>("setup_active_book_lookup")) ?? null;
+}
+
 /** Live catalog counts, for the Status tab's tally while a scan runs. */
 export async function setupLiveScanStats(): Promise<LiveScanStats> {
   return (
@@ -162,4 +168,20 @@ export async function onMenuAction(cb: (id: string) => void): Promise<UnlistenFn
 /** Show the log folder (~/Library/Logs/Kahawai Server) in Finder. */
 export async function setupRevealLogs(): Promise<void> {
   await cmd("setup_reveal_logs");
+}
+
+/** The running server's audiobook folders (empty when none is running). */
+export async function setupAudiobookFolders(): Promise<AudiobookRoot[]> {
+  return (await cmd<AudiobookRoot[]>("setup_audiobook_folders")) ?? [];
+}
+
+/** Add an audiobook folder to the running server, remember it in the config file, and scan.
+ *  Throws the backend's reason when it is refused (not a folder, overlaps another). */
+export async function setupAddAudiobookFolder(path: string): Promise<AudiobookRoot> {
+  return invoke<AudiobookRoot>("setup_add_audiobook_folder", { path });
+}
+
+/** Forget an audiobook folder and its books' progress; the files stay. */
+export async function setupRemoveAudiobookFolder(id: number): Promise<void> {
+  await invoke("setup_remove_audiobook_folder", { id });
 }

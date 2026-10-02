@@ -32,6 +32,26 @@ pub struct DesktopState {
     /// Another Kahawai Server found holding our port when ours couldn't
     /// start (its `/api/identity`), for the Status tab's panel.
     occupant: Arc<Mutex<Option<kahawai_core::ServerIdentity>>>,
+    /// A start is in progress (opening the catalog, before the server is
+    /// serving). Without it the Status tab, asking in that window, would
+    /// say "not running" for a server that is a moment from answering.
+    starting: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Marks a start in progress for as long as it is held.
+struct Starting(Arc<std::sync::atomic::AtomicBool>);
+
+impl Starting {
+    fn begin(flag: &Arc<std::sync::atomic::AtomicBool>) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(flag.clone())
+    }
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Serialize)]
@@ -71,6 +91,8 @@ pub struct DirValidation {
 #[derive(Deserialize)]
 pub struct SetupInput {
     music_dirs: Vec<String>,
+    #[serde(default)]
+    audiobook_dirs: Vec<String>,
     db_dir: String,
     bind: String,
 }
@@ -78,6 +100,8 @@ pub struct SetupInput {
 #[derive(Serialize, Clone)]
 pub struct ServerStatus {
     running: bool,
+    /// Starting up: not serving yet, but on its way.
+    starting: bool,
     bind: String,
     /// Why the server isn't running, when it tried to start and couldn't.
     error: Option<String>,
@@ -239,6 +263,11 @@ pub fn setup_save_config(input: SetupInput) -> Result<(), String> {
 
     let config = ServerConfig {
         music_dirs: input.music_dirs.into_iter().map(PathBuf::from).collect(),
+        audiobook_dirs: input
+            .audiobook_dirs
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
         bind: bind.to_string(),
         db_path: db_dir.join("music.db"),
         // `ServerConfig::default()` leaves this off (a sane default for a
@@ -341,11 +370,115 @@ pub async fn setup_apply_config(
     Ok(())
 }
 
+// --- Audiobook folders -----------------------------------------------------------
+//
+// Kept apart from the music folders. They live in the catalog (so the HTTP
+// API and these commands see the same list) and are mirrored into the config
+// file's `audiobook_dirs`, which is what a first-run wizard writes and what
+// the server adds to the catalog at start.
+
+fn live_state_for_books(state: &DesktopState) -> Result<crate::AppState, String> {
+    state
+        .app_state
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "the server is not running".to_string())
+}
+
+/// Write the live config's audiobook folders to the config file.
+fn save_audiobook_dirs(app_state: &crate::AppState) -> Result<(), String> {
+    let dirs = app_state.config.read().unwrap().audiobook_dirs.clone();
+    let path = ServerConfig::resolve_path(None).map_err(|e| e.to_string())?;
+    let mut on_disk = ServerConfig::load(&path).unwrap_or_default();
+    on_disk.audiobook_dirs = dirs;
+    on_disk.save(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn setup_audiobook_folders(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Vec<crate::audiobooks::Root>, String> {
+    let Ok(app_state) = live_state_for_books(&state) else {
+        return Ok(Vec::new());
+    };
+    crate::audiobooks::list_roots(&app_state.pool)
+        .await
+        .map_err(user_msg)
+}
+
+/// Add an audiobook folder to the running server (refused when it is not a
+/// folder or overlaps another), remember it in the config file, and scan.
+#[tauri::command]
+pub async fn setup_add_audiobook_folder(
+    path: String,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<crate::audiobooks::Root, String> {
+    let app_state = live_state_for_books(&state)?;
+    let root = crate::audiobooks::add_root(&app_state.pool, &path, None)
+        .await
+        .map_err(user_msg)?;
+    {
+        let mut cfg = app_state.config.write().unwrap();
+        let p = PathBuf::from(&root.path);
+        if !cfg.audiobook_dirs.contains(&p) {
+            cfg.audiobook_dirs.push(p);
+        }
+    }
+    save_audiobook_dirs(&app_state)?;
+    if let Ok(guard) = app_state.scan_lock.clone().try_lock_owned() {
+        let job = app_state
+            .jobs
+            .create(
+                kahawai_core::JobKind::Scan,
+                "Audiobook scan".to_string(),
+                None,
+            )
+            .await;
+        crate::audiobooks_api::spawn_audiobook_scan(app_state.clone(), job.id, guard);
+    }
+    Ok(root)
+}
+
+/// Forget an audiobook folder, its books, and their progress (the files
+/// stay), here and in the config file so it does not come back at start.
+#[tauri::command]
+pub async fn setup_remove_audiobook_folder(
+    id: i64,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let app_state = live_state_for_books(&state)?;
+    let path = crate::audiobooks::list_roots(&app_state.pool)
+        .await
+        .map_err(user_msg)?
+        .into_iter()
+        .find(|r| r.id == id)
+        .map(|r| PathBuf::from(r.path));
+    crate::audiobooks::delete_root(&app_state.pool, id)
+        .await
+        .map_err(user_msg)?;
+    if let Some(p) = path {
+        app_state
+            .config
+            .write()
+            .unwrap()
+            .audiobook_dirs
+            .retain(|d| d != &p && std::fs::canonicalize(d).map(|c| c != p).unwrap_or(true));
+        save_audiobook_dirs(&app_state)?;
+    }
+    let _ = app_state
+        .catalog_events
+        .send(crate::ServerEvent::CatalogUpdated);
+    Ok(())
+}
+
 #[derive(Serialize, Default)]
 pub struct LiveScanStats {
     albums: i64,
     artists: i64,
     tracks: i64,
+    /// Audiobooks cataloged so far (their files are not counted in `tracks`).
+    audiobooks: i64,
     /// The most recently cataloged album (by insertion order), so the
     /// Status view can show "scanning… last added: <album>" — a per-album
     /// sense of progress without the scanner needing its own event stream.
@@ -376,6 +509,10 @@ pub async fn setup_live_scan_stats(
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
+    let audiobooks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audiobooks")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     let last: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT title, artist FROM albums ORDER BY id DESC LIMIT 1")
             .fetch_optional(pool)
@@ -385,6 +522,7 @@ pub async fn setup_live_scan_stats(
         albums,
         artists,
         tracks,
+        audiobooks,
         last_album: last.as_ref().map(|(t, _)| t.clone()),
         last_album_artist: last.and_then(|(_, a)| a),
     })
@@ -423,6 +561,29 @@ pub fn setup_active_hash_job(state: tauri::State<DesktopState>) -> Option<kahawa
         .into_iter()
         .filter(|j| {
             j.kind == kahawai_core::JobKind::HashFiles
+                && matches!(
+                    j.status,
+                    kahawai_core::JobStatus::Queued | kahawai_core::JobStatus::Running
+                )
+        })
+        .collect();
+    jobs.sort_by(|a, b| b.id.cmp(&a.id));
+    jobs.into_iter().next()
+}
+
+/// The audiobook details lookup (Open Library, Google Books) while it is
+/// queued or running, for the Status view.
+#[tauri::command]
+pub fn setup_active_book_lookup(
+    state: tauri::State<'_, DesktopState>,
+) -> Option<kahawai_core::Job> {
+    let app_state = state.app_state.lock().unwrap().clone()?;
+    let mut jobs: Vec<kahawai_core::Job> = app_state
+        .jobs
+        .list()
+        .into_iter()
+        .filter(|j| {
+            j.kind == kahawai_core::JobKind::EnrichBooks
                 && matches!(
                     j.status,
                     kahawai_core::JobStatus::Queued | kahawai_core::JobStatus::Running
@@ -546,6 +707,7 @@ async fn spawn_and_check(
 ) -> Result<ServerStatus, String> {
     let bind = config.bind.clone();
     let last_error = state.last_error.clone();
+    let _starting = Starting::begin(&state.starting);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
         match crate::run_server_with_ready(config, Some(ready_tx)).await {
@@ -590,6 +752,7 @@ async fn spawn_and_check(
         *state.bind.lock().unwrap() = Some(bind.clone());
         Ok(ServerStatus {
             running: true,
+            starting: false,
             bind,
             error: None,
             occupant: None,
@@ -715,8 +878,11 @@ pub fn setup_server_status(state: tauri::State<'_, DesktopState>) -> ServerStatu
     } else {
         state.occupant.lock().unwrap().clone()
     };
+    // Not "starting" once it is running, or once a failed start has settled.
+    let starting = !running && state.starting.load(std::sync::atomic::Ordering::SeqCst);
     ServerStatus {
         running,
+        starting,
         bind,
         error,
         occupant,

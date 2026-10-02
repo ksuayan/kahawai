@@ -214,3 +214,33 @@ describe("SettingsTab: logs", () => {
   });
 });
 
+
+describe("SettingsTab: audiobook folders", () => {
+  it("is a separate list from the music folders, and removes a folder", async () => {
+    tauri.on("setup_audiobook_folders", [{ id: 4, path: "/srv/books", name: "books" }]).on("setup_remove_audiobook_folder", undefined);
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.runningDirs = [{ path: "/music/a", validating: false, validation: okValidation }];
+    await settle();
+    expect(wrapper.get('[data-testid="audiobook-roots"]').text()).toContain("/srv/books");
+    expect(wrapper.get('[data-testid="audiobook-roots"]').text()).not.toContain("/music/a");
+    await wrapper.get('[data-testid="remove-audiobook-folder"]').trigger("click");
+    await settle();
+    expect(tauri.callsTo("setup_remove_audiobook_folder")).toEqual([{ id: 4 }]);
+  });
+
+  it("adds a folder from the picker and shows the server's reason when it is refused", async () => {
+    inTauri();
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    await settle();
+    tauri.on("setup_add_audiobook_folder", () => {
+      throw "/nope is not a folder";
+    });
+    dialog.nextPath = "/nope";
+    await wrapper.get('[data-testid="add-audiobook-folder"]').trigger("click");
+    await settle();
+    expect(wrapper.text()).toContain("/nope is not a folder");
+    expect(setup.audiobookError).toContain("not a folder");
+  });
+});

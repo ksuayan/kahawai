@@ -96,6 +96,19 @@ describe("Audiobooks library view", () => {
     expect(calls.some((c) => c.url.includes("q=nora"))).toBe(true);
   });
 
+  it("shows a running audiobook scan with its file count while the library fills in", async () => {
+    mockFetch({
+      "/api/jobs": () => json([{ id: "job-4", kind: "scan", label: "Audiobook scan", status: "running", progress: 0.5, message: null, payload: null, files: { done: 50, total: 100 } }]),
+      "/api/audiobooks": () => json([]),
+    });
+    const { wrapper } = mountApp(AudiobooksView, {}, {}, () => {});
+    await (await import("../stores/jobs")).useJobsStore().refresh();
+    await settle();
+    const banner = wrapper.get('[data-testid="books-working"]');
+    expect(banner.text()).toContain("Scanning audiobooks");
+    expect(banner.text()).toContain("50 of about 100 files");
+  });
+
   it("explains an empty library", async () => {
     routes([], []);
     const { wrapper } = mountApp(AudiobooksView);

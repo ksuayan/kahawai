@@ -20,6 +20,13 @@ const advancedOpen = ref(false);
         </dd>
       </div>
       <div>
+        <dt class="micro-label text-faint">Audiobook folders</dt>
+        <dd class="mt-0.5" data-testid="review-audiobooks">
+          <div v-for="d in setup.audiobookDirs" :key="d.path">{{ d.path }}</div>
+          <span v-if="setup.audiobookDirs.length === 0" class="text-faint">None</span>
+        </dd>
+      </div>
+      <div>
         <dt class="micro-label text-faint">Database</dt>
         <dd class="mt-0.5">{{ setup.dbDir }}/music.db</dd>
       </div>

@@ -7,7 +7,8 @@ import { useLibraryStore } from "./library";
 import { useToastsStore } from "./toasts";
 
 function jobTitle(j: JobInfo, verb: "started" | "running" | "finished" | "failed"): string {
-  const base = j.kind === "scan" ? "Library scan" : j.label || "Job";
+  // An audiobook scan is a scan job too, but the toast should say which library.
+  const base = j.kind === "scan" ? (/audiobook/i.test(j.label) ? "Audiobook scan" : "Library scan") : j.label || "Job";
   return `${base} ${verb}`;
 }
 
@@ -174,6 +175,9 @@ export const useJobsStore = defineStore("jobs", () => {
     try {
       jobs.value = await fetchJobs();
       lastError.value = null;
+      // Something started elsewhere (a folder added in Settings, the Server
+      // app): follow it from here on.
+      if (jobs.value.some(isJobActive)) ensurePolling();
     } catch (e) {
       lastError.value = e instanceof Error ? e.message : String(e);
     }

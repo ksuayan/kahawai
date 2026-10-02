@@ -16,6 +16,7 @@ onMounted(() => {
   // Opened before the running server's folders were read (it was still
   // starting): read them now.
   if (setup.runningDirs.length === 0 && setup.pendingRemoves.length === 0) void setup.loadRunningConfig();
+  void setup.loadAudiobookRoots();
 });
 
 const n = (v: number) => v.toLocaleString("en-US");
@@ -113,6 +114,36 @@ const jobLine = computed(() => {
       applied until you click Apply. A folder is only ever dropped if you explicitly remove it.
     </UiHint>
     <UiHint v-if="setup.applyError" tone="warn">{{ setup.applyError }}</UiHint>
+
+    <h3 class="heading-3 mb-2 mt-4">Audiobook folders</h3>
+    <UiHint tone="faint">
+      Kept apart from the music, with their own library in the Player. Changes apply at once: a new
+      folder is scanned right away, and removing one forgets its books and your progress (the files
+      stay).
+    </UiHint>
+    <ul class="mb-3 flex flex-col gap-2" data-testid="audiobook-roots">
+      <li
+        v-for="r in setup.audiobookRoots"
+        :key="r.id"
+        class="flex items-center justify-between gap-3 rounded-md border border-line bg-raised px-3 py-2"
+      >
+        <div class="min-w-0">
+          <div class="truncate text-[13px]" :title="r.path">{{ r.path }}</div>
+          <div v-if="r.name" class="truncate text-xs text-faint">{{ r.name }}</div>
+        </div>
+        <UiButton
+          variant="icon-danger"
+          aria-label="Remove audiobook folder"
+          data-testid="remove-audiobook-folder"
+          @click="setup.removeRunningAudiobook(r.id)"
+        >
+          <X class="size-4" />
+        </UiButton>
+      </li>
+    </ul>
+    <p v-if="setup.audiobookRoots.length === 0" class="mb-2 text-xs text-faint">No audiobook folders.</p>
+    <UiButton data-testid="add-audiobook-folder" @click="setup.addRunningAudiobookFromPicker()">Add audiobook folder…</UiButton>
+    <UiHint v-if="setup.audiobookError" tone="warn">{{ setup.audiobookError }}</UiHint>
 
     <h3 class="heading-3 mb-2 mt-4">Album info</h3>
     <label class="mb-1 flex items-center gap-2 text-[13px]">

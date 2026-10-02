@@ -80,6 +80,16 @@ describe("jobs store: polling", () => {
     expect(toasts.toasts[0].detail).toBe(`${(800).toLocaleString()} of about ${(8000).toLocaleString()} files, 112 MB/s`);
   });
 
+  it("an audiobook scan says so in its toast, and shows its file count", async () => {
+    jobsFeed([job({ label: "Audiobook scan", progress: 0, files: { done: 12 } })]);
+    const jobs = useJobsStore();
+    const toasts = useToastsStore();
+    jobs.init();
+    await flushPromises();
+    expect(toasts.toasts[0].title).toBe("Audiobook scan started");
+    expect(toasts.toasts[0].detail).toBe("12 files scanned");
+  });
+
   it("reloads the library when a scan finishes, but not for other jobs or a still-running scan", async () => {
     const feed = jobsFeed([job()]);
     const jobs = useJobsStore();

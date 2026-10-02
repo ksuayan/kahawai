@@ -1036,6 +1036,32 @@ pub async fn delete_root(pool: &SqlitePool, id: i64) -> Result<(), MusicError> {
     Ok(())
 }
 
+/// Make the catalog's audiobook folders include every folder the config
+/// names (the desktop app's list). Folders already there stay, and so do
+/// folders added through the API; one that cannot be added (it is gone, or
+/// overlaps another) is logged and skipped. Returns how many were added.
+pub async fn sync_roots(pool: &SqlitePool, dirs: &[PathBuf]) -> Result<u64, MusicError> {
+    let mut added = 0;
+    for d in dirs {
+        let Some(path) = d.to_str() else { continue };
+        let canon = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
+        let known = list_roots(pool)
+            .await?
+            .iter()
+            .any(|r| Path::new(&r.path) == canon);
+        if known {
+            continue;
+        }
+        match add_root(pool, path, None).await {
+            Ok(_) => added += 1,
+            Err(e) => {
+                warn!(folder = %path, error = %e, "audiobook folder from the config was not added")
+            }
+        }
+    }
+    Ok(added)
+}
+
 /// Audio extensions an audiobook folder may hold: everything the music
 /// scanner knows except SACD images, plus `.m4b`.
 fn book_audio_format(path: &Path) -> Option<AudioFormat> {
@@ -1177,7 +1203,10 @@ fn folder_cover(dir: &Path) -> Option<(String, Vec<u8>)> {
 
 /// Walk one root and read every audio file, grouped by book directory.
 /// Blocking.
-fn walk_root(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<FileInfo>> {
+fn walk_root(
+    root: &Path,
+    on_file: &(dyn Fn() + Send + Sync),
+) -> std::collections::BTreeMap<PathBuf, Vec<FileInfo>> {
     let mut books: std::collections::BTreeMap<PathBuf, Vec<FileInfo>> = Default::default();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
         let entry = match entry {
@@ -1203,6 +1232,7 @@ fn walk_root(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<FileInfo>> 
             crate::scanner::mtime_secs(&meta),
         );
         books.entry(book_dir(entry.path())).or_default().push(info);
+        on_file();
     }
     books
 }
@@ -1212,7 +1242,25 @@ fn walk_root(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<FileInfo>> 
 /// chapters. Rescans keep each book's id, so positions, bookmarks and
 /// history survive; fields the user edited by hand are left alone.
 pub async fn scan(pool: &SqlitePool) -> Result<ScanSummary, MusicError> {
+    scan_with_progress(pool, std::sync::Arc::new(|_, _| {})).await
+}
+
+/// [`scan`] reporting `(files done, estimate)` after each file it reads. The
+/// estimate is the number of files the last scan found, and `None` on a
+/// first scan, as in the music scan.
+pub async fn scan_with_progress(
+    pool: &SqlitePool,
+    on_progress: std::sync::Arc<dyn Fn(u64, Option<u64>) + Send + Sync>,
+) -> Result<ScanSummary, MusicError> {
     let mut summary = ScanSummary::default();
+    let estimate: u64 =
+        sqlx::query("SELECT COUNT(*) FROM tracks WHERE kind = 'audiobook' AND missing = 0")
+            .fetch_one(pool)
+            .await
+            .map_err(cvt)?
+            .get::<i64, _>(0) as u64;
+    let estimate = (estimate > 0).then_some(estimate);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     for root in list_roots(pool).await? {
         let root_path = PathBuf::from(&root.path);
         // An unmounted drive must not look like a deleted library.
@@ -1223,9 +1271,15 @@ pub async fn scan(pool: &SqlitePool) -> Result<ScanSummary, MusicError> {
         }
         let walked = {
             let rp = root_path.clone();
-            tokio::task::spawn_blocking(move || walk_root(&rp))
-                .await
-                .map_err(|e| MusicError::JobFailed(format!("audiobook walk: {e}")))?
+            let (done, on_progress) = (done.clone(), on_progress.clone());
+            tokio::task::spawn_blocking(move || {
+                walk_root(&rp, &|| {
+                    let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    on_progress(n, estimate);
+                })
+            })
+            .await
+            .map_err(|e| MusicError::JobFailed(format!("audiobook walk: {e}")))?
         };
         let mut seen_tracks: Vec<i64> = Vec::new();
         for (dir, files) in walked {

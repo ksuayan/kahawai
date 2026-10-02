@@ -42,6 +42,11 @@ pub struct ServerConfig {
     pub bind: String,
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
+    /// Audiobook folders, kept apart from the music. They are added to the
+    /// catalog's audiobook folders when the server starts (a folder added
+    /// through the API stays too), and the desktop app edits this list.
+    #[serde(default)]
+    pub audiobook_dirs: Vec<PathBuf>,
     /// Preferred format ladder, first satisfiable entry wins
     /// (see [`crate::format::transcode_ladder`]).
     #[serde(default = "default_ladder")]
@@ -154,6 +159,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             music_dirs: Vec::new(),
+            audiobook_dirs: Vec::new(),
             bind: default_bind(),
             db_path: default_db_path(),
             preferred_ladder: default_ladder(),
@@ -245,17 +251,26 @@ mod tests {
     }
 
     #[test]
+    fn a_config_from_before_audiobooks_loads_with_no_audiobook_folders() {
+        let cfg: ServerConfig =
+            toml::from_str("music_dirs = [\"/m\"]\nbind = \"0.0.0.0:8080\"\n").expect("parse");
+        assert!(cfg.audiobook_dirs.is_empty());
+    }
+
+    #[test]
     fn save_round_trips_and_creates_parents() {
         let dir = std::env::temp_dir().join("kahawai-core-config-save-test");
         let path = dir.join("nested/config.toml");
         let cfg = ServerConfig {
             music_dirs: vec![PathBuf::from("/mnt/music")],
+            audiobook_dirs: vec![PathBuf::from("/mnt/books")],
             bind: "127.0.0.1:9090".to_string(),
             ..Default::default()
         };
         cfg.save(&path).expect("save");
         let back = ServerConfig::load(&path).expect("load");
         assert_eq!(back.music_dirs, cfg.music_dirs);
+        assert_eq!(back.audiobook_dirs, cfg.audiobook_dirs);
         assert_eq!(back.bind, cfg.bind);
         std::fs::remove_dir_all(&dir).ok();
     }

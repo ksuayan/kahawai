@@ -4,21 +4,23 @@ import UiButton from "../ui/UiButton.vue";
 import { useSetupStore } from "../stores/setup";
 import WizardWelcome from "./WizardWelcome.vue";
 import WizardMusicFolders from "./WizardMusicFolders.vue";
+import WizardAudiobookFolders from "./WizardAudiobookFolders.vue";
 import WizardDatabase from "./WizardDatabase.vue";
 import WizardReview from "./WizardReview.vue";
 import WizardDone from "./WizardDone.vue";
 
 const setup = useSetupStore();
 
-/** Whether Continue is enabled on the current step. Step 4 (Done) has its
- *  own action buttons instead of Back/Continue. */
+/** Whether Continue is enabled on the current step. Step 5 (Done) has its
+ *  own action buttons instead of Back/Continue. Step 2 (audiobook folders)
+ *  is optional, so it always continues. */
 const canContinue = computed(() => {
   switch (setup.step) {
     case 1:
       return setup.canLeaveFolders;
-    case 2:
-      return setup.canLeaveDatabase;
     case 3:
+      return setup.canLeaveDatabase;
+    case 4:
       return setup.bindLooksValid;
     default:
       return true;
@@ -26,7 +28,7 @@ const canContinue = computed(() => {
 });
 
 async function onContinue(): Promise<void> {
-  if (setup.step === 3) {
+  if (setup.step === 4) {
     if (await setup.save()) setup.goNext();
     return;
   }
@@ -39,15 +41,16 @@ async function onContinue(): Promise<void> {
     <div class="min-h-0 flex-1 overflow-y-auto px-8 py-8">
       <WizardWelcome v-if="setup.step === 0" />
       <WizardMusicFolders v-else-if="setup.step === 1" />
-      <WizardDatabase v-else-if="setup.step === 2" />
-      <WizardReview v-else-if="setup.step === 3" />
-      <WizardDone v-else-if="setup.step === 4" />
+      <WizardAudiobookFolders v-else-if="setup.step === 2" />
+      <WizardDatabase v-else-if="setup.step === 3" />
+      <WizardReview v-else-if="setup.step === 4" />
+      <WizardDone v-else-if="setup.step === 5" />
     </div>
 
-    <div v-if="setup.step < 4" class="flex items-center justify-between border-t border-line px-8 py-4">
+    <div v-if="setup.step < 5" class="flex items-center justify-between border-t border-line px-8 py-4">
       <UiButton :disabled="setup.step === 0" @click="setup.goBack()">Back</UiButton>
       <UiButton variant="primary" :disabled="!canContinue" @click="onContinue()">
-        {{ setup.step === 3 ? "Save" : "Continue" }}
+        {{ setup.step === 4 ? "Save" : "Continue" }}
       </UiButton>
     </div>
   </div>

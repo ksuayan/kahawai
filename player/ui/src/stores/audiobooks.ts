@@ -43,6 +43,7 @@ import type {
   AudiobookSession,
   Track,
 } from "../types";
+import { useJobsStore } from "./jobs";
 import { usePlayerStore } from "./player";
 import { useQueueStore } from "./queue";
 import { useToastsStore } from "./toasts";
@@ -434,6 +435,7 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   async function lookUpOnline(id: number): Promise<void> {
     try {
       await enrichAudiobooks(id);
+      void useJobsStore().refresh();
       toasts.push("info", "Looking up this book online", { ttl: 3000 });
     } catch (e) {
       toasts.push("error", "Could not look up this book", { detail: e instanceof Error ? e.message : String(e) });
@@ -524,6 +526,8 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   async function addRoot(path: string, name?: string): Promise<void> {
     await addAudiobookRoot(path, name);
     await loadRoots();
+    // The server starts scanning the new folder: follow it.
+    void useJobsStore().refresh();
     toasts.push("info", "Scanning the audiobook folder", { ttl: 3000 });
   }
   async function removeRoot(id: number): Promise<void> {
@@ -532,6 +536,7 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   }
   async function rescan(): Promise<void> {
     await scanAudiobooks();
+    void useJobsStore().refresh();
   }
 
   return {

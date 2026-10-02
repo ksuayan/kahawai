@@ -67,11 +67,45 @@ pub async fn trigger_scan(State(s): State<AppState>) -> ApiResult<Response> {
     Ok((StatusCode::ACCEPTED, Json(job)).into_response())
 }
 
-fn spawn_audiobook_scan(s: AppState, job_id: String, guard: tokio::sync::OwnedMutexGuard<()>) {
+pub(crate) fn spawn_audiobook_scan(
+    s: AppState,
+    job_id: String,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) {
     tokio::spawn(async move {
         let _guard = guard;
         s.jobs.set_status(&job_id, JobStatus::Running).await;
-        match ab::scan(&s.pool).await {
+        // Live file counts, rate and ETA, like the music scan's (about once a second).
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<(u64, Option<u64>)>();
+        let (jobs, id2) = (s.jobs.clone(), job_id.clone());
+        let fwd = tokio::spawn(async move {
+            let mut rate = crate::jobs::RateTracker::default();
+            let mut last = i64::MIN;
+            while let Some((done, estimate)) = prx.recv().await {
+                let now = crate::jobs::now_ms();
+                if now - last >= 1000 {
+                    last = now;
+                    jobs.set_files(&id2, rate.observe(now, done, None, estimate))
+                        .await;
+                    if let Some(total) = estimate {
+                        jobs.set_progress(
+                            &id2,
+                            (done as f64 / total as f64).clamp(0.0, 0.99) as f32,
+                        )
+                        .await;
+                    }
+                }
+            }
+        });
+        let report = ab::scan_with_progress(
+            &s.pool,
+            std::sync::Arc::new(move |done, estimate| {
+                let _ = ptx.send((done, estimate));
+            }),
+        )
+        .await;
+        let _ = fwd.await;
+        match report {
             Ok(r) => {
                 s.jobs
                     .finish(
@@ -1731,6 +1765,48 @@ mod tests {
             (d["year"].as_i64(), d["cover_hash"].as_str()),
             (Some(1984), Some("abc"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_scan_reports_files_as_it_reads_them_with_an_estimate_from_the_last_one() {
+        let e = env().await;
+        library(&e).await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, Option<u64>)>::new()));
+        // library() scanned once already, so this is a rescan: 4 files known.
+        let sink = seen.clone();
+        ab::scan_with_progress(
+            &e.state.pool,
+            std::sync::Arc::new(move |d, est| sink.lock().unwrap().push((d, est))),
+        )
+        .await
+        .unwrap();
+        let v = seen.lock().unwrap().clone();
+        assert_eq!(v.iter().map(|x| x.0).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert!(v.iter().all(|x| x.1 == Some(4)), "{v:?}");
+        // A first scan has no estimate.
+        let fresh = env().await;
+        library_files(&fresh);
+        sqlx::query("INSERT INTO audiobook_roots (path, name) VALUES (?, 'b')")
+            .bind(fresh.books.to_str().unwrap())
+            .execute(&fresh.state.pool)
+            .await
+            .unwrap();
+        let first = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<u64>>::new()));
+        let sink = first.clone();
+        ab::scan_with_progress(
+            &fresh.state.pool,
+            std::sync::Arc::new(move |_, est| sink.lock().unwrap().push(est)),
+        )
+        .await
+        .unwrap();
+        assert!(first.lock().unwrap().iter().all(|e| e.is_none()));
+    }
+
+    /// The library's files without registering the folder.
+    fn library_files(e: &Env) {
+        let b = &e.books;
+        mp3(b, "A/One", "01.mp3", "One", "One", "A", 1);
+        mp3(b, "A/Two", "01.mp3", "Two", "Two", "A", 1);
     }
 
     /// An m4b with two embedded chapters, made by ffmpeg.

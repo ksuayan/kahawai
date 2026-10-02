@@ -7,7 +7,11 @@ import {
   setupLiveScanStats,
   setupPickDirectory,
   setupQuit,
+  setupActiveBookLookup,
   setupActiveHashJob,
+  setupAddAudiobookFolder,
+  setupAudiobookFolders,
+  setupRemoveAudiobookFolder,
   setupRecentScans,
   setupRestartServer,
   setupRevealConfig,
@@ -19,7 +23,7 @@ import {
   setupStopServer,
   setupValidateDir,
 } from "../tauri";
-import type { LiveScanStats, MusicDirEntry, ScanJob, ServerIdentity, ServerStatus } from "../types";
+import type { AudiobookRoot, LiveScanStats, MusicDirEntry, ScanJob, ServerIdentity, ServerStatus } from "../types";
 import { dirStatus, isJobActive } from "../types";
 
 /** A `host:port` shape good enough to gate the Continue button; the backend
@@ -38,6 +42,8 @@ export const useSetupStore = defineStore("setup", () => {
 
   const configPath = ref("");
   const dirs = ref<MusicDirEntry[]>([]);
+  /** The wizard's audiobook folders: optional, and kept apart from the music. */
+  const audiobookDirs = ref<MusicDirEntry[]>([]);
   const dbDir = ref("");
   const bind = ref("0.0.0.0:8080");
 
@@ -68,7 +74,13 @@ export const useSetupStore = defineStore("setup", () => {
   const liveScanStats = ref<LiveScanStats | null>(null);
   /** The content-hashing job a scan queues, while it is active. */
   const hashJob = ref<ScanJob | null>(null);
+  /** The online audiobook details lookup, while it is active. */
+  const bookLookupJob = ref<ScanJob | null>(null);
+  /** The running server's audiobook folders (applied at once, unlike the music list). */
+  const audiobookRoots = ref<AudiobookRoot[]>([]);
+  const audiobookError = ref<string | null>(null);
   let scanPollTimer: number | undefined;
+  let statusPollTimer: number | undefined;
 
   const okDirCount = computed(
     () => dirs.value.filter((d) => d.validation && dirStatus(d.validation) === "ok").length,
@@ -82,7 +94,7 @@ export const useSetupStore = defineStore("setup", () => {
    *  live view independent of who triggered it. */
   const isScanning = computed(() => recentScans.value.some(isJobActive));
   /** A scan or the hashing after it is active: keeps the Status tab polling. */
-  const isBusy = computed(() => isScanning.value || hashJob.value !== null);
+  const isBusy = computed(() => isScanning.value || hashJob.value !== null || bookLookupJob.value !== null);
 
   /** Called once on mount: decides wizard vs. status, prefills from any
    *  existing config. */
@@ -92,18 +104,41 @@ export const useSetupStore = defineStore("setup", () => {
     configPath.value = state?.config_path ?? "";
     if (state?.config_exists && state.config) {
       dirs.value = state.config.music_dirs.map((path) => ({ path, validating: false }));
+      audiobookDirs.value = (state.config.audiobook_dirs ?? []).map((path) => ({ path, validating: false }));
       bind.value = state.config.bind;
       const dbPath = state.config.db_path;
       dbDir.value = dbPath.includes("/") ? dbPath.slice(0, dbPath.lastIndexOf("/")) : dbPath;
       view.value = "status";
       serverStatus.value = (await setupServerStatus()) ?? null;
-      await Promise.all([loadRunningConfig(), loadRecentScans()]);
+      await Promise.all([loadRunningConfig(), loadRecentScans(), loadAudiobookRoots()]);
       if (isBusy.value) ensureScanPolling();
+      ensureStatusPolling();
     } else {
       view.value = "wizard";
       step.value = 0;
     }
     loading.value = false;
+  }
+
+  /**
+   * Keep the Status tab true. The status is asked once at launch, and a
+   * server still opening its catalog at that moment (or one that stops or
+   * recovers later) would otherwise stay "not running" on screen for good.
+   * When it turns out to be running, the lists that need a server are read.
+   */
+  function ensureStatusPolling(): void {
+    if (statusPollTimer !== undefined) return;
+    statusPollTimer = window.setInterval(async () => {
+      if (view.value !== "status") return;
+      const s = await setupServerStatus();
+      if (!s) return;
+      const wasRunning = serverStatus.value?.running === true;
+      serverStatus.value = s;
+      if (s.running && !wasRunning) {
+        await Promise.all([loadRunningConfig(), loadRecentScans(), loadAudiobookRoots(), loadIdentity()]);
+        if (isBusy.value) ensureScanPolling();
+      }
+    }, 2000);
   }
 
   /** Populates the Status/Settings tabs' folder list from the *running*
@@ -158,8 +193,41 @@ export const useSetupStore = defineStore("setup", () => {
     }
   }
 
+  async function loadAudiobookRoots(): Promise<void> {
+    audiobookRoots.value = await setupAudiobookFolders();
+  }
+
+  /** Pick an audiobook folder for the running server. Applied at once: the
+   *  server adds it, remembers it in the config file, and scans. */
+  async function addRunningAudiobookFromPicker(): Promise<void> {
+    const picked = await setupPickDirectory();
+    if (!picked) return;
+    audiobookError.value = null;
+    try {
+      await setupAddAudiobookFolder(picked);
+      await Promise.all([loadAudiobookRoots(), loadRecentScans()]);
+      ensureScanPolling();
+    } catch (err) {
+      audiobookError.value = String(err);
+    }
+  }
+
+  async function removeRunningAudiobook(id: number): Promise<void> {
+    audiobookError.value = null;
+    try {
+      await setupRemoveAudiobookFolder(id);
+      await loadAudiobookRoots();
+    } catch (err) {
+      audiobookError.value = String(err);
+    }
+  }
+
   async function loadRecentScans(): Promise<void> {
-    [recentScans.value, hashJob.value] = await Promise.all([setupRecentScans(), setupActiveHashJob()]);
+    [recentScans.value, hashJob.value, bookLookupJob.value] = await Promise.all([
+      setupRecentScans(),
+      setupActiveHashJob(),
+      setupActiveBookLookup(),
+    ]);
   }
 
   async function refreshLiveScanStats(): Promise<void> {
@@ -256,6 +324,25 @@ export const useSetupStore = defineStore("setup", () => {
     }
   }
 
+  /** The wizard's optional audiobook step: any readable folder will do, so
+   *  there is no "has audio files" gate like the music step has. */
+  async function addAudiobookDirFromPicker(): Promise<void> {
+    const picked = await setupPickDirectory();
+    if (!picked) return;
+    if (audiobookDirs.value.some((d) => d.path === picked)) return;
+    audiobookDirs.value.push({ path: picked, validating: true });
+    const validation = await setupValidateDir(picked);
+    const row = audiobookDirs.value.find((d) => d.path === picked);
+    if (row) {
+      row.validation = validation;
+      row.validating = false;
+    }
+  }
+
+  function removeAudiobookDir(path: string): void {
+    audiobookDirs.value = audiobookDirs.value.filter((d) => d.path !== path);
+  }
+
   function removeDir(path: string): void {
     dirs.value = dirs.value.filter((d) => d.path !== path);
   }
@@ -268,7 +355,7 @@ export const useSetupStore = defineStore("setup", () => {
   }
 
   function goNext(): void {
-    step.value = Math.min(4, step.value + 1);
+    step.value = Math.min(5, step.value + 1);
   }
 
   function goBack(): void {
@@ -281,6 +368,9 @@ export const useSetupStore = defineStore("setup", () => {
       await setupSaveConfig({
         music_dirs: dirs.value
           .filter((d) => d.validation && dirStatus(d.validation) === "ok")
+          .map((d) => d.path),
+        audiobook_dirs: audiobookDirs.value
+          .filter((d) => !d.validation || d.validation.is_dir)
           .map((d) => d.path),
         db_dir: dbDir.value,
         bind: bind.value.trim(),
@@ -334,6 +424,9 @@ export const useSetupStore = defineStore("setup", () => {
     activeTab,
     configPath,
     dirs,
+    audiobookDirs,
+    audiobookRoots,
+    audiobookError,
     dbDir,
     bind,
     saveError,
@@ -354,12 +447,19 @@ export const useSetupStore = defineStore("setup", () => {
     recentScans,
     liveScanStats,
     hashJob,
+    bookLookupJob,
     canApply,
     isScanning,
     isBusy,
     init,
     addDirFromPicker,
     removeDir,
+    addAudiobookDirFromPicker,
+    removeAudiobookDir,
+    loadAudiobookRoots,
+    addRunningAudiobookFromPicker,
+    removeRunningAudiobook,
+    ensureStatusPolling,
     pickDbDir,
     goNext,
     goBack,

@@ -3,7 +3,7 @@ import { computed, onUnmounted, ref } from "vue";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import { useSetupStore } from "../stores/setup";
-import { describeServer, formatElapsed, formatWhen, scanFiles, scanTiming, type ScanJob } from "../types";
+import { describeServer, formatElapsed, formatWhen, isJobActive, scanFiles, scanTiming, type ScanJob } from "../types";
 
 const setup = useSetupStore();
 
@@ -24,6 +24,11 @@ const runningFiles = computed(() => {
   const f = setup.recentScans.find((j) => j.status === "running")?.files;
   return f ? scanFiles(f, now.value) : null;
 });
+
+/** The scan that is running: an audiobook scan says so, and counts books, not albums. */
+const runningScan = computed(() => setup.recentScans.find(isJobActive));
+const scanningBooks = computed(() => runningScan.value?.label.toLowerCase().includes("audiobook") ?? false);
+const lookup = computed(() => setup.bookLookupJob);
 
 /** The content-hashing job's counts: the scan queues it when it finishes. */
 const hashing = computed(() => {
@@ -46,7 +51,7 @@ function scanClass(j: ScanJob): string {
 <template>
   <div class="flex h-full flex-col px-8 py-8">
     <h2 class="heading-1 mb-2">
-      {{ setup.serverStatus?.running ? "Server running" : "Server not running" }}
+      {{ setup.serverStatus?.running ? "Server running" : setup.serverStatus?.starting ? "Server starting…" : "Server not running" }}
     </h2>
     <p v-if="setup.serverStatus?.running" class="prose-text mb-1">
       Listening on {{ setup.serverStatus.bind }}.
@@ -126,11 +131,16 @@ function scanClass(j: ScanJob): string {
     </UiHint>
 
     <div v-if="setup.isScanning" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3">
-      <h3 class="heading-3 mb-2">Scanning…</h3>
+      <h3 class="heading-3 mb-2" data-testid="scan-heading">{{ scanningBooks ? "Scanning audiobooks…" : "Scanning…" }}</h3>
       <div class="flex gap-6 text-[13px]">
-        <div><span class="text-dim">Albums</span> <span class="font-semibold">{{ setup.liveScanStats?.albums ?? 0 }}</span></div>
-        <div><span class="text-dim">Artists</span> <span class="font-semibold">{{ setup.liveScanStats?.artists ?? 0 }}</span></div>
-        <div><span class="text-dim">Tracks</span> <span class="font-semibold">{{ setup.liveScanStats?.tracks ?? 0 }}</span></div>
+        <template v-if="!scanningBooks">
+          <div><span class="text-dim">Albums</span> <span class="font-semibold">{{ setup.liveScanStats?.albums ?? 0 }}</span></div>
+          <div><span class="text-dim">Artists</span> <span class="font-semibold">{{ setup.liveScanStats?.artists ?? 0 }}</span></div>
+          <div><span class="text-dim">Tracks</span> <span class="font-semibold">{{ setup.liveScanStats?.tracks ?? 0 }}</span></div>
+        </template>
+        <div v-if="scanningBooks || (setup.liveScanStats?.audiobooks ?? 0) > 0" data-testid="books-count">
+          <span class="text-dim">Audiobooks</span> <span class="font-semibold">{{ setup.liveScanStats?.audiobooks ?? 0 }}</span>
+        </div>
       </div>
       <dl v-if="runningFiles" class="m-0 mt-2 flex flex-wrap gap-x-6 gap-y-1 text-[13px]" data-testid="scan-files">
         <div>
@@ -150,10 +160,19 @@ function scanClass(j: ScanJob): string {
           <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-eta">{{ runningFiles.eta }}</dd>
         </div>
       </dl>
-      <p v-if="setup.liveScanStats?.last_album" class="mt-2 truncate text-xs text-faint">
+      <p v-if="!scanningBooks && setup.liveScanStats?.last_album" class="mt-2 truncate text-xs text-faint">
         Last added: {{ setup.liveScanStats.last_album
         }}<span v-if="setup.liveScanStats.last_album_artist"> — {{ setup.liveScanStats.last_album_artist }}</span>
       </p>
+    </div>
+
+    <div v-if="lookup" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3" data-testid="book-lookup">
+      <h3 class="heading-3 mb-2">Looking up audiobook details…</h3>
+      <p class="m-0 text-[13px] tabular-nums">
+        <span class="text-dim">Progress</span>
+        <span class="ml-1 font-semibold" data-testid="lookup-percent">{{ Math.round(lookup.progress * 100) }}%</span>
+      </p>
+      <p class="m-0 mt-2 text-xs text-faint">Fills a missing author, year or cover from Open Library and Google Books. Your tags are never changed.</p>
     </div>
 
     <div v-if="hashing" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3" data-testid="hashing">

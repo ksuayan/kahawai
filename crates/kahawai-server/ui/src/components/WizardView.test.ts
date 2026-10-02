@@ -40,11 +40,11 @@ describe("WizardView", () => {
     const setup = useSetupStore();
     setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
     setup.dbDir = "/data";
-    setup.step = 3;
+    setup.step = 4;
     await settle();
     await wrapper.findAll("button").find((b) => b.text() === "Save")!.trigger("click");
     await settle();
-    expect(setup.step).toBe(4);
+    expect(setup.step).toBe(5);
     expect(tauri.callsTo("setup_save_config")).toHaveLength(1);
   });
 
@@ -56,11 +56,54 @@ describe("WizardView", () => {
     const setup = useSetupStore();
     setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
     setup.dbDir = "/data";
-    setup.step = 3;
+    setup.step = 4;
     await settle();
     await wrapper.findAll("button").find((b) => b.text() === "Save")!.trigger("click");
     await settle();
-    expect(setup.step).toBe(3);
+    expect(setup.step).toBe(4);
     expect(wrapper.text()).toContain("bind address already in use");
+  });
+});
+
+describe("WizardView: audiobook folders step", () => {
+  it("sits after the music folders, is optional, and does not gate Continue", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.step = 2;
+    await settle();
+    expect(wrapper.text()).toContain("Audiobook folders");
+    expect(wrapper.text()).toContain("Optional");
+    const cont = wrapper.findAll("button").find((b) => b.text() === "Continue")!;
+    expect((cont.element as HTMLButtonElement).disabled).toBe(false);
+    await cont.trigger("click");
+    expect(setup.step).toBe(3);
+    expect(wrapper.text()).toContain("Database");
+  });
+
+  it("lists the folders added and shows them in the review", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    tauri.on("setup_validate_dir", { ...okValidation, audio_files: 0 });
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.step = 2;
+    await settle();
+    dialog.nextPath = "/books/shelf";
+    await wrapper.get('[data-testid="add-audiobook-folder"]').trigger("click");
+    await settle();
+    expect(wrapper.findAll('[data-testid="audiobook-dir"]')).toHaveLength(1);
+    setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
+    setup.step = 4;
+    await settle();
+    expect(wrapper.get('[data-testid="review-audiobooks"]').text()).toContain("/books/shelf");
+  });
+
+  it("Review says None when there are no audiobook folders", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
+    setup.step = 4;
+    await settle();
+    expect(wrapper.get('[data-testid="review-audiobooks"]').text()).toBe("None");
   });
 });
