@@ -728,6 +728,67 @@ pub async fn setup_set_online_sources(
     on_disk.save(&path).map_err(|e| e.to_string())
 }
 
+/// Settings → Podcasts: the download folder, what is in it, and how often
+/// feeds are checked.
+#[derive(serde::Serialize)]
+pub struct PodcastSettings {
+    pub path: String,
+    pub custom: bool,
+    pub usable: bool,
+    pub episodes_downloaded: i64,
+    pub bytes_downloaded: u64,
+    pub refresh_hours: u32,
+}
+
+#[tauri::command]
+pub async fn setup_podcast_settings(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<PodcastSettings, String> {
+    let app_state = live_state(&state)?;
+    let f = crate::podcast_dl::folder_info(&app_state)
+        .await
+        .map_err(|e| e.to_string())?;
+    let refresh_hours = app_state.config.read().unwrap().podcast_refresh_hours;
+    Ok(PodcastSettings {
+        path: f.path,
+        custom: f.custom,
+        usable: f.usable,
+        episodes_downloaded: f.episodes_downloaded,
+        bytes_downloaded: f.bytes_downloaded,
+        refresh_hours,
+    })
+}
+
+/// Set the download folder (`None` = the default, next to the database) and
+/// how often feeds are checked (0 = never on their own). Applied live and
+/// saved to the config file. Files already downloaded stay where they are.
+#[tauri::command]
+pub async fn setup_set_podcast_settings(
+    dir: Option<String>,
+    refresh_hours: u32,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let app_state = live_state(&state)?;
+    if refresh_hours > 168 {
+        return Err("check at most once a week, or 0 for never".to_string());
+    }
+    let dir = dir.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+    let dir = dir.map(std::path::PathBuf::from);
+    if let Some(d) = &dir {
+        crate::podcast_dl::check_folder(d).await?;
+    }
+    {
+        let mut cfg = app_state.config.write().unwrap();
+        cfg.podcast_dir = dir.clone();
+        cfg.podcast_refresh_hours = refresh_hours;
+    }
+    let path = ServerConfig::resolve_path(None).map_err(|e| e.to_string())?;
+    let mut on_disk = ServerConfig::load(&path).unwrap_or_default();
+    on_disk.podcast_dir = dir;
+    on_disk.podcast_refresh_hours = refresh_hours;
+    on_disk.save(&path).map_err(|e| e.to_string())
+}
+
 /// Start, pause, resume or cancel album info lookup, or retry the albums it
 /// couldn't find ("retry"). `job_id` is needed for
 /// all but start.

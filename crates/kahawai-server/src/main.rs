@@ -370,6 +370,8 @@ fn main() {
             desktop::setup_set_enrichment,
             desktop::setup_online_sources,
             desktop::setup_set_online_sources,
+            desktop::setup_podcast_settings,
+            desktop::setup_set_podcast_settings,
             desktop::setup_enrichment_action,
             desktop::setup_start_server,
             desktop::setup_stop_server,

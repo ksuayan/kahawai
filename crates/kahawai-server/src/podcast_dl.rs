@@ -415,6 +415,60 @@ async fn delete_file_and_empty_dir(path: &Path) {
     }
 }
 
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+pub struct FolderInfo {
+    pub path: String,
+    /// The folder was set in the config (otherwise it is the default).
+    pub custom: bool,
+    /// The folder exists (or could be made) and can be written to.
+    pub usable: bool,
+    pub episodes_downloaded: i64,
+    pub bytes_downloaded: u64,
+}
+
+/// Where downloads go and what is in it.
+pub async fn folder_info(state: &AppState) -> Result<FolderInfo, MusicError> {
+    let (root, custom) = {
+        let cfg = state.config.read().unwrap();
+        (podcast_root(&cfg), cfg.podcast_dir.is_some())
+    };
+    let usable = tokio::fs::create_dir_all(&root).await.is_ok();
+    let paths: Vec<String> =
+        sqlx::query("SELECT file_path FROM podcast_episodes WHERE file_path IS NOT NULL")
+            .fetch_all(&state.pool)
+            .await
+            .map_err(cvt)?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+    let mut bytes = 0u64;
+    for p in &paths {
+        bytes += tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0);
+    }
+    Ok(FolderInfo {
+        path: root.to_string_lossy().to_string(),
+        custom,
+        usable,
+        episodes_downloaded: paths.len() as i64,
+        bytes_downloaded: bytes,
+    })
+}
+
+/// Check a folder the listener chose: it must be a directory (made if it is
+/// missing) that can be written to.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub async fn check_folder(path: &Path) -> Result<(), String> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let probe = path.join(".kahawai-write-test");
+    tokio::fs::write(&probe, b"x")
+        .await
+        .map_err(|e| format!("{} is not writable: {e}", path.display()))?;
+    let _ = tokio::fs::remove_file(&probe).await;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Keeping the folder tidy
 // ---------------------------------------------------------------------------
@@ -644,6 +698,24 @@ mod tests {
         assert!(episode_path(Path::new("/p"), "S", None, "T", "mp3")
             .to_string_lossy()
             .contains("undated - T.mp3"));
+    }
+
+    #[tokio::test]
+    async fn a_chosen_folder_is_made_and_must_be_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a/b/podcasts");
+        assert!(check_folder(&sub).await.is_ok());
+        assert!(sub.is_dir());
+        assert!(
+            !sub.join(".kahawai-write-test").exists(),
+            "the test file is cleaned up"
+        );
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(
+            check_folder(&file.join("inside")).await.is_err(),
+            "not under a file"
+        );
     }
 
     #[test]

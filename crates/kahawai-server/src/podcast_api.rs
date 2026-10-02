@@ -313,37 +313,9 @@ pub async fn episode_file(
     crate::api::serve_ranged(file, &headers, mime).await
 }
 
-#[derive(Serialize)]
-pub struct FolderInfo {
-    pub path: String,
-    /// The folder exists (or could be made) and can be written to.
-    pub usable: bool,
-    pub episodes_downloaded: i64,
-    pub bytes_downloaded: u64,
-}
-
 /// `GET /api/podcasts/folder`: where downloads go and what is in it.
-pub async fn folder(State(s): State<AppState>) -> ApiResult<Json<FolderInfo>> {
-    let root = podcast_dl::podcast_root(&s.config.read().unwrap());
-    let usable = tokio::fs::create_dir_all(&root).await.is_ok();
-    let paths: Vec<String> =
-        sqlx::query("SELECT file_path FROM podcast_episodes WHERE file_path IS NOT NULL")
-            .fetch_all(&s.pool)
-            .await
-            .map_err(cvt)?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
-    let mut bytes = 0u64;
-    for p in &paths {
-        bytes += tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0);
-    }
-    Ok(Json(FolderInfo {
-        path: root.to_string_lossy().to_string(),
-        usable,
-        episodes_downloaded: paths.len() as i64,
-        bytes_downloaded: bytes,
-    }))
+pub async fn folder(State(s): State<AppState>) -> ApiResult<Json<podcast_dl::FolderInfo>> {
+    Ok(Json(podcast_dl::folder_info(&s).await?))
 }
 
 #[derive(Deserialize)]

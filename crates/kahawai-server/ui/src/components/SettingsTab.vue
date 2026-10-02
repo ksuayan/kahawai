@@ -6,6 +6,7 @@ import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import { computed, onMounted } from "vue";
 import { useEnrichmentStore } from "../stores/enrichment";
 import { useOnlineSourcesStore } from "../stores/onlineSources";
+import { usePodcastsStore } from "../stores/podcasts";
 import { setupRevealLogs } from "../tauri";
 import { useSetupStore } from "../stores/setup";
 import { bookDirChipClass, bookDirChipText, CONFIDENCE_LEVELS, dirChipClass, dirChipText } from "../types";
@@ -13,9 +14,20 @@ import { bookDirChipClass, bookDirChipText, CONFIDENCE_LEVELS, dirChipClass, dir
 const setup = useSetupStore();
 const enrich = useEnrichmentStore();
 const online = useOnlineSourcesStore();
+const podcasts = usePodcastsStore();
+const refreshOptions: UiSelectOption[] = [
+  { value: "1", label: "Every hour" },
+  { value: "3", label: "Every 3 hours" },
+  { value: "6", label: "Every 6 hours" },
+  { value: "12", label: "Every 12 hours" },
+  { value: "24", label: "Once a day" },
+  { value: "0", label: "Only when I refresh" },
+];
+const megabytes = (b: number): string => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`);
 onMounted(() => {
   void enrich.load();
   void online.load();
+  void podcasts.load();
   // Opened before the running server's folders were read (it was still
   // starting): read them now.
   if (setup.runningDirs.length === 0 && setup.pendingRemoves.length === 0) void setup.loadRunningConfig();
@@ -265,6 +277,45 @@ const jobLine = computed(() => {
       added by their address, work either way.
     </UiHint>
     <UiHint v-if="online.error" tone="warn">{{ online.error }}</UiHint>
+
+    <h3 class="heading-3 mb-2 mt-4">Podcasts</h3>
+    <template v-if="podcasts.settings">
+      <UiHint tone="faint">
+        Episodes you subscribe to are downloaded here by the server, one folder per show. The newest few
+        unplayed episodes of each show are fetched automatically; settings for each show are in the Player.
+      </UiHint>
+      <div class="mb-1 flex flex-wrap items-center gap-2 text-[13px]">
+        <span class="select-text truncate font-mono text-xs" :title="podcasts.settings.path" data-testid="podcast-path">
+          {{ podcasts.settings.path }}
+        </span>
+        <span v-if="!podcasts.settings.custom" class="text-xs text-faint">(default, next to the database)</span>
+        <span v-if="!podcasts.settings.usable" class="text-xs text-warn-fg" data-testid="podcast-unusable">can't be written to</span>
+      </div>
+      <div class="mb-2 flex flex-wrap gap-2">
+        <UiButton :disabled="podcasts.busy" data-testid="podcast-choose" @click="podcasts.chooseFolder()">Choose folder…</UiButton>
+        <UiButton v-if="podcasts.settings.custom" :disabled="podcasts.busy" data-testid="podcast-default" @click="podcasts.useDefaultFolder()">
+          Use the default
+        </UiButton>
+      </div>
+      <UiHint tone="faint" data-testid="podcast-usage">
+        {{ n(podcasts.settings.episodes_downloaded) }} episodes downloaded ·
+        {{ megabytes(podcasts.settings.bytes_downloaded) }}. Changing the folder leaves what's already
+        downloaded where it is.
+      </UiHint>
+      <div class="flex flex-wrap items-center gap-2 text-[13px]">
+        <span aria-hidden="true">Check for new episodes</span>
+        <UiSelect
+          aria-label="Check for new episodes"
+          trigger-class="w-48"
+          :model-value="String(podcasts.settings.refresh_hours)"
+          :options="refreshOptions"
+          :disabled="podcasts.busy"
+          @update:model-value="(v) => v !== null && podcasts.setRefreshHours(Number(v))"
+        />
+      </div>
+      <UiHint v-if="podcasts.error" tone="warn" data-testid="podcast-error">{{ podcasts.error }}</UiHint>
+    </template>
+    <UiHint v-else tone="faint">Start the server to set up podcasts.</UiHint>
 
     <h3 class="heading-3 mb-2 mt-4">Advanced</h3>
     <UiHint tone="faint">

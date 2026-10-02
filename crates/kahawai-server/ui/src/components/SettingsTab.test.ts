@@ -300,3 +300,70 @@ describe("SettingsTab: online sources", () => {
     expect(wrapper.text()).toContain("could not save the config");
   });
 });
+
+describe("SettingsTab: podcasts", () => {
+  const settings = (over: Record<string, unknown> = {}) => ({
+    path: "/data/podcasts",
+    custom: false,
+    usable: true,
+    episodes_downloaded: 12,
+    bytes_downloaded: 480_000_000,
+    refresh_hours: 6,
+    ...over,
+  });
+
+  it("shows the folder (marked default), what is in it, and how often feeds are checked", async () => {
+    inTauri();
+    tauri.on("setup_podcast_settings", settings());
+    const { wrapper } = boot();
+    await settle();
+    expect(wrapper.get('[data-testid="podcast-path"]').text()).toBe("/data/podcasts");
+    expect(wrapper.text()).toContain("default, next to the database");
+    expect(wrapper.get('[data-testid="podcast-usage"]').text()).toContain("12 episodes downloaded");
+    expect(wrapper.get('[data-testid="podcast-usage"]').text()).toContain("480 MB");
+    expect(wrapper.find('[data-testid="podcast-default"]').exists()).toBe(false);
+    expect(wrapper.get('[aria-label="Check for new episodes"]').text()).toBe("Every 6 hours");
+  });
+
+  it("choosing a folder saves it with the current interval, and the default can be restored", async () => {
+    inTauri();
+    tauri.on("setup_podcast_settings", settings()).on("setup_set_podcast_settings", undefined);
+    dialog.nextPath = "/Volumes/Pods";
+    const { wrapper } = boot();
+    await settle();
+    tauri.on("setup_podcast_settings", settings({ path: "/Volumes/Pods", custom: true }));
+    await wrapper.get('[data-testid="podcast-choose"]').trigger("click");
+    await settle();
+    expect(tauri.callsTo("setup_set_podcast_settings")).toEqual([{ dir: "/Volumes/Pods", refreshHours: 6 }]);
+    expect(wrapper.get('[data-testid="podcast-path"]').text()).toBe("/Volumes/Pods");
+    tauri.on("setup_podcast_settings", settings());
+    await wrapper.get('[data-testid="podcast-default"]').trigger("click");
+    await settle();
+    expect(tauri.callsTo("setup_set_podcast_settings").at(-1)).toEqual({ dir: null, refreshHours: 6 });
+  });
+
+  it("changing the interval keeps the chosen folder", async () => {
+    inTauri();
+    tauri.on("setup_podcast_settings", settings({ path: "/Volumes/Pods", custom: true })).on("setup_set_podcast_settings", undefined);
+    const { wrapper } = boot();
+    await settle();
+    await openSelect(wrapper.get('[aria-label="Check for new episodes"]').element as HTMLElement);
+    pick(options().find((o) => o.textContent?.includes("Once a day"))!);
+    await settle();
+    expect(tauri.callsTo("setup_set_podcast_settings")).toEqual([{ dir: "/Volumes/Pods", refreshHours: 24 }]);
+  });
+
+  it("shows why a folder was refused, and flags one that cannot be written to", async () => {
+    inTauri();
+    tauri.on("setup_podcast_settings", settings({ usable: false })).on("setup_set_podcast_settings", () => {
+      throw new Error("/Volumes/Ro is not writable");
+    });
+    dialog.nextPath = "/Volumes/Ro";
+    const { wrapper } = boot();
+    await settle();
+    expect(wrapper.find('[data-testid="podcast-unusable"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="podcast-choose"]').trigger("click");
+    await settle();
+    expect(wrapper.get('[data-testid="podcast-error"]').text()).toContain("is not writable");
+  });
+});

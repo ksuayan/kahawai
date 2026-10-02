@@ -235,6 +235,18 @@ export interface EnrichJob {
   message?: string | null;
 }
 
+/** `setup_podcast_settings`: Settings → Podcasts. */
+export interface PodcastSettings {
+  path: string;
+  /** Chosen by the user (false: the default, next to the database). */
+  custom: boolean;
+  usable: boolean;
+  episodes_downloaded: number;
+  bytes_downloaded: number;
+  /** How often feeds are checked, hours; 0 = never on their own. */
+  refresh_hours: number;
+}
+
 /** `setup_enrichment_status`: Settings → Album info. */
 export interface EnrichmentStatus {
   enabled: boolean;
