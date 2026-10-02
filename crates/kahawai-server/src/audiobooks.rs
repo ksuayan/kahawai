@@ -1353,8 +1353,11 @@ async fn store_book(
             let edited: i64 = r.get("meta_edited");
             if edited == 0 {
                 sqlx::query(
-                    "UPDATE audiobooks SET root_id = ?, title = ?, author = ?, narrator = ?, series = ?,
-                       series_index = ?, year = ?, cover_hash = ?, duration_ms = ? WHERE id = ?",
+                    // A blank from the scan keeps what a lookup filled in.
+                    "UPDATE audiobooks SET root_id = ?, title = ?, author = COALESCE(?, author),
+                       narrator = COALESCE(?, narrator), series = COALESCE(?, series),
+                       series_index = COALESCE(?, series_index), year = COALESCE(?, year),
+                       cover_hash = COALESCE(?, cover_hash), duration_ms = ? WHERE id = ?",
                 )
                 .bind(root.id)
                 .bind(&title)

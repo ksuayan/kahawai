@@ -7,6 +7,7 @@ import {
   deleteAudiobookRoot,
   editAudiobook,
   editAudiobookBookmark,
+  enrichAudiobooks,
   fetchAudiobook,
   fetchAudiobookHistory,
   fetchAudiobookRoots,
@@ -87,6 +88,8 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     finished: "all",
   });
   const loading = ref(false);
+  /** The library has been loaded at least once (so a catalog update should refresh it). */
+  const loaded = ref(false);
   const error = ref<string | null>(null);
   const roots = ref<AudiobookRoot[]>([]);
 
@@ -112,6 +115,7 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
       loading.value = false;
+      loaded.value = true;
     }
   }
 
@@ -425,6 +429,17 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     await loadLibrary();
   }
 
+  /** Look up a book's missing author, year and cover online. The server says
+   *  why not when the lookup is switched off. */
+  async function lookUpOnline(id: number): Promise<void> {
+    try {
+      await enrichAudiobooks(id);
+      toasts.push("info", "Looking up this book online", { ttl: 3000 });
+    } catch (e) {
+      toasts.push("error", "Could not look up this book", { detail: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   async function editMeta(id: number, edit: AudiobookMetaEdit): Promise<void> {
     await editAudiobook(id, edit);
     if (detail.value?.id === id) await openDetail(id);
@@ -525,6 +540,7 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     continueShelf,
     query,
     loading,
+    loaded,
     error,
     roots,
     authors,
@@ -559,6 +575,7 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     removeBookmark,
     playFrom,
     setFinished,
+    lookUpOnline,
     editMeta,
     sleep,
     sleepRemainingMs,

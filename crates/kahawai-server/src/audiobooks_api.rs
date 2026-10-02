@@ -92,6 +92,107 @@ fn spawn_audiobook_scan(s: AppState, job_id: String, guard: tokio::sync::OwnedMu
     });
 }
 
+#[derive(Deserialize, Default)]
+pub struct EnrichBody {
+    /// One book (asked again even if it was asked before); default: every
+    /// book with a blank that has not been asked about.
+    #[serde(default)]
+    pub book_id: Option<i64>,
+}
+
+/// `POST /api/audiobooks/enrich`: look up the author, year and cover of books
+/// that lack them (Open Library, then Google Books). Sends titles off the
+/// LAN, so it needs the album lookup's opt-in (`enrichment_enabled`).
+pub async fn enrich(
+    State(s): State<AppState>,
+    body: Option<Json<EnrichBody>>,
+) -> ApiResult<Response> {
+    if !s.config.read().unwrap().enrichment_enabled {
+        return Err(MusicError::BadRequest(
+            "online lookup is off: turn on Album info in the Server settings first".to_string(),
+        )
+        .into());
+    }
+    let only = body.and_then(|b| b.0.book_id);
+    if let Some(id) = only {
+        get_book(&s.pool, id).await?;
+    }
+    let guard = s
+        .enrich_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| MusicError::Conflict("a lookup is already running".to_string()))?;
+    let job = s
+        .jobs
+        .create(
+            JobKind::EnrichBooks,
+            "Audiobook info lookup".to_string(),
+            None,
+        )
+        .await;
+    spawn_enrich(
+        s,
+        job.id.clone(),
+        only,
+        guard,
+        crate::book_meta::BookClient::new(),
+    );
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
+pub(crate) fn spawn_enrich(
+    s: AppState,
+    job_id: String,
+    only: Option<i64>,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+    client: crate::book_meta::BookClient,
+) {
+    tokio::spawn(async move {
+        let _guard = guard;
+        s.jobs.set_status(&job_id, JobStatus::Running).await;
+        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+        let jobs = s.jobs.clone();
+        let id2 = job_id.clone();
+        let fwd = tokio::spawn(async move {
+            while let Some((done, total)) = prx.recv().await {
+                if total > 0 {
+                    jobs.set_progress(&id2, (done as f64 / total as f64).clamp(0.0, 0.99) as f32)
+                        .await;
+                }
+            }
+        });
+        let report =
+            crate::book_meta::enrich_books(&s.pool, &client, only, &s.jobs, &job_id, |d, t| {
+                let _ = ptx.send((d, t));
+            })
+            .await;
+        drop(ptx);
+        let _ = fwd.await;
+        match report {
+            Ok(r) if r.cancelled => {}
+            Ok(r) => {
+                let msg = match &r.offline {
+                    Some(why) => format!(
+                        "stopped: {why}; {} books done, the rest will be tried next time",
+                        r.looked_up
+                    ),
+                    None => format!(
+                        "looked up {} books: {} matched ({} covers), {} not found",
+                        r.looked_up, r.matched, r.covers, r.not_found
+                    ),
+                };
+                s.jobs.finish(&job_id, r.offline.is_none(), Some(msg)).await;
+                if r.matched > 0 {
+                    let _ = s.catalog_events.send(crate::ServerEvent::CatalogUpdated);
+                }
+            }
+            Err(e) => {
+                s.jobs.finish(&job_id, false, Some(e.to_string())).await;
+            }
+        }
+    });
+}
+
 // --- books ------------------------------------------------------------------
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -1160,6 +1261,8 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::CREATED);
+        // Adding a folder starts a scan in the background; let it finish.
+        drop(e.state.scan_lock.lock().await);
         ab::scan(&e.state.pool).await.unwrap();
 
         let report =
@@ -1571,6 +1674,63 @@ mod tests {
         assert_eq!(n("?author=Solo%20Writer").await, 1);
         assert_eq!(n("?finished=true").await, 0);
         assert_eq!(n("?finished=false").await, 2);
+    }
+
+    #[tokio::test]
+    async fn online_lookup_is_opt_in_and_checks_the_book() {
+        let e = env().await;
+        library(&e).await;
+        let (st, v) = call(&e.app, Method::POST, "/api/audiobooks/enrich", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains("online lookup is off"),
+            "{v}"
+        );
+        e.state.config.write().unwrap().enrichment_enabled = true;
+        let (st, _) = call(
+            &e.app,
+            Method::POST,
+            "/api/audiobooks/enrich",
+            Some(serde_json::json!({"book_id": 9999})),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::NOT_FOUND,
+            "an unknown book is refused before anything goes online"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rescan_keeps_what_a_lookup_filled_in() {
+        let e = env().await;
+        library(&e).await;
+        let (_, list) = call(
+            &e.app,
+            Method::GET,
+            "/api/audiobooks?author=Solo%20Writer",
+            None,
+        )
+        .await;
+        let id = list[0]["id"].as_i64().unwrap();
+        assert!(
+            list[0]["year"].is_null(),
+            "the folder and tags give no year"
+        );
+        sqlx::query("UPDATE audiobooks SET year = 1984, cover_hash = 'abc' WHERE id = ?")
+            .bind(id)
+            .execute(&e.state.pool)
+            .await
+            .unwrap();
+        ab::scan(&e.state.pool).await.unwrap();
+        let (_, d) = call(&e.app, Method::GET, &format!("/api/audiobooks/{id}"), None).await;
+        assert_eq!(
+            (d["year"].as_i64(), d["cover_hash"].as_str()),
+            (Some(1984), Some("abc"))
+        );
     }
 
     /// An m4b with two embedded chapters, made by ffmpeg.

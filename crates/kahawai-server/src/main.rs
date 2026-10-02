@@ -4,6 +4,7 @@
 mod api;
 mod audiobooks;
 mod audiobooks_api;
+mod book_meta;
 mod catalog;
 mod db;
 #[cfg(target_os = "macos")]
@@ -165,6 +166,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/audiobooks", get(audiobooks_api::list_books))
         .route("/api/audiobooks/scan", post(audiobooks_api::trigger_scan))
+        .route("/api/audiobooks/enrich", post(audiobooks_api::enrich))
         .route(
             "/api/audiobooks/{id}",
             get(audiobooks_api::book_detail).patch(audiobooks_api::edit_book),

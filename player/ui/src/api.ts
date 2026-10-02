@@ -582,6 +582,11 @@ export async function deleteAudiobookRoot(id: number): Promise<void> {
   return del(`/api/audiobook-roots/${id}`);
 }
 
+/** Look up the missing author, year and cover of one book (or every book without them) online. */
+export async function enrichAudiobooks(bookId?: number): Promise<JobInfo> {
+  return post<JobInfo>("/api/audiobooks/enrich", bookId === undefined ? {} : { book_id: bookId });
+}
+
 export async function scanAudiobooks(): Promise<JobInfo> {
   return post<JobInfo>("/api/audiobooks/scan", {});
 }

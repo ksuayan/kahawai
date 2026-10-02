@@ -180,6 +180,32 @@ describe("Audiobook detail", () => {
     expect(calls.some((c) => c.url.endsWith("/finished") && JSON.parse(String(c.init?.body)).finished === true)).toBe(true);
   });
 
+  it("looks a book up online when something is missing, and relays the server's refusal", async () => {
+    const calls = mockFetch({
+      "/api/audiobooks/enrich": () => json({ error: "online lookup is off: turn on Album info in the Server settings first" }, 400),
+      "/api/audiobooks/1/history": () => json([]),
+      "/api/audiobooks/1": () => json(detail({ author: null, year: null, cover_hash: null })),
+    });
+    const { wrapper } = mountApp(AudiobookDetailView, { id: 1 });
+    await settle();
+    await wrapper.get('[data-testid="look-up"]').trigger("click");
+    await settle();
+    const post = calls.find((c) => c.url.endsWith("/api/audiobooks/enrich"));
+    expect(JSON.parse(String(post?.init?.body))).toEqual({ book_id: 1 });
+    const toasts = (await import("../stores/toasts")).useToastsStore();
+    expect(toasts.toasts.at(-1)?.detail).toContain("online lookup is off");
+  });
+
+  it("offers no lookup when the author, year and cover are all known", async () => {
+    mockFetch({
+      "/api/audiobooks/1/history": () => json([]),
+      "/api/audiobooks/1": () => json(detail({ author: "A", year: 2000, cover_hash: "h" })),
+    });
+    const { wrapper } = mountApp(AudiobookDetailView, { id: 1 });
+    await settle();
+    expect(wrapper.find('[data-testid="look-up"]').exists()).toBe(false);
+  });
+
   it("edits the details by hand", async () => {
     const calls = routes();
     const { wrapper } = mountApp(AudiobookDetailView, { id: 1 });
@@ -230,7 +256,10 @@ describe("Audiobook controls", () => {
     expect(wrapper.get('[data-testid="skip-forward"]').text()).toContain("30");
     await wrapper.get('[data-testid="skip-forward"]').trigger("click");
     await settle();
-    expect(tauri.callsTo("seek_ms").at(-1)).toEqual({ ms: 35_000 });
+    // 5 s in, forward 30 s (the playhead interpolates with the wall clock, so allow a moment).
+    const ms = (tauri.callsTo("seek_ms").at(-1) as { ms: number }).ms;
+    expect(ms).toBeGreaterThanOrEqual(35_000);
+    expect(ms).toBeLessThan(36_500);
     await wrapper.get('[data-testid="bookmark-here"]').trigger("click");
     await settle();
     expect(useAudiobooksStore().active?.bookmarks.length).toBe(2);

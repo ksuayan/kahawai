@@ -337,6 +337,9 @@ pub enum JobKind {
     /// Look up albums without a MusicBrainz ID (MusicBrainz, Cover Art
     /// Archive). Opt-in; can be paused, resumed and cancelled.
     EnrichMetadata,
+    /// Look up audiobooks' missing author, year and cover online (Open
+    /// Library, then Google Books).
+    EnrichBooks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

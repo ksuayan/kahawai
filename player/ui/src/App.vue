@@ -80,7 +80,10 @@ let stopMenu: (() => void) | undefined;
 // Registered synchronously (not inside onMounted) for the same reason as
 // stopMenu below: unsubscribing must be reachable from onUnmounted even
 // though the subscription itself is set up after an await.
-const stopCatalogEvents = onCatalogUpdated(() => void lib.loadAll());
+const stopCatalogEvents = onCatalogUpdated(() => {
+  void lib.loadAll();
+  if (audiobooks.loaded) void audiobooks.loadLibrary();
+});
 // The library and playlists load once at launch. If the server wasn't up yet
 // (it started after the player, or the NAS is still booting), retry them as
 // soon as the event stream connects. Only after a failed load: a healthy

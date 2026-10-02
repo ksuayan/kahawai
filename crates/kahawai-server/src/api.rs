@@ -1527,6 +1527,10 @@ pub async fn create_job(
             let job = start_enrich_job(&s, &body.label).await?;
             Ok((StatusCode::ACCEPTED, Json(job)).into_response())
         }
+        JobKind::EnrichBooks => Err(MusicError::BadRequest(
+            "start an audiobook lookup with POST /api/audiobooks/enrich".to_string(),
+        )
+        .into()),
         JobKind::Transcode => {
             let job = s.jobs.create(body.kind, body.label, None).await;
             // Demo worker: ticks progress to Done. Real bulk-transcode

@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { ApiError, createJob, fetchJobs, triggerScan } from "../api";
 import { isJobActive, jobFilesDetail, trackTitle, type JobInfo, type JobStatus, type Track } from "../types";
+import { useAudiobooksStore } from "./audiobooks";
 import { useLibraryStore } from "./library";
 import { useToastsStore } from "./toasts";
 
@@ -87,7 +88,16 @@ export const useJobsStore = defineStore("jobs", () => {
         toasts.push("success", jobTitle(j, "finished"), { detail: j.message });
         prev.toastId = null;
         // A finished scan changed the catalog: reload albums and artists.
-        if (j.kind === "scan") void library.loadAll();
+        if (j.kind === "scan") {
+          void library.loadAll();
+          // An audiobook scan is a scan job too: new books should appear.
+          const books = useAudiobooksStore();
+          if (books.loaded) void books.loadLibrary();
+        }
+        if (j.kind === "enrich_books") {
+          const books = useAudiobooksStore();
+          void books.loadLibrary().then(() => (books.detail ? books.refreshDetail() : undefined));
+        }
       } else if (j.status === "failed") {
         if (prev.toastId != null) toasts.dismiss(prev.toastId);
         // The server's message is the honest failure reason — verbatim.

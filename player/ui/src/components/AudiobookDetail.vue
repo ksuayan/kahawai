@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BookmarkPlus, Check, Pencil, Play, RotateCcw, Trash2 } from "lucide-vue-next";
+import { BookmarkPlus, Check, Pencil, Play, RotateCcw, Search, Trash2 } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { clock, dayLine, duration, groupByDay, remainingText, SPEEDS, speedLabel } from "../lib/audiobook";
 import { useAudiobooksStore } from "../stores/audiobooks";
@@ -79,6 +79,9 @@ const subtitle = computed(() => {
               <Check /> {{ book.finished_at ? "Mark not finished" : "Mark finished" }}
             </UiButton>
             <UiButton data-testid="edit-details" @click="editing = true"><Pencil /> Edit details</UiButton>
+            <UiButton v-if="!book.author || !book.year || !book.cover_hash" title="Fill in the missing author, year or cover from Open Library and Google Books" data-testid="look-up" @click="books.lookUpOnline(book.id)">
+              <Search /> Look up online
+            </UiButton>
           </div>
           <div class="mt-3 flex items-center gap-2 text-xs text-dim">
             Speed
