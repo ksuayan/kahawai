@@ -126,6 +126,8 @@ pub struct StreamDecoder {
     /// Count of successfully probed streams (1 = only the first).
     pub streams_completed: usize,
     exhausted: bool,
+    /// A live AAC radio stream (HE-AAC included), decoded by `syom`.
+    live: Option<Box<crate::radio::LiveAac>>,
 }
 
 impl StreamDecoder {
@@ -142,6 +144,7 @@ impl StreamDecoder {
             expect_chained,
             streams_completed: 0,
             exhausted: false,
+            live: None,
         };
         if expect_chained {
             let mut buf = Vec::new();
@@ -186,6 +189,35 @@ impl StreamDecoder {
         Ok(this)
     }
 
+    /// A live radio stream. AAC (ADTS or LOAS, found by its sync word) goes to
+    /// the HE-AAC-capable decoder; everything else (MP3, Ogg, FLAC, Opus)
+    /// takes the usual route. Music never comes through here.
+    pub fn new_live(source: Box<dyn Read + Send>) -> Result<Self, MusicError> {
+        let mut source = source;
+        let mut head = Vec::with_capacity(2);
+        (&mut source)
+            .take(2)
+            .read_to_end(&mut head)
+            .map_err(MusicError::Io)?;
+        let replay: Box<dyn Read + Send> = Box::new(Cursor::new(head.clone()).chain(source));
+        if crate::radio::looks_like_aac(&head) {
+            let live = crate::radio::LiveAac::new(replay)?;
+            let first_spec = live.spec();
+            return Ok(Self {
+                full: None,
+                stream_base: 0,
+                active: None,
+                first_spec,
+                stash: Vec::new(),
+                expect_chained: false,
+                streams_completed: 1,
+                exhausted: false,
+                live: Some(Box::new(live)),
+            });
+        }
+        Self::new(replay, false)
+    }
+
     pub fn spec(&self) -> DecodedSpec {
         self.first_spec
     }
@@ -215,6 +247,7 @@ impl StreamDecoder {
             expect_chained: false,
             streams_completed: 0,
             exhausted: false,
+            live: None,
         };
         let mss = MediaSourceStream::new(
             Box::new(SyncSeek {
@@ -384,6 +417,9 @@ impl StreamDecoder {
     /// Decode up to `out.len()` interleaved f32 samples. Returns the count
     /// of *frames* written; 0 means the response is fully consumed.
     pub fn decode_interleaved(&mut self, out: &mut [f32]) -> Result<usize, MusicError> {
+        if let Some(live) = self.live.as_mut() {
+            return live.decode_interleaved(out);
+        }
         let mut written = 0;
         while written < out.len() {
             if !self.stash.is_empty() {

@@ -492,6 +492,10 @@ struct PlayerStateDto {
     analog_level: Option<AnalogLevelDto>,
     /// Look-ahead limiter gain reduction, dB. None while off or bypassed.
     limiter_gr_db: Option<f32>,
+    /// Playback speed (1.0 = as recorded); the seek bar's clock runs at it.
+    playback_rate: f32,
+    /// The radio station playing: its song title and connection state.
+    radio: Option<kahawai_player_core::RadioNow>,
     format: Option<&'static str>,
     chain: Option<String>,
     /// "pcm-shared" | "dop-exclusive" — drives the Exclusive DoP badge.
@@ -566,6 +570,8 @@ impl From<PlayerSnapshot> for PlayerStateDto {
                 seconds: l.seconds,
             }),
             limiter_gr_db: s.limiter_gr_db,
+            playback_rate: s.playback_rate,
+            radio: s.radio,
             format: s.format.map(format_str),
             chain: s.chain,
             output_path: output_path_str(s.output_path),
