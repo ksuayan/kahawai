@@ -332,3 +332,40 @@ describe("sleep timer", () => {
     expect(e.store.sleep).toBeNull();
   });
 });
+
+describe("after a restart", () => {
+  it("takes up a restored book queue, so the controls and saving carry on", async () => {
+    const e = await setup();
+    // The engine came back with part two of the book loaded, paused.
+    engine(102, 20_000, "paused");
+    await flushPromises();
+    mockFetch({
+      "/api/audiobooks/7/position": (_u: string, init?: RequestInit) => json({ book_offset_ms: JSON.parse(String(init?.body)).book_offset_ms, updated_at: Date.now(), finished: false }),
+      "/api/audiobooks/7/settings": () => json({}),
+      "/api/audiobooks/7": () => json(book()),
+      "/api/audiobooks?shelf=continue": () => json([{ ...book(), id: 7 }]),
+      "/api/tracks/101": () => json(partTrack(101, 200_000)),
+      "/api/tracks/102": () => json(partTrack(102, 400_000)),
+    });
+    expect(e.store.isActive).toBe(false);
+    await e.store.adopt();
+    await flushPromises();
+    expect(e.store.isActive).toBe(true);
+    expect(e.store.offsetMs).toBe(220_000);
+    expect(tauri.callsTo("set_playback_rate").at(-1)).toEqual({ rate: 1.5 });
+    // A cross-part seek works even though this session never fetched the parts.
+    await e.store.seekToOffset(50_000);
+    const play = tauri.callsTo("queue_play_at").at(-1) as { index: number; tracks: unknown[] };
+    expect([play.index, play.tracks.length]).toEqual([0, 2]);
+  });
+
+  it("leaves music alone", async () => {
+    const e = await setup();
+    tauri.emit("player-state", makeState({ status: "paused", track: makeTrack({ id: 5 }) }));
+    await flushPromises();
+    mockFetch({ "/api/audiobooks/7": () => json(book()), "/api/audiobooks": () => json([book()]) });
+    await e.store.adopt();
+    expect(e.store.active).toBeNull();
+    expect(tauri.callsTo("set_playback_rate")).toHaveLength(0);
+  });
+});

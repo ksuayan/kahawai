@@ -113,6 +113,7 @@ onMounted(async () => {
   await dsp.init(); // persisted EQ/loudness + device/DoP capability
   await analog.init(); // the A/B pair of analog-warmth settings
   jobs.init(); // pick up any active server jobs (scan / ISO extraction)
+  void audiobooks.adopt(); // a restored queue may be a book's parts
   // Keep the queue store in sync with core-driven queue changes.
   stopWatch = player.$subscribe((_m, s) => {
     if (s.raw) {

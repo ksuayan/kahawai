@@ -207,6 +207,34 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     startSaving();
   }
 
+  /**
+   * After a restart the engine reloads the queue it had, which may be a
+   * book's parts. Work out whether it is one, and if so take it up as the
+   * playing book (without starting it), so the controls, whole-book seek bar
+   * and position saving carry on. Looks at the most recently played books.
+   */
+  async function adopt(): Promise<void> {
+    if (active.value) return;
+    const current = player.currentTrack?.id;
+    if (current == null) return;
+    let candidates: Audiobook[];
+    try {
+      candidates = await fetchAudiobooks({ shelf: "continue" });
+    } catch {
+      return; // no server: nothing to adopt
+    }
+    for (const c of candidates.slice(0, 5)) {
+      const book = await fetchAudiobook(c.id);
+      if (book.parts.some((p) => p.track_id === current)) {
+        active.value = { ...book };
+        await setPlaybackRate(clampSpeed(book.settings.speed));
+        lastSaved = offsetMs.value;
+        startSaving();
+        return;
+      }
+    }
+  }
+
   /** Jump to a book offset, across parts if need be. */
   async function seekToOffset(ms: number): Promise<void> {
     const a = active.value;
@@ -217,6 +245,8 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     if (player.currentTrack?.id === r.trackId) {
       await player.seekTo(r.trackOffsetMs);
     } else {
+      // A book taken up after a restart has not fetched its parts yet.
+      if (partTracks.length === 0) partTracks = await tracksFor(a);
       await queuePlayAt(partTracks, r.partIndex, r.trackOffsetMs);
     }
     await reportNow(target);
@@ -514,6 +544,7 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     skipBackS,
     skipForwardS,
     start,
+    adopt,
     seekToOffset,
     skip,
     nextChapter,
