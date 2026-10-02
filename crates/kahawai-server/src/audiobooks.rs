@@ -1177,6 +1177,8 @@ fn read_file(path: &Path, format: AudioFormat, size: i64, mtime: Option<i64>) ->
 /// Result of one audiobook scan.
 #[derive(Debug, Default, Clone, Serialize, PartialEq)]
 pub struct ScanSummary {
+    /// Books hidden as copies of another book.
+    pub duplicates: u64,
     pub books: u64,
     pub files: u64,
     pub unreadable_roots: u64,
@@ -1242,7 +1244,122 @@ fn walk_root(
 /// chapters. Rescans keep each book's id, so positions, bookmarks and
 /// history survive; fields the user edited by hand are left alone.
 pub async fn scan(pool: &SqlitePool) -> Result<ScanSummary, MusicError> {
-    scan_with_progress(pool, std::sync::Arc::new(|_, _| {})).await
+    let mut summary = scan_with_progress(pool, std::sync::Arc::new(|_, _| {})).await?;
+    summary.duplicates = find_duplicates(pool).await?;
+    Ok(summary)
+}
+
+/// Books that are copies of another book, found by content. Hashing a
+/// shelf of audiobooks would read tens of GB, so only files that share a
+/// size with another audiobook file are hashed (a copy always does), and
+/// only once: the hash is kept until the file changes. Then books whose
+/// files, in order, all have the same hashes are copies. The one with
+/// listening progress is kept (else the oldest); the rest are hidden.
+/// Returns how many books are hidden as copies.
+pub async fn find_duplicates(pool: &SqlitePool) -> Result<u64, MusicError> {
+    let rows = sqlx::query(
+        "SELECT t.id, t.path, t.file_size, t.file_mtime FROM tracks t
+         WHERE t.kind = 'audiobook' AND t.missing = 0 AND t.hash IS NULL AND t.file_size IS NOT NULL
+           AND t.file_size IN (SELECT file_size FROM tracks
+                               WHERE kind = 'audiobook' AND missing = 0 AND file_size IS NOT NULL
+                               GROUP BY file_size HAVING COUNT(*) > 1)
+         ORDER BY t.id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(cvt)?;
+    for r in &rows {
+        let (id, path): (i64, String) = (r.get("id"), r.get("path"));
+        let (size, mtime): (i64, Option<i64>) = (r.get("file_size"), r.get("file_mtime"));
+        let p = PathBuf::from(&path);
+        let hashed = tokio::task::spawn_blocking(move || {
+            let meta = std::fs::metadata(&p).ok()?;
+            // Hash only the file the scan saw, not one that changed since.
+            if meta.len() as i64 != size || crate::scanner::mtime_secs(&meta) != mtime {
+                return None;
+            }
+            crate::hashing::hash_file(&p).ok()
+        })
+        .await
+        .map_err(|e| MusicError::JobFailed(format!("audiobook hash: {e}")))?;
+        if let Some(h) = hashed {
+            sqlx::query("UPDATE tracks SET hash = ?, hash_algo = ? WHERE id = ? AND hash IS NULL")
+                .bind(h)
+                .bind(crate::hashing::HASH_ALGO)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(cvt)?;
+        }
+    }
+
+    // A book's signature: its present files' hashes, in order. Any file
+    // without a hash (it is unique by size) means no copy can exist.
+    let books = sqlx::query(
+        "SELECT b.id, COALESCE(p.updated_at, 0) AS played FROM audiobooks b
+         LEFT JOIN audiobook_positions p ON p.book_id = b.id
+         WHERE EXISTS (SELECT 1 FROM audiobook_parts ap JOIN tracks t ON t.id = ap.track_id
+                       WHERE ap.book_id = b.id AND t.missing = 0)
+         ORDER BY b.id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(cvt)?;
+    let mut groups: std::collections::HashMap<Vec<String>, Vec<(i64, i64)>> = Default::default();
+    for b in &books {
+        let (id, played): (i64, i64) = (b.get("id"), b.get("played"));
+        let hashes: Vec<Option<String>> = sqlx::query(
+            "SELECT t.hash FROM audiobook_parts ap JOIN tracks t ON t.id = ap.track_id
+             WHERE ap.book_id = ? AND t.missing = 0 ORDER BY ap.part_index",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await
+        .map_err(cvt)?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+        if hashes.is_empty() || hashes.iter().any(Option::is_none) {
+            continue;
+        }
+        groups
+            .entry(hashes.into_iter().flatten().collect())
+            .or_default()
+            .push((id, played));
+    }
+    let mut wanted: std::collections::HashMap<i64, i64> = Default::default();
+    for members in groups.values().filter(|m| m.len() > 1) {
+        // Most recently played first, then the oldest book.
+        let keep = members
+            .iter()
+            .max_by_key(|(id, played)| (*played, std::cmp::Reverse(*id)))
+            .map(|m| m.0)
+            .unwrap();
+        for (id, _) in members {
+            if *id != keep {
+                wanted.insert(*id, keep);
+            }
+        }
+    }
+    // Write only what changes.
+    let current = sqlx::query("SELECT id, duplicate_of FROM audiobooks")
+        .fetch_all(pool)
+        .await
+        .map_err(cvt)?;
+    for r in &current {
+        let id: i64 = r.get("id");
+        let now: Option<i64> = r.get("duplicate_of");
+        let want = wanted.get(&id).copied();
+        if now != want {
+            sqlx::query("UPDATE audiobooks SET duplicate_of = ? WHERE id = ?")
+                .bind(want)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(cvt)?;
+        }
+    }
+    Ok(wanted.len() as u64)
 }
 
 /// [`scan`] reporting `(files done, estimate)` after each file it reads. The
@@ -1474,7 +1591,11 @@ async fn store_book(
                sample_rate = excluded.sample_rate, bit_depth = excluded.bit_depth,
                channels = excluded.channels, bitrate = excluded.bitrate, title = excluded.title,
                album = excluded.album, artist = excluded.artist, track_no = excluded.track_no,
-               disc_no = excluded.disc_no, missing = 0, decodable = 1
+               disc_no = excluded.disc_no, missing = 0, decodable = 1,
+               -- A changed file must be hashed again.
+               hash = CASE WHEN tracks.file_size IS excluded.file_size
+                            AND tracks.file_mtime IS excluded.file_mtime
+                           THEN tracks.hash ELSE NULL END
              RETURNING id",
         )
         .bind(f.path.to_string_lossy().to_string())

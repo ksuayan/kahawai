@@ -129,6 +129,33 @@ fn stamp(job: &mut Job, to: JobStatus) {
     job.status = to;
 }
 
+/// Lets something through at most once per `interval_ms`, the first time at
+/// once. (A first version started from `i64::MIN` and subtracted: that
+/// overflows in a debug build and wraps negative in a release one, so the
+/// first tick was never let through and no file counts were ever shown.)
+pub(crate) struct Every {
+    interval_ms: i64,
+    last: Option<i64>,
+}
+
+impl Every {
+    pub(crate) fn new(interval_ms: i64) -> Self {
+        Self {
+            interval_ms,
+            last: None,
+        }
+    }
+
+    pub(crate) fn due(&mut self, now: i64) -> bool {
+        if self.last.is_none_or(|l| now - l >= self.interval_ms) {
+            self.last = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Turns a stream of `(done, total)` ticks into files per second and an ETA.
 /// The rate is an exponential moving average over windows of at least a
 /// second, so a slow patch on a network share doesn't make the ETA jump.
@@ -533,6 +560,17 @@ mod tests {
         store.finish(&job.id, true, None).await;
         assert!(!store.bump(&job.id, 0.1).await); // terminal: no more bumps
         assert!(!store.bump("missing", 0.1).await);
+    }
+
+    #[test]
+    fn every_lets_the_first_tick_through_and_then_one_per_interval() {
+        let mut e = Every::new(1000);
+        assert!(e.due(5_000_000), "the first tick is let through at once");
+        assert!(!e.due(5_000_999));
+        assert!(e.due(5_001_000));
+        assert!(!e.due(5_001_500));
+        assert!(e.due(5_002_500));
+        assert!(Every::new(1000).due(0) && Every::new(1000).due(i64::MAX));
     }
 
     #[test]

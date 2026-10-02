@@ -80,11 +80,10 @@ pub(crate) fn spawn_audiobook_scan(
         let (jobs, id2) = (s.jobs.clone(), job_id.clone());
         let fwd = tokio::spawn(async move {
             let mut rate = crate::jobs::RateTracker::default();
-            let mut last = i64::MIN;
+            let mut every = crate::jobs::Every::new(1000);
             while let Some((done, estimate)) = prx.recv().await {
                 let now = crate::jobs::now_ms();
-                if now - last >= 1000 {
-                    last = now;
+                if every.due(now) {
                     jobs.set_files(&id2, rate.observe(now, done, None, estimate))
                         .await;
                     if let Some(total) = estimate {
@@ -105,6 +104,21 @@ pub(crate) fn spawn_audiobook_scan(
         )
         .await;
         let _ = fwd.await;
+        // Phase two: spot copies of books by content (cheap: only files that
+        // share a size with another are read).
+        s.jobs
+            .set_message(&job_id, Some("Checking for duplicate copies…".to_string()))
+            .await;
+        let report = match report {
+            Ok(mut r) => match ab::find_duplicates(&s.pool).await {
+                Ok(n) => {
+                    r.duplicates = n;
+                    Ok(r)
+                }
+                Err(e) => Err(e),
+            },
+            e => e,
+        };
         match report {
             Ok(r) => {
                 s.jobs
@@ -112,8 +126,14 @@ pub(crate) fn spawn_audiobook_scan(
                         &job_id,
                         true,
                         Some(format!(
-                            "audiobook scan complete: {} books, {} files",
-                            r.books, r.files
+                            "audiobook scan complete: {} books, {} files{}",
+                            r.books,
+                            r.files,
+                            if r.duplicates > 0 {
+                                format!(", {} duplicate copies hidden", r.duplicates)
+                            } else {
+                                String::new()
+                            }
                         )),
                     )
                     .await;
@@ -306,7 +326,7 @@ pub async fn books(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Book>, MusicE
     let mut sql = format!(
         "SELECT {BOOK_COLS} FROM audiobooks b
          LEFT JOIN audiobook_positions p ON p.book_id = b.id
-         WHERE {BOOK_PRESENT}"
+         WHERE {BOOK_PRESENT} AND b.duplicate_of IS NULL"
     );
     let mut binds: Vec<String> = Vec::new();
     let continue_shelf = q.shelf.as_deref() == Some("continue");
@@ -1807,6 +1827,154 @@ mod tests {
         let b = &e.books;
         mp3(b, "A/One", "01.mp3", "One", "One", "A", 1);
         mp3(b, "A/Two", "01.mp3", "Two", "Two", "A", 1);
+    }
+
+    /// Copy one book's folder to another place under the same root.
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let dest = to.join(e.file_name());
+            if e.file_type().unwrap().is_dir() {
+                copy_dir(&e.path(), &dest);
+            } else {
+                std::fs::copy(e.path(), dest).unwrap();
+            }
+        }
+    }
+
+    async fn hashed_files(e: &Env) -> i64 {
+        sqlx::query("SELECT COUNT(*) FROM tracks WHERE kind = 'audiobook' AND hash IS NOT NULL")
+            .fetch_one(&e.state.pool)
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    #[tokio::test]
+    async fn a_copy_of_a_book_is_hidden_and_a_file_of_unique_size_is_never_hashed() {
+        let e = env().await;
+        // A book whose one file has a size no other file has.
+        let odd = e.books.join("Odd Author/Odd Book");
+        std::fs::create_dir_all(&odd).unwrap();
+        library_files_into(&e.books);
+        let mut bytes = std::fs::read(e.books.join("A/One/01.mp3")).unwrap();
+        bytes.extend_from_slice(&[0u8; 17]);
+        std::fs::write(odd.join("odd.mp3"), bytes).unwrap();
+        sqlx::query("INSERT INTO audiobook_roots (path, name) VALUES (?, 'b')")
+            .bind(e.books.to_str().unwrap())
+            .execute(&e.state.pool)
+            .await
+            .unwrap();
+        ab::scan(&e.state.pool).await.unwrap();
+        let odd_hash: Option<String> =
+            sqlx::query("SELECT hash FROM tracks WHERE path LIKE '%odd.mp3'")
+                .fetch_one(&e.state.pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert!(
+            odd_hash.is_none(),
+            "nothing else is that size: no reason to read it all"
+        );
+
+        // A backup copy of a book, in another folder.
+        copy_dir(&e.books.join("A/One"), &e.books.join("Backup/One copy"));
+        let (_, before) = call(&e.app, Method::GET, "/api/audiobooks", None).await;
+        let listed_before = before.as_array().unwrap().len();
+        let r = ab::scan(&e.state.pool).await.unwrap();
+        assert_eq!(r.duplicates, 1, "{r:?}");
+        let (_, list) = call(&e.app, Method::GET, "/api/audiobooks", None).await;
+        assert_eq!(
+            list.as_array().unwrap().len(),
+            listed_before,
+            "the copy was not added to the library: {list}"
+        );
+        let dup: i64 =
+            sqlx::query("SELECT COUNT(*) FROM audiobooks WHERE duplicate_of IS NOT NULL")
+                .fetch_one(&e.state.pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(dup, 1);
+        // Idempotent: another scan changes nothing.
+        let hashed = hashed_files(&e).await;
+        assert_eq!(ab::scan(&e.state.pool).await.unwrap().duplicates, 1);
+        assert_eq!(hashed_files(&e).await, hashed);
+    }
+
+    /// Two small books, `A/One` and `A/Two` (identical audio, so identical sizes).
+    fn library_files_into(root: &std::path::Path) {
+        mp3(root, "A/One", "01.mp3", "One", "One", "A", 1);
+        mp3(root, "A/Two", "01.mp3", "Two", "Two", "A", 1);
+    }
+
+    #[tokio::test]
+    async fn the_copy_with_listening_progress_is_the_one_kept() {
+        let e = env().await;
+        library(&e).await;
+        let src = e
+            .books
+            .join("Jane Author/Saga/Vol 2 - 1999 - Folder Title {Folder Narrator}");
+        copy_dir(&src, &e.books.join("Backup/Folder Title copy"));
+        ab::scan(&e.state.pool).await.unwrap();
+        // Listen to the one that was hidden.
+        let hidden: i64 = sqlx::query("SELECT id FROM audiobooks WHERE duplicate_of IS NOT NULL")
+            .fetch_one(&e.state.pool)
+            .await
+            .unwrap()
+            .get(0);
+        save_position(&e.state.pool, hidden, 1000, 1_800_000_000_000)
+            .await
+            .unwrap();
+        ab::find_duplicates(&e.state.pool).await.unwrap();
+        let now_hidden: i64 =
+            sqlx::query("SELECT id FROM audiobooks WHERE duplicate_of IS NOT NULL")
+                .fetch_one(&e.state.pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_ne!(
+            now_hidden, hidden,
+            "the one you were listening to is the one that shows"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_size_but_different_content_is_not_a_copy_and_a_removed_copy_unhides() {
+        let e = env().await;
+        library(&e).await;
+        // Same layout and sizes, different audio: a different book.
+        let src = e.books.join("Solo Writer/Short Story/story.mp3");
+        let dir = e.books.join("Other Writer/Another Story");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = std::fs::read(&src).unwrap();
+        let n = bytes.len();
+        bytes[n - 10] ^= 0xFF; // one byte differs, the size does not
+        std::fs::write(dir.join("story.mp3"), bytes).unwrap();
+        let r = ab::scan(&e.state.pool).await.unwrap();
+        assert_eq!(r.duplicates, 0, "same size, different bytes: both stay");
+        let differ: i64 =
+            sqlx::query("SELECT COUNT(DISTINCT hash) FROM tracks WHERE path LIKE '%story.mp3'")
+                .fetch_one(&e.state.pool)
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(differ, 2, "they were hashed, and the hashes differ");
+        let (_, list) = call(&e.app, Method::GET, "/api/audiobooks", None).await;
+        assert_eq!(list.as_array().unwrap().len(), 3);
+
+        // A true copy, then remove it: the original is unaffected, and nothing stays hidden.
+        copy_dir(
+            &e.books.join("Solo Writer/Short Story"),
+            &e.books.join("Backup/Short Story"),
+        );
+        assert_eq!(ab::scan(&e.state.pool).await.unwrap().duplicates, 1);
+        std::fs::remove_dir_all(e.books.join("Backup")).unwrap();
+        let r = ab::scan(&e.state.pool).await.unwrap();
+        assert_eq!(r.duplicates, 0);
+        let (_, list) = call(&e.app, Method::GET, "/api/audiobooks", None).await;
+        assert_eq!(list.as_array().unwrap().len(), 3);
     }
 
     /// An m4b with two embedded chapters, made by ffmpeg.

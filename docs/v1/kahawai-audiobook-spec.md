@@ -171,6 +171,6 @@ follows as a fast follow.
 - **Chapters** come from Nero `chpl` atoms only. QuickTime chapter text tracks are not read.
 - **Sessions** are derived on each position update (the latest session ends at the last update), and a day is a UTC day on the server; the player groups by local day.
 - **Extra columns:** `audiobooks.path` (the book's folder), `year`, `meta_edited` (a hand edit is kept across rescans and lookups), `enriched_at` (asked once).
-- **Hashing:** audiobook files are not content-hashed (they are many GB, and duplicate detection is by album).
+- **Duplicate copies:** audiobook files are not all content-hashed (many GB). Only a file that shares its size with another audiobook file is (a copy always does), once, and a book whose files all have the same hashes, in order, as another's is hidden as a copy (`audiobooks.duplicate_of`, migration 016). The copy with listening progress is kept, else the oldest; the hidden one stays in the database, so it comes back if the other goes. The music hash job leaves audiobooks alone.
 - **Online lookup** needs the existing `enrichment_enabled` switch (off by default), because it sends titles off the LAN.
 - **Playback speed** is not a saved engine setting: the book being played decides it, and the engine returns to 1.0 for music. Anything but 1.0 holds exclusive (bit-perfect) output back, like the EQ does.

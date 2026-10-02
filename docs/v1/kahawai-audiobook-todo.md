@@ -32,3 +32,5 @@ Sizes: XS < S < M < L. Spec: [kahawai-audiobook-spec.md](kahawai-audiobook-spec.
 | 25 | Manual metadata edit UI | S | Built | Edit details dialog (`PATCH /api/audiobooks/{id}`); edited books are left alone by rescans and lookups |
 
 Suggested build order: 6 → 1 → 2 → 3 → 4 → 5 → 7 → 8 → 12 → 16 (spike) → 15 → 13 → 14 → 9 → 10 → 11 → 17 → 18 → 19 → 20 → 21 → 22 → 23 → 24 → 25.
+
+Added after the first build: duplicate copies of a book are found by content (see the spec's deviations) and hidden; the Server app has audiobook folders in its wizard and Settings, and Status shows audiobook scanning.

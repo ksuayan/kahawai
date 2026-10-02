@@ -1068,14 +1068,13 @@ pub(crate) fn spawn_scan_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
         let fwd = tokio::spawn(async move {
             let mut last_written = -1.0f64;
             let mut rate = crate::jobs::RateTracker::default();
-            let mut last_files = i64::MIN;
+            let mut every = crate::jobs::Every::new(1000);
             while let Some((done, estimate)) = prx.recv().await {
                 // Live counts, about once a second: a first scan has no
                 // estimate and so no percentage, but still shows how many
                 // files it has got through.
                 let now = crate::jobs::now_ms();
-                if now - last_files >= 1000 {
-                    last_files = now;
+                if every.due(now) {
                     jobs2
                         .set_files(&job_id2, rate.observe(now, done, None, estimate))
                         .await;
@@ -1581,12 +1580,11 @@ pub(crate) fn spawn_hash_job(s: AppState, job: Job, guard: tokio::sync::OwnedMut
         let fwd = tokio::spawn(async move {
             let mut last_written = -1.0f64;
             let mut rate = crate::jobs::RateTracker::default();
-            let mut last_files = i64::MIN;
+            let mut every = crate::jobs::Every::new(1000);
             while let Some((done, total, bytes)) = prx.recv().await {
                 // Live counts, about once a second; the total is exact here.
                 let now = crate::jobs::now_ms();
-                if now - last_files >= 1000 {
-                    last_files = now;
+                if every.due(now) {
                     jobs2
                         .set_files(&job_id2, rate.observe(now, done, Some(bytes), Some(total)))
                         .await;
