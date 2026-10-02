@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 symphonia = { workspace = true }
 symphonia-adapter-libopus = { workspace = true }
+syom = { workspace = true }
 ureq = { workspace = true }
 rusqlite = { workspace = true }
 tracing = { workspace = true }

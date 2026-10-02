@@ -17,6 +17,7 @@ pub mod engine;
 pub mod fader;
 pub mod quality;
 pub mod queue;
+pub mod radio;
 pub mod rangesource;
 pub mod readahead;
 pub mod resample;
