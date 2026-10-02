@@ -42,7 +42,7 @@ watch(() => props.id, (id) => load(id));
 </script>
 
 <template>
-  <ViewShell>
+  <ViewShell width="fluid">
     <UiButton variant="icon" class="mb-3" @click="nav.go('artists')"><ChevronLeft /> Artists</UiButton>
     <StateMessage v-if="loading" kind="loading">Loading artist…</StateMessage>
     <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>

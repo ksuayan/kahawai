@@ -13,11 +13,13 @@
  *  parent scroll too. So the parent must be a flex column (App.vue makes
  *  <main> one, and non-scrolling, while Albums is showing). */
 withDefaults(
-  defineProps<{ title?: string; subtitle?: string; width?: "full" | "wide" | "medium" | "narrow" }>(),
+  defineProps<{ title?: string; subtitle?: string; width?: "full" | "fluid" | "wide" | "medium" | "narrow" }>(),
   { width: "wide" },
 );
 const widths = {
   full: "max-w-none",
+  /** Uncapped width, but an ordinary scrolling page (for non-virtualized card grids). */
+  fluid: "max-w-none",
   wide: "max-w-[1200px]",
   medium: "max-w-[900px]",
   narrow: "max-w-[640px]",
