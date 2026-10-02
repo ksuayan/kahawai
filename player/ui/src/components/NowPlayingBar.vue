@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Info, ListOrdered, TriangleAlert } from "lucide-vue-next";
 import { computed } from "vue";
+import { useAudiobooksStore } from "../stores/audiobooks";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
@@ -8,6 +9,7 @@ import { trackTitle } from "../types";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
 import Artwork from "./Artwork.vue";
+import AudiobookControls from "./AudiobookControls.vue";
 import ConnectionGauge from "./ConnectionGauge.vue";
 import SeekBar from "./SeekBar.vue";
 import TrackMenu from "./TrackMenu.vue";
@@ -17,9 +19,11 @@ import VolumeSlider from "./VolumeSlider.vue";
 const player = usePlayerStore();
 const lib = useLibraryStore();
 const nav = useNavStore();
+const books = useAudiobooksStore();
 
 const track = computed(() => player.currentTrack);
 const artworkHash = computed(() => {
+  if (books.isActive) return books.active?.cover_hash ?? null;
   const t = track.value;
   if (!t?.album_id) return null;
   return lib.albums.find((a) => a.id === t.album_id)?.artwork_hash ?? null;
@@ -63,9 +67,12 @@ function goNowPlaying(): void {
         <Artwork :hash="artworkHash" :size="44" :radius="6" :alt="track ? trackTitle(track) : 'No track'" />
         <div class="min-w-0">
           <div class="truncate font-semibold group-hover:text-accent" data-testid="title">
-            {{ track ? trackTitle(track) : "Nothing playing" }}
+            {{ books.isActive && books.active ? books.active.title : track ? trackTitle(track) : "Nothing playing" }}
           </div>
-          <div class="truncate text-xs text-dim" data-testid="artist">{{ track?.artist ?? "—" }}</div>
+          <div class="truncate text-xs text-dim" data-testid="artist">
+            <template v-if="books.isActive">{{ books.chapter?.title ?? books.active?.title }} · {{ books.active?.author ?? "" }}</template>
+            <template v-else>{{ track?.artist ?? "—" }}</template>
+          </div>
         </div>
         <UiBadge v-if="player.chain" variant="accent" class="ml-1" :title="`Audio chain: ${player.chain}`">
           {{ player.chain }}
@@ -91,6 +98,7 @@ function goNowPlaying(): void {
 
       <!-- center: transport + seek -->
       <div class="flex flex-col items-stretch gap-0.5">
+        <AudiobookControls v-if="books.isActive" />
         <TransportControls :disabled="!track" />
         <SeekBar :disabled="!track" />
       </div>

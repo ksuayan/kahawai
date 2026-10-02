@@ -141,3 +141,25 @@ describe("Reka widgets own their keys (regression: one keypress must not do two 
     expect(ownsKeyboard(null)).toBe(false);
   });
 });
+
+describe("audiobook shortcuts", () => {
+  it("7 opens Audiobooks", () => {
+    const a = actions();
+    handleShortcut(fire("7"), a);
+    expect(a.go).toHaveBeenCalledWith("audiobooks");
+  });
+  it("j and l skip back and forward when the app can skip, and do nothing otherwise", () => {
+    const a = { ...actions(), skip: vi.fn() } as unknown as ShortcutActions & { skip: ReturnType<typeof vi.fn> };
+    expect(handleShortcut(fire("j"), a)).toBe(true);
+    expect(a.skip).toHaveBeenLastCalledWith(-1);
+    expect(handleShortcut(fire("l"), a)).toBe(true);
+    expect(a.skip).toHaveBeenLastCalledWith(1);
+    expect(handleShortcut(fire("j"), actions())).toBe(false);
+  });
+  it("leaves j and l alone while typing", () => {
+    const a = { ...actions(), skip: vi.fn() } as unknown as ShortcutActions & { skip: ReturnType<typeof vi.fn> };
+    const input = el('<input type="text">');
+    expect(handleShortcut(fire("j", input), a)).toBe(false);
+    expect(a.skip).not.toHaveBeenCalled();
+  });
+});

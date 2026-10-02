@@ -42,6 +42,18 @@ export const BUILTIN_PRESETS: EqPreset[] = [
     bands: [lowShelf(80, 2), peak(250, -1.5), peak(2000, 2.5), highShelf(8000, 1.5)],
   },
   {
+    // Audiobook voices: roll off the rumble, ease the boxiness, add presence.
+    id: "builtin:spoken-word",
+    name: "Spoken word",
+    builtin: true,
+    bands: [
+      { band_type: "high_pass", freq: 80, gain_db: 0, q: 0.7 },
+      peak(250, -1, 1),
+      peak(3000, 2, 0.9),
+      peak(4500, 1.5, 1),
+    ],
+  },
+  {
     id: "builtin:talk-show",
     name: "Talk Show",
     builtin: true,

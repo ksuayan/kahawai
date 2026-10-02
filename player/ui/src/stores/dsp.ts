@@ -286,6 +286,22 @@ export const useDspStore = defineStore("dsp", () => {
     if (!eqEnabled.value) await saveEqEnabled(true);
   }
 
+  /**
+   * The audiobook voice settings in one step: the Spoken word EQ preset,
+   * loudness normalisation (books are mastered quiet) and the limiter. These
+   * are the ordinary shared-path settings, so they stay until you change them.
+   */
+  async function applyVoicePreset(): Promise<void> {
+    await applyPreset("builtin:spoken-word");
+    if (!loudnessEnabled.value) await saveLoudnessEnabled(true);
+    if (!limiterEnabled.value) await saveLimiterEnabled(true);
+  }
+
+  /** True while the voice settings are what is set. */
+  const voicePresetOn = computed(
+    () => activePreset.value?.id === "builtin:spoken-word" && eqEnabled.value && loudnessEnabled.value && limiterEnabled.value,
+  );
+
   async function saveLoudnessEnabled(v: boolean): Promise<void> {
     loudnessEnabled.value = v;
     await setLoudnessEnabled(v);
@@ -343,6 +359,8 @@ export const useDspStore = defineStore("dsp", () => {
     saveEqEnabled,
     saveEqPreamp,
     importProfile,
+    applyVoicePreset,
+    voicePresetOn,
     saveLoudnessEnabled,
     saveLimiterEnabled,
     saveCrossfeed,

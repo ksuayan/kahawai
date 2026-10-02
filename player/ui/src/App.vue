@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, provide, ref, watch } from "vue";
 import AlbumsView from "./components/AlbumsView.vue";
+import AudiobookDetail from "./components/AudiobookDetail.vue";
+import AudiobooksView from "./components/AudiobooksView.vue";
 import AlbumDetail from "./components/AlbumDetail.vue";
 import ArtistsView from "./components/ArtistsView.vue";
 import GenreDetail from "./components/GenreDetail.vue";
@@ -22,6 +24,7 @@ import AboutDialog from "./components/AboutDialog.vue";
 import InfoDialog from "./components/InfoDialog.vue";
 import { useAbxStore } from "./stores/abx";
 import { useAnalogStore } from "./stores/analog";
+import { useAudiobooksStore } from "./stores/audiobooks";
 import { useOverlaysStore } from "./stores/overlays";
 import { useToastsStore } from "./stores/toasts";
 import { describeAnalog } from "./types";
@@ -61,13 +64,14 @@ const queue = useQueueStore();
 const playlists = usePlaylistsStore();
 const dsp = useDspStore();
 const analog = useAnalogStore();
+const audiobooks = useAudiobooksStore();
 const jobs = useJobsStore();
 const toasts = useToastsStore();
 const abx = useAbxStore();
 const overlays = useOverlaysStore();
 const serverHealth = useServerHealthStore();
 /** Views that scroll inside a virtualized list or grid of their own. */
-const OWN_SCROLLER = new Set(["albums", "artists", "genre", "album", "search", "queue"]);
+const OWN_SCROLLER = new Set(["albums", "artists", "genre", "album", "search", "queue", "audiobooks"]);
 
 // Cleanup must be registered synchronously: inside the async onMounted below
 // there is no active component instance left after the first await.
@@ -125,10 +129,12 @@ onMounted(async () => {
 function onKeydown(e: KeyboardEvent): void {
   handleShortcut(e, {
     toggle: () => void player.toggle(),
-    seekBy: (d) => void player.seekTo(player.positionMs + d),
+    // In a book the playhead is the whole book, not the file it is in.
+    seekBy: (d) => void (audiobooks.isActive ? audiobooks.seekToOffset(audiobooks.offsetMs + d) : player.seekTo(player.positionMs + d)),
     volumeBy: (d) => void player.changeVolume(Math.min(1, Math.max(0, player.volume + d))),
-    next: () => void player.nextTrack(),
-    prev: () => void player.prevTrack(),
+    next: () => void (audiobooks.isActive ? audiobooks.nextChapter() : player.nextTrack()),
+    prev: () => void (audiobooks.isActive ? audiobooks.previousChapter() : player.prevTrack()),
+    skip: (d) => void (audiobooks.isActive ? audiobooks.skip(d) : undefined),
     go: (v) => nav.go(v),
     ab: (which) => switchAnalog(which),
   });
@@ -186,6 +192,8 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
         >
           <AlbumsView v-if="nav.view.name === 'albums'" />
           <AlbumDetail v-else-if="nav.view.name === 'album'" :id="nav.view.id ?? 0" />
+          <AudiobooksView v-else-if="nav.view.name === 'audiobooks'" />
+          <AudiobookDetail v-else-if="nav.view.name === 'audiobook'" :id="nav.view.id ?? 0" />
           <ArtistsView v-else-if="nav.view.name === 'artists'" />
           <ArtistDetail v-else-if="nav.view.name === 'artist'" :id="nav.view.id ?? 0" />
           <GenresView v-else-if="nav.view.name === 'genres'" />

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { useAudiobooksStore } from "../stores/audiobooks";
 import { usePlayerStore } from "../stores/player";
 import { formatDuration } from "../types";
 import UiSlider from "../ui/UiSlider.vue";
@@ -17,11 +18,14 @@ const props = withDefaults(defineProps<{ disabled?: boolean; size?: "sm" | "md" 
 });
 
 const player = usePlayerStore();
+const books = useAudiobooksStore();
+/** A book plays as one piece: the bar spans the whole book, not the file. */
+const book = computed(() => (books.isActive ? books.active : null));
 const scrubbing = ref(false);
 const scrubValue = ref(0);
 
-const duration = computed(() => player.durationMs ?? 0);
-const shown = computed(() => (scrubbing.value ? scrubValue.value : player.positionMs));
+const duration = computed(() => (book.value ? book.value.duration_ms : (player.durationMs ?? 0)));
+const shown = computed(() => (scrubbing.value ? scrubValue.value : book.value ? books.offsetMs : player.positionMs));
 const isDisabled = computed(() => props.disabled || duration.value <= 0);
 
 function onUpdate(v: number): void {
@@ -32,7 +36,7 @@ function onUpdate(v: number): void {
 function onCommit(v: number): void {
   scrubValue.value = v;
   scrubbing.value = false;
-  void player.seekTo(v);
+  void (book.value ? books.seekToOffset(v) : player.seekTo(v));
 }
 
 const timeClass = computed(() =>
@@ -53,7 +57,7 @@ const timeClass = computed(() =>
       :max="duration"
       :step="1000"
       :disabled="isDisabled"
-      :buffered="player.bufferedMs"
+      :buffered="book ? null : player.bufferedMs"
       @update:model-value="onUpdate"
       @commit="onCommit"
     />

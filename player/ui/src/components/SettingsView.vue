@@ -32,6 +32,7 @@ import AnalogSection from "./AnalogSection.vue";
 import EqEditor from "./EqEditor.vue";
 import CrossfeedSection from "./CrossfeedSection.vue";
 import LimiterSection from "./LimiterSection.vue";
+import AudiobookSection from "./AudiobookSection.vue";
 import SettingsSection from "./SettingsSection.vue";
 
 const settings = useSettingsStore();
@@ -312,6 +313,10 @@ const dopRates = computed(() =>
       >
         Free software (GNU AGPL v3 or later). Source code: {{ check.identity.source_url }}
       </p>
+    </SettingsSection>
+
+    <SettingsSection title="Audiobooks">
+      <AudiobookSection />
     </SettingsSection>
 
     <SettingsSection title="Audio output">

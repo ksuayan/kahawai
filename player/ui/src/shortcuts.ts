@@ -14,6 +14,8 @@ export interface ShortcutActions {
   next(): void;
   prev(): void;
   go(view: NavState["name"]): void;
+  /** Audiobook skip, in the book's own seconds: -1 back, 1 forward. Optional; keys j and l. */
+  skip?(direction: 1 | -1): void;
   /** Analog warmth A/B: listen to slot A, slot B, or switch. Optional. */
   ab?(which: "a" | "b" | "toggle"): void;
 }
@@ -54,6 +56,7 @@ const VIEW_KEYS: Record<string, NavState["name"]> = {
   "4": "search",
   "5": "queue",
   "6": "settings",
+  "7": "audiobooks",
   f: "search",
   g: "genres",
 };
@@ -102,6 +105,16 @@ export function handleShortcut(e: KeyboardEvent, a: ShortcutActions): boolean {
     case "p":
     case "P":
       a.prev();
+      return true;
+    case "j":
+    case "J":
+      if (!a.skip) return false;
+      a.skip(-1);
+      return true;
+    case "l":
+    case "L":
+      if (!a.skip) return false;
+      a.skip(1);
       return true;
     case "a":
     case "A":

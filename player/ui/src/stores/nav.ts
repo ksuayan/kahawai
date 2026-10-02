@@ -7,20 +7,21 @@ export type ViewName =
   | "artists"
   | "genres"
   | "playlists"
+  | "audiobooks"
   | "search"
   | "queue"
   | "settings";
 
 export interface NavState {
-  name: ViewName | "album" | "artist" | "playlist" | "genre" | "nowplaying";
+  name: ViewName | "album" | "artist" | "playlist" | "genre" | "audiobook" | "nowplaying";
   id?: number;
   /** The genre a "genre" view shows (genres are named, not numbered). */
   genre?: string;
 }
 
 const KEY = "kahawai.nav";
-const LISTS = ["albums", "artists", "genres", "playlists", "search", "queue", "settings", "nowplaying"];
-const BY_ID = ["album", "artist", "playlist"];
+const LISTS = ["albums", "artists", "genres", "playlists", "audiobooks", "search", "queue", "settings", "nowplaying"];
+const BY_ID = ["album", "artist", "playlist", "audiobook"];
 
 /** The view the app was on when it quit, if it still makes sense. */
 function lastView(): NavState {

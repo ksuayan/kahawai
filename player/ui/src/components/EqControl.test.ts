@@ -21,7 +21,7 @@ beforeEach(() => localStorage.clear());
 
 describe("EqControl", () => {
   it("offers Flat, Classical, Jazz, Rock, Pop and Talk Show", () => {
-    expect(BUILTIN_PRESETS.map((p) => p.name)).toEqual(["Flat", "Classical", "Jazz", "Rock", "Pop", "Talk Show"]);
+    expect(BUILTIN_PRESETS.map((p) => p.name)).toEqual(["Flat", "Classical", "Jazz", "Rock", "Pop", "Spoken word", "Talk Show"]);
     for (const p of BUILTIN_PRESETS) expect(p.bands.length).toBeLessThanOrEqual(8);
   });
 

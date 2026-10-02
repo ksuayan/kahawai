@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { Disc3, Info, Tags, ListMusic, ListOrdered, MicVocal, Moon, Search, Settings, Sun } from "lucide-vue-next";
+import { BookOpen, Disc3, Info, Tags, ListMusic, ListOrdered, MicVocal, Moon, Search, Settings, Sun } from "lucide-vue-next";
 import { useNavStore, type NavState } from "../stores/nav";
 import { useOverlaysStore } from "../stores/overlays";
 import { useQueueStore } from "../stores/queue";
@@ -17,6 +17,7 @@ const items: { name: NavState["name"]; label: string; key: string; icon: Compone
   { name: "artists", label: "Artists", key: "2", icon: MicVocal },
   { name: "genres", label: "Genres", key: "g", icon: Tags },
   { name: "playlists", label: "Playlists", key: "3", icon: ListMusic },
+  { name: "audiobooks", label: "Audiobooks", key: "7", icon: BookOpen },
   { name: "search", label: "Search", key: "4", icon: Search },
   { name: "queue", label: "Queue", key: "5", icon: ListOrdered },
 ];
@@ -27,6 +28,7 @@ const active = computed(() => {
   if (v === "artist") return "artists";
   if (v === "genre") return "genres";
   if (v === "playlist") return "playlists";
+  if (v === "audiobook") return "audiobooks";
   return v;
 });
 </script>
