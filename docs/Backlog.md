@@ -87,7 +87,7 @@ Related: "Move user EQ presets out of the webview" (EQ and audio, above) decides
 
 ## Server: features from the v2 specs (built)
 
-Every spec below is built, and its doc now lives in `docs/v1/` (`docs/v2/` is empty until a new spec is written). VLC still needs verification on a real VLC. The "Why / notes" text is each row's own record of what was built and what is left.
+Every spec below is built, and its doc now lives in `docs/v1/` (`docs/v2/` holds only specs not yet started; today that is Internet radio and Podcasts, below). VLC still needs verification on a real VLC. The "Why / notes" text is each row's own record of what was built and what is left.
 
 | Item | Why / notes | Details | Status |
 |---|---|---|---|
@@ -135,7 +135,16 @@ Built on `claude/audiobook` (spec and build list in [v1/kahawai-audiobook-spec.m
 | **Skip re-reading unchanged audiobook files** | Every audiobook scan re-reads the tags of every file (fine on a local disk, slow over SMB for a big shelf). Keep the size and mtime check the music scan uses and rebuild a book only when one of its files changed. | Size: **M**<br>Phase: **v1 polish**<br>Priority: **P3** | **Not started** |
 | **Narrator source** | Narrator comes from the `{Narrator}` folder convention, the composer tag, or a hand edit. No open database has it, and Audible must not be scraped. If one appears, add it to the lookup chain in [book_meta.rs](../crates/kahawai-server/src/book_meta.rs). | Size: **S**<br>Phase: **Research**<br>Priority: **P3** | **Not started** |
 | **Audiobook polish** | Smart rewind (back up a few seconds after a long pause), a speed key, a generated cover for a book with none, chapter titles in the sleep timer's end-of-chapter label, per-book "skip silence", the audiobook controls on the full Now Playing screen, and a Mac media-key skip. | Size: **M**<br>Phase: **v1 polish**<br>Priority: **P3** | **Not started** |
-| **Podcasts, DRM books, accounts** | Out of scope for v1 by the spec: podcasts (the schema leaves room), Audible `.aax` and any DRM (never), accounts or passwords (several named *listeners* are supported instead — see the audiobook spec; `user_id` 0 is the Default listener), cloud sync (the LAN server is the sync point). Librivox is parked. | Size: **n/a**<br>Phase: **n/a**<br>Priority: **n/a** | **Won't do** |
+| **Podcasts, DRM books, accounts** | Out of scope for v1 by the spec: podcasts (now specced separately for after v1: see Internet radio and podcasts), Audible `.aax` and any DRM (never), accounts or passwords (several named *listeners* are supported instead — see the audiobook spec; `user_id` 0 is the Default listener), cloud sync (the LAN server is the sync point). Librivox is parked. | Size: **n/a**<br>Phase: **n/a**<br>Priority: **n/a** | **Won't do** |
+
+## Internet radio and podcasts (specs, not started)
+
+Two specs in `docs/v2/`, each with a build list: [kahawai-radio-spec.md](v2/kahawai-radio-spec.md) / [kahawai-radio-todo.md](v2/kahawai-radio-todo.md) and [kahawai-podcast-spec.md](v2/kahawai-podcast-spec.md) / [kahawai-podcast-todo.md](v2/kahawai-podcast-todo.md). Move each pair to `docs/v1/` when built. Rough sizing: counting XS = 0.5, S = 1.5 and M = 4 focused days (an estimate, not a measurement), the v1 slices come to about 22 days for radio (items 1-13) and about 35 for podcasts (items 1-18); everything listed comes to about 40 days each. Radio is the smaller, riskier job (it hinges on whether the decoder handles AAC+ streams, which the spec makes the first spike); podcasts are larger but mostly known work that reuses the audiobook machinery.
+
+| Item | Why / notes | Details | Status |
+|---|---|---|---|
+| **Internet radio** | Browse radio-browser.info, play streams directly with live track titles (ICY), favorites on the server, then recording, timeshift, sleep timer and alarm. v1 is D1-D4. First task: check that AAC/AAC+ streams decode (the player decodes with Symphonia, which is not known to handle HE-AAC), since most stations use it. | Size: **L** (v1 ~22 days)<br>Phase: **v2**<br>Priority: **P2** | **Not started** |
+| **Podcasts** | Subscribe by URL or OPML, refresh feeds, download episodes on the server, resume per episode, reusing the audiobook speed, skip and sleep-timer code. v1 is D1-D5. First task: run the feed parser against real feeds. | Size: **L** (v1 ~35 days)<br>Phase: **v2**<br>Priority: **P2** | **Not started** |
 
 ## Look and feel
 
