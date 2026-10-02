@@ -11,6 +11,10 @@ rust-version = "1.85"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Mobile (Android/iOS) builds the Rust core as a cdylib loaded via JNI.
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [dependencies]
 # `devtools`: the Web Inspector in release builds too, but only when the
 # user turns on Settings > Developer tools (off by default; see

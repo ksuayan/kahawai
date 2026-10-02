@@ -1,1 +1,52 @@
-{"$schema":"https://schema.tauri.app/config/2","app":{"security":{"csp":null},"windows":[{"height":860,"minHeight":600,"minWidth":900,"title":"Kahawai Player","width":1280,"label":"main","create":false}]},"build":{"beforeBuildCommand":"npm --prefix ui run build","beforeDevCommand":"npm --prefix ../ui run dev","devUrl":"http://localhost:1420","frontendDist":"../ui/dist"},"bundle":{"active":true,"category":"Music","icon":["icons/32x32.png","icons/128x128.png","icons/128x128@2x.png","icons/icon.icns","icons/icon.ico"],"macOS":{"minimumSystemVersion":"11.0","signingIdentity":"-"},"targets":"all","windows":{"wix":null},"copyright":"Copyright (c) 2026 Kyo Suayan. Licensed under the GNU AGPL v3 or later.","license":"AGPL-3.0-or-later"},"identifier":"com.suayan.kahawai-player","productName":"Kahawai Player","version":"0.1.0"}
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "height": 860,
+        "minHeight": 600,
+        "minWidth": 900,
+        "title": "Kahawai Player",
+        "width": 1280,
+        "label": "main",
+        "create": false
+      }
+    ]
+  },
+  "build": {
+    "beforeBuildCommand": "npm --prefix ui run build",
+    "beforeDevCommand": "npm --prefix ../ui run dev",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../ui/dist"
+  },
+  "bundle": {
+    "active": true,
+    "category": "Music",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    },
+    "targets": "all",
+    "windows": {
+      "wix": null
+    },
+    "copyright": "Copyright (c) 2026 Kyo Suayan. Licensed under the GNU AGPL v3 or later.",
+    "license": "AGPL-3.0-or-later",
+    "android": {
+      "minSdkVersion": 26
+    }
+  },
+  "identifier": "com.suayan.kahawai-player",
+  "productName": "Kahawai Player",
+  "version": "0.1.0"
+}

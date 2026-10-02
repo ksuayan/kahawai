@@ -83,6 +83,9 @@ back to the workspace.
 | `start-server.sh` / `start-client.sh` | Run built binaries; `-d` backgrounds the server, `--dev` runs the player's Tauri dev mode. |
 | `start-dev-combined.sh` | Iterative dev: both the server's wizard UI (`:1421`) and the player (`:1420`) via `cargo tauri dev`, hot-reloading, in parallel. macOS only. |
 | `build-*-universal.sh`, `build-combined-dmg.sh` | Release bundles (Mac-only, universal binaries). |
+| `build-android.sh` | Player Rust core for Android (`libkahawai_player.so`) with plain cargo; sets the NDK compilers. `x86_64` for the emulator, `--release` optional. |
+| `start-dev-android.sh` | Player on the Android emulator in `cargo tauri android dev` (boots the AVD, generates `gen/android` if missing). Server URL inside the emulator: `http://10.0.2.2:8080`. |
+| `android-env.sh` | Sourced by the Android scripts (JDK 17+, `ANDROID_HOME`, `NDK_HOME`); `source` it in your own shell too. |
 
 ## Conventions worth knowing before editing
 
