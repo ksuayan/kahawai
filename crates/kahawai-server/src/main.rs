@@ -25,6 +25,8 @@ mod logfile;
 mod menu;
 mod musicbrainz;
 mod normalize;
+mod radio;
+mod radio_api;
 mod resample;
 mod scanner;
 mod stream;
@@ -171,6 +173,29 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/audiobook-listeners/{id}",
             axum::routing::delete(audiobooks_api::delete_listener),
+        )
+        .route("/api/radio/search", get(radio_api::search))
+        .route("/api/radio/facets/{kind}", get(radio_api::facets))
+        .route("/api/radio/probe", post(radio_api::probe))
+        .route(
+            "/api/radio/favorites",
+            get(radio_api::list_favorites).post(radio_api::add_favorite),
+        )
+        .route(
+            "/api/radio/favorites/order",
+            put(radio_api::reorder_favorites),
+        )
+        .route(
+            "/api/radio/favorites/{id}",
+            axum::routing::patch(radio_api::edit_favorite).delete(radio_api::delete_favorite),
+        )
+        .route(
+            "/api/radio/favorites/{id}/play",
+            post(radio_api::play_favorite),
+        )
+        .route(
+            "/api/radio/history",
+            get(radio_api::history).post(radio_api::add_history),
         )
         .route("/api/audiobooks", get(audiobooks_api::list_books))
         .route("/api/audiobooks/scan", post(audiobooks_api::trigger_scan))

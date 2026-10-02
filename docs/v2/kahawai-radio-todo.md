@@ -5,10 +5,10 @@ Sizes: XS < S < M < L. Spec: `kahawai-radio-spec.md` (2026-10-02).
 
 | # | Feature | Size | Status | Notes |
 |---|---------|------|--------|-------|
-| 1 | radio-browser.info mirror resolution + proxied search API + 24 h cache | S | Not started | D1; `GET /api/radio/search`; verify endpoints vs their docs at build |
-| 2 | Station URL resolve via `/json/url/{uuid}` (counts the click) | XS | Not started | D1 |
-| 3 | `radio_favorites` table + CRUD/reorder API | S | Not started | D2 |
-| 4 | Manual station add + stream probe (codec/bitrate sniff) | S | Not started | D2; `station_uuid` NULL = manual |
+| 1 | radio-browser.info mirror resolution + proxied search API + 24 h cache | S | Built (server; verify against the live API) | D1; `GET /api/radio/search`; verify endpoints vs their docs at build |
+| 2 | Station URL resolve via `/json/url/{uuid}` (counts the click) | XS | Built (`POST /api/radio/favorites/{id}/play`) | D1 |
+| 3 | `radio_favorites` table + CRUD/reorder API | S | Built | D2 |
+| 4 | Manual station add + stream probe (codec/bitrate sniff) | S | Built | D2; `station_uuid` NULL = manual |
 | 5 | Favorites sync to player + offline list cache | S | Not started | D2 |
 | 6 | Direct stream connect + ICY metadata parsing (`StreamTitle`) | M | Not started | D3; tolerate metadata-less stations |
 | 7 | StreamTitle → now-playing + `radio_history` logging | S | Not started | D3 |

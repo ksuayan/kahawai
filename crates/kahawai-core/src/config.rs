@@ -61,6 +61,16 @@ pub struct ServerConfig {
     /// LAN, so it is opt-in.
     #[serde(default)]
     pub enrichment_enabled: bool,
+    /// Use the online station directory (radio-browser.info) and podcast
+    /// directory (Apple's iTunes Search): the search words you type go to
+    /// those services. Default off. Stations and feeds you add by hand, and
+    /// everything already saved, work without it.
+    #[serde(default)]
+    pub online_sources_enabled: bool,
+    /// Test seam and escape hatch: use this radio-browser.info compatible
+    /// server instead of resolving the public mirrors.
+    #[serde(default)]
+    pub radio_browser_url: Option<String>,
     /// How sure a lookup must be before an album takes its result, 0.5-1.0.
     /// Below it the album is left unmatched: a wrong ID is worse than none.
     #[serde(default = "default_min_confidence")]
@@ -166,6 +176,8 @@ impl Default for ServerConfig {
             dsd_story: DsdStory::default(),
             scan_on_startup: false,
             enrichment_enabled: false,
+            online_sources_enabled: false,
+            radio_browser_url: None,
             enrichment_min_confidence: default_min_confidence(),
             transcode_cache_mb: default_transcode_cache_mb(),
         }

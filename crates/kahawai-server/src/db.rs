@@ -86,6 +86,7 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             17,
             include_str!("../migrations/017_audiobook_listeners.sql"),
         ),
+        (18, include_str!("../migrations/018_radio.sql")),
     ];
     // One connection throughout: `PRAGMA foreign_keys` is per connection, and
     // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off
@@ -464,7 +465,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
 
         // Old row survived; new columns carry their defaults.
@@ -549,7 +550,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
@@ -620,7 +621,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
         let r =
             sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
@@ -810,13 +811,13 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
         );
     }
 }
