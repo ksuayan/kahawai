@@ -272,3 +272,31 @@ describe("SettingsTab: audiobook folders", () => {
     expect(wrapper.text()).toContain("/srv/empty is not a folder");
   });
 });
+
+describe("SettingsTab: online sources", () => {
+  it("is off by default and turning it on tells the server", async () => {
+    inTauri();
+    tauri.on("setup_online_sources", false).on("setup_set_online_sources", undefined);
+    const { wrapper } = boot();
+    await settle();
+    const box = wrapper.get('[data-testid="online-sources"]');
+    expect((box.element as HTMLInputElement).checked).toBe(false);
+    tauri.on("setup_online_sources", true);
+    await box.setValue(true);
+    await settle();
+    expect(tauri.callsTo("setup_set_online_sources")).toEqual([{ enabled: true }]);
+    expect((wrapper.get('[data-testid="online-sources"]').element as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("shows the reason when the server refuses", async () => {
+    inTauri();
+    tauri.on("setup_online_sources", false).on("setup_set_online_sources", () => {
+      throw new Error("could not save the config");
+    });
+    const { wrapper } = boot();
+    await settle();
+    await wrapper.get('[data-testid="online-sources"]').setValue(true);
+    await settle();
+    expect(wrapper.text()).toContain("could not save the config");
+  });
+});

@@ -5,14 +5,17 @@ import UiHint from "../ui/UiHint.vue";
 import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import { computed, onMounted } from "vue";
 import { useEnrichmentStore } from "../stores/enrichment";
+import { useOnlineSourcesStore } from "../stores/onlineSources";
 import { setupRevealLogs } from "../tauri";
 import { useSetupStore } from "../stores/setup";
 import { bookDirChipClass, bookDirChipText, CONFIDENCE_LEVELS, dirChipClass, dirChipText } from "../types";
 
 const setup = useSetupStore();
 const enrich = useEnrichmentStore();
+const online = useOnlineSourcesStore();
 onMounted(() => {
   void enrich.load();
+  void online.load();
   // Opened before the running server's folders were read (it was still
   // starting): read them now.
   if (setup.runningDirs.length === 0 && setup.pendingRemoves.length === 0) void setup.loadRunningConfig();
@@ -243,6 +246,25 @@ const jobLine = computed(() => {
       </UiButton>
     </div>
     <UiHint v-if="enrich.error" tone="warn">{{ enrich.error }}</UiHint>
+
+    <h3 class="heading-3 mb-2 mt-4">Online sources</h3>
+    <label class="mb-1 flex items-center gap-2 text-[13px]">
+      <input
+        type="checkbox"
+        data-testid="online-sources"
+        :checked="online.enabled ?? false"
+        :disabled="online.enabled === null || online.busy"
+        @change="online.setEnabled(($event.target as HTMLInputElement).checked)"
+      />
+      Search the online radio and podcast directories
+    </label>
+    <UiHint tone="faint">
+      Off by default. When on, the words you search for are sent to radio-browser.info (internet radio
+      stations) and Apple's iTunes Search (podcasts), and the server asks radio-browser.info for a
+      station's current address when you play it. Stations and podcasts you have already saved, or
+      added by their address, work either way.
+    </UiHint>
+    <UiHint v-if="online.error" tone="warn">{{ online.error }}</UiHint>
 
     <h3 class="heading-3 mb-2 mt-4">Advanced</h3>
     <UiHint tone="faint">

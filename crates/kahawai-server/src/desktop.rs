@@ -704,6 +704,30 @@ pub async fn setup_set_enrichment(
     on_disk.save(&path).map_err(|e| e.to_string())
 }
 
+/// Whether the online station and podcast directories are on (Settings →
+/// Online sources). Off by default.
+#[tauri::command]
+pub async fn setup_online_sources(state: tauri::State<'_, DesktopState>) -> Result<bool, String> {
+    let app_state = live_state(&state)?;
+    let on = app_state.config.read().unwrap().online_sources_enabled;
+    Ok(on)
+}
+
+/// Turn the online directories on or off: applied live and saved to the
+/// config file. Stations and feeds already saved keep working either way.
+#[tauri::command]
+pub async fn setup_set_online_sources(
+    enabled: bool,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<(), String> {
+    let app_state = live_state(&state)?;
+    app_state.config.write().unwrap().online_sources_enabled = enabled;
+    let path = ServerConfig::resolve_path(None).map_err(|e| e.to_string())?;
+    let mut on_disk = ServerConfig::load(&path).unwrap_or_default();
+    on_disk.online_sources_enabled = enabled;
+    on_disk.save(&path).map_err(|e| e.to_string())
+}
+
 /// Start, pause, resume or cancel album info lookup, or retry the albums it
 /// couldn't find ("retry"). `job_id` is needed for
 /// all but start.

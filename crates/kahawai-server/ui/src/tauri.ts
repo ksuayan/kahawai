@@ -120,6 +120,17 @@ export async function setupSetEnrichment(enabled: boolean, minConfidence: number
   await invoke("setup_set_enrichment", { enabled, minConfidence });
 }
 
+/** Settings → Online sources. `undefined` when no server is running. */
+export async function setupOnlineSources(): Promise<boolean | undefined> {
+  return cmd<boolean>("setup_online_sources");
+}
+
+/** Turn the online station and podcast directories on/off (live and saved).
+ *  Throws the backend's error string. */
+export async function setupSetOnlineSources(enabled: boolean): Promise<void> {
+  await invoke("setup_set_online_sources", { enabled });
+}
+
 /** Start, pause, resume or cancel a lookup. Throws the backend's error string. */
 export async function setupEnrichmentAction(action: EnrichAction, jobId?: string): Promise<void> {
   await invoke("setup_enrichment_action", { action, jobId: jobId ?? null });

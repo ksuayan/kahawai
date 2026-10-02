@@ -326,6 +326,8 @@ fn main() {
             desktop::setup_live_scan_stats,
             desktop::setup_enrichment_status,
             desktop::setup_set_enrichment,
+            desktop::setup_online_sources,
+            desktop::setup_set_online_sources,
             desktop::setup_enrichment_action,
             desktop::setup_start_server,
             desktop::setup_stop_server,
