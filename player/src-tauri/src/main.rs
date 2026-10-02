@@ -947,6 +947,15 @@ fn set_eq_preamp(app: AppHandle, state: State<'_, AppState>, db: f32) {
     emit_state(&app, &state.engine);
 }
 
+/// Playback speed, 0.5 to 3.0 with the pitch kept (audiobooks). Not saved:
+/// the book being played decides it. Anything but 1.0 holds exclusive output
+/// back, since it changes the samples.
+#[tauri::command]
+fn set_playback_rate(app: AppHandle, state: State<'_, AppState>, rate: f32) {
+    state.engine.set_playback_rate(rate);
+    emit_state(&app, &state.engine);
+}
+
 /// Loudness target in LUFS (default −14). Enabling triggers one extra
 /// stream per first-play (pre-scan); gains are cached by (track, format).
 /// PCM only — DoP bypasses loudness.
@@ -1339,6 +1348,7 @@ fn main() {
             set_eq_bands,
             set_eq_enabled,
             set_eq_preamp,
+            set_playback_rate,
             set_analog,
             set_loudness_target,
             set_loudness_enabled,

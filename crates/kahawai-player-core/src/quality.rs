@@ -27,3 +27,4 @@ pub const BLOCKER_LOUDNESS: &str = "Loudness";
 pub const BLOCKER_ANALOG: &str = "Analog";
 pub const BLOCKER_LIMITER: &str = "Limiter";
 pub const BLOCKER_VOLUME: &str = "Volume";
+pub const BLOCKER_SPEED: &str = "Playback speed";

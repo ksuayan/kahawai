@@ -243,6 +243,11 @@ export async function setEqEnabled(enabled: boolean): Promise<void> {
   await cmd("set_eq_enabled", { enabled });
 }
 
+/** Playback speed, 0.5 to 3.0, pitch kept. Not saved: the book being played decides it. */
+export async function setPlaybackRate(rate: number): Promise<void> {
+  await cmd("set_playback_rate", { rate });
+}
+
 /** The EQ's preamp in dB (headroom for its boosts); in effect only while the EQ is on. */
 export async function setEqPreamp(db: number): Promise<void> {
   await cmd("set_eq_preamp", { db });

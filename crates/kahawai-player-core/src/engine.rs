@@ -41,12 +41,13 @@ use crate::dsp::{
 use crate::fader::AmpRamp;
 use crate::quality::{
     QualityMode, BLOCKER_ANALOG, BLOCKER_CROSSFEED, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS,
-    BLOCKER_VOLUME,
+    BLOCKER_SPEED, BLOCKER_VOLUME,
 };
 use crate::queue::{Queue, RepeatMode};
 use crate::rangesource::SeekableControl;
 use crate::resample::CubicResampler;
 use crate::sink::{AudioSink, OutputPath, PcmChunk};
+use crate::timestretch::TimeStretch;
 use crate::transport::{HttpTransport, StreamInfo, StreamOptions, StreamProgress, Transport};
 use crate::worker::{ChunkWorker, Polled};
 
@@ -212,6 +213,9 @@ pub struct PlayerSnapshot {
     /// `None` when the limiter is off or the path bypasses it.
     #[serde(default)]
     pub limiter_gr_db: Option<f32>,
+    /// Playback speed (1.0 = as recorded); pitch is kept at any speed.
+    #[serde(default = "unit_rate")]
+    pub playback_rate: f32,
     /// The rendition actually streaming (explicit `?format=` value).
     pub format: Option<StreamFormat>,
     /// `X-Transcode-Chain` of the active response.
@@ -234,6 +238,10 @@ pub struct PlayerSnapshot {
     pub shuffle: bool,
 }
 
+fn unit_rate() -> f32 {
+    1.0
+}
+
 impl Default for PlayerSnapshot {
     fn default() -> Self {
         Self {
@@ -253,6 +261,7 @@ impl Default for PlayerSnapshot {
             analog_plan: None,
             analog_level: None,
             limiter_gr_db: None,
+            playback_rate: 1.0,
             format: None,
             chain: None,
             output_path: OutputPath::Pcm,
@@ -346,8 +355,11 @@ struct PcmStream {
     sink_rate: u32,
     /// Decoded frames (pre-resample) consumed from the response.
     decoded_frames: u64,
-    /// Frames written to the sink (post-resample).
+    /// Frames of the *media* played out (post-resample). At a playback speed
+    /// other than 1.0 this runs faster or slower than the frames written.
     pumped_frames: u64,
+    /// The playback speed the last chunk was processed at.
+    play_rate: f32,
     /// Position offset in sink-rate frames (transcode `?seek_ms=`).
     base_frames: u64,
     /// Passthrough seek: decode-and-drop this many frames before writing.
@@ -439,7 +451,10 @@ impl ActiveStream {
     fn position_ms(&self, buffered: u64) -> u64 {
         match self {
             ActiveStream::Pcm(a) => {
-                let played = a.pumped_frames.saturating_sub(buffered);
+                // `buffered` counts frames queued at the sink, which at a
+                // playback speed hold `play_rate` times as much media.
+                let queued = (buffered as f64 * a.play_rate as f64) as u64;
+                let played = a.pumped_frames.saturating_sub(queued);
                 (a.base_frames + played) * 1000 / a.sink_rate as u64
             }
             ActiveStream::Dop(a) => {
@@ -648,6 +663,11 @@ pub struct Player {
     /// [`Player::set_eq_preamp`]).
     eq_preamp_db: f32,
     preamp_ramp: GainRamp,
+    /// Playback speed, and the pitch-preserving stage that provides it (see
+    /// [`Player::set_playback_rate`]). Not a saved setting: the audiobook
+    /// the player is on decides it.
+    playback_rate: f32,
+    stretch: TimeStretch,
     /// Moves the volume to `volume` per frame, so a change never lands as a
     /// step (see [`AmpRamp`]).
     volume_ramp: AmpRamp,
@@ -723,6 +743,8 @@ impl Player {
             volume: 1.0,
             eq_preamp_db: 0.0,
             preamp_ramp: GainRamp::new(2205),
+            playback_rate: 1.0,
+            stretch: TimeStretch::new(2, 44100),
             volume_ramp: AmpRamp::new(441),
             active: None,
             error: None,
@@ -896,6 +918,9 @@ impl Player {
                 || self.eq_preamp_db.abs() > 0.05)
         {
             b.push(BLOCKER_EQ);
+        }
+        if self.playback_rate != 1.0 {
+            b.push(BLOCKER_SPEED);
         }
         if self.loudness.enabled() {
             b.push(BLOCKER_LOUDNESS);
@@ -1309,6 +1334,16 @@ impl Player {
         } else {
             0.0
         };
+        self.reconsider_exclusive();
+    }
+
+    /// Playback speed, 0.5 to 3.0 (NaN means 1.0), with the pitch kept. Takes
+    /// effect from the next chunk, with no seam. Anything but exactly 1.0
+    /// processes the audio, so it holds exclusive output back like the other
+    /// processing does.
+    pub fn set_playback_rate(&mut self, rate: f32) {
+        self.stretch.set_rate(rate);
+        self.playback_rate = self.stretch.rate();
         self.reconsider_exclusive();
     }
 
@@ -1819,6 +1854,8 @@ impl Player {
         self.meter_out.set_sample_rate(sink_rate);
         self.limiter.prepare(sink_rate);
         self.peak_out = 0.0;
+        self.stretch.prepare(sink_rate, spec.channels as usize);
+        self.stretch.set_rate(self.playback_rate);
 
         // The playhead starts at the seek target for *both* seek styles.
         // (Passthrough skips decoded frames without counting them as
@@ -1848,6 +1885,7 @@ impl Player {
             sink_rate,
             decoded_frames: 0,
             pumped_frames: 0,
+            play_rate: 1.0,
             base_frames,
             skip_frames,
             bit_perfect,
@@ -2061,7 +2099,16 @@ impl Player {
                 return;
             }
         };
-        let decoded_frames = pcm.len() / channels.max(1);
+        let mut decoded_frames = pcm.len() / channels.max(1);
+        // At the end of the stream the speed change is still holding back
+        // its last frame: play it out through the chain before ending.
+        let mut pcm = pcm;
+        let mut flushed_tail = false;
+        if decoded_frames == 0 && self.stretch.has_pending() {
+            self.stretch.flush(&mut pcm);
+            decoded_frames = pcm.len() / channels.max(1);
+            flushed_tail = decoded_frames > 0;
+        }
         if decoded_frames == 0 {
             // A response that never yields audio is skipped, but a streak
             // longer than the queue means every track is poison - fail
@@ -2081,11 +2128,14 @@ impl Player {
         }
         self.empty_streak = 0;
         let preamp_db = self.preamp_db_in_effect();
+        let play_rate = self.playback_rate;
         let active = match self.active.as_mut() {
             Some(ActiveStream::Pcm(a)) => a,
             _ => return,
         };
-        active.decoded_frames += decoded_frames as u64;
+        if !flushed_tail {
+            active.decoded_frames += decoded_frames as u64;
+        }
 
         // Passthrough seek: drop frames until the target.
         let mut frames = &pcm[..decoded_frames * channels];
@@ -2129,7 +2179,19 @@ impl Player {
         // (belt and suspenders; a no-op once the limiter holds the ceiling).
         // Crossfeed first: it models speakers, and the EQ corrects the
         // headphones, so the EQ shapes what the ear will actually receive.
-        let mut chunk: Vec<f32> = out.to_vec();
+        // The speed change goes first, on the clean decoded signal (bit-exact
+        // copy at 1.0), so everything after it works on what will be heard.
+        let media_before = self.stretch.media_frames();
+        let mut chunk: Vec<f32> = Vec::with_capacity(out.len());
+        if flushed_tail {
+            // Already stretched by `flush`.
+            chunk.extend_from_slice(out);
+        } else {
+            self.stretch.process(out, &mut chunk);
+        }
+        let media_frames = self.stretch.media_frames() - media_before;
+        let stretched_frames = chunk.len() / channels;
+        active.play_rate = play_rate;
         self.crossfeed.process(&mut chunk, channels);
         self.eq.process(&mut chunk, channels);
         // The EQ's preamp (headroom for its boosts), ramped so a change, or
@@ -2212,7 +2274,10 @@ impl Player {
             Some(ActiveStream::Pcm(a)) => a,
             _ => return,
         };
-        active.pumped_frames += written_frames as u64;
+        // Media frames played: what the stretch consumed, corrected for any
+        // frames the limiter held back or released on the way to the sink.
+        let media = (media_frames as i64 + written_frames as i64 - stretched_frames as i64).max(0);
+        active.pumped_frames += media as u64;
         active.advance_display();
     }
 
@@ -2403,6 +2468,7 @@ impl Player {
                 None
             },
             limiter_gr_db: self.limiter_gr(),
+            playback_rate: self.playback_rate,
             format,
             chain,
             output_path: self.output_path,
@@ -2529,6 +2595,7 @@ pub enum EngineCommand {
     /// PCM only.
     SetEqEnabled(bool),
     SetEqPreamp(f32),
+    SetPlaybackRate(f32),
     SetAnalog(AnalogSettings),
     /// Target integrated loudness in LUFS (e.g. -14.0). PCM only.
     SetLoudnessTarget(f32),
@@ -2975,6 +3042,12 @@ impl EngineController {
         self.update_dsp_settings(|dsp| dsp.eq_preamp_db = db);
         self.send(EngineCommand::SetEqPreamp(db));
     }
+    /// Playback speed (0.5 to 3.0, pitch kept). Not saved: the audiobook
+    /// being played decides it, and music plays at 1.0.
+    pub fn set_playback_rate(&self, rate: f32) {
+        self.send(EngineCommand::SetPlaybackRate(rate));
+    }
+
     /// Analog character (tube / transistor warmth). Values are clamped to
     /// their ranges; the result is saved and applied live.
     pub fn set_analog(&self, settings: AnalogSettings) {
@@ -3538,6 +3611,7 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
         }
         EngineCommand::SetEqEnabled(b) => player.set_eq_enabled(b),
         EngineCommand::SetEqPreamp(db) => player.set_eq_preamp(db),
+        EngineCommand::SetPlaybackRate(r) => player.set_playback_rate(r),
         EngineCommand::SetAnalog(a) => player.set_analog(a),
         EngineCommand::SetLoudnessTarget(t) => player.set_loudness_target(t),
         EngineCommand::SetLoudnessEnabled(b) => player.set_loudness_enabled(b),

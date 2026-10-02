@@ -4394,3 +4394,168 @@ fn the_eq_takes_twelve_bands_and_rejects_a_thirteenth() {
     );
     assert!(h.player.set_eq_bands((0..13).map(band).collect()).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Playback speed: pitch-preserving, for audiobooks
+// ---------------------------------------------------------------------------
+
+/// Play a `secs`-second 440 Hz tone at `rate` to the end; returns the harness.
+fn play_tone_at(rate: f32, secs: usize) -> Harness {
+    let mut h = Harness::new(None);
+    h.player.set_playback_rate(rate);
+    h.stub.add(1, &[(440.0, RATE as usize * secs)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, secs as u64 * 1000)], 0);
+    h.pump_until_done(2000);
+    h
+}
+
+#[test]
+fn double_speed_takes_half_the_output_and_keeps_the_pitch() {
+    let h = play_tone_at(2.0, 8);
+    let heard = h.samples();
+    let frames = heard.len() / CHANNELS;
+    let want = RATE as usize * 8 / 2;
+    assert!(
+        (frames as i64 - want as i64).abs() < RATE as i64 / 10,
+        "{frames} frames out, wanted about {want}"
+    );
+    // Pitch: count rising zero crossings over the middle of the left channel.
+    let left: Vec<f32> = heard.iter().step_by(CHANNELS).copied().collect();
+    let mid = &left[left.len() / 4..left.len() * 3 / 4];
+    let crossings = mid.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+    let hz = crossings as f32 * RATE as f32 / mid.len() as f32;
+    assert!(
+        (hz - 440.0).abs() < 8.0,
+        "a 440 Hz tone came out at {hz} Hz"
+    );
+    assert_eq!(h.player.snapshot().playback_rate, 2.0);
+}
+
+#[test]
+fn the_end_of_a_sped_up_track_is_not_cut_short() {
+    // The stage holds back its last frame; it must be played, not dropped.
+    let h = play_tone_at(1.5, 4);
+    let heard = h.samples();
+    assert!(
+        tail_peak(&heard, 600) > 0.5,
+        "the tone is still sounding at the very end: {}",
+        tail_peak(&heard, 600)
+    );
+    let frames = heard.len() / CHANNELS;
+    let want = RATE as usize * 4 * 2 / 3;
+    assert!(
+        (frames as i64 - want as i64).abs() < RATE as i64 / 20,
+        "{frames} vs {want}"
+    );
+}
+
+#[test]
+fn normal_speed_is_untouched_and_not_a_blocker() {
+    let h = play_tone_at(1.0, 2);
+    assert!(h.player.snapshot().exclusive_blockers.is_empty());
+    let heard = h.samples();
+    assert_eq!(
+        heard.len() / CHANNELS,
+        RATE as usize * 2,
+        "no frames gained or lost"
+    );
+}
+
+#[test]
+fn the_playhead_runs_at_the_playback_speed() {
+    let mut h = Harness::new(None);
+    h.player.set_playback_rate(2.0);
+    h.stub.add(1, &[(440.0, RATE as usize * 20)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 20_000)], 0);
+    let mut last = 0u64;
+    let mut checked = false;
+    for _ in 0..400 {
+        h.player.pump();
+        let snap = h.player.snapshot();
+        let played_out = h.samples().len() / CHANNELS;
+        // The sink here plays instantly (nothing stays queued), so the
+        // playhead is the media consumed: about twice the frames written.
+        if played_out > RATE as usize * 4 {
+            let media_ms = snap.position_ms as f64;
+            let out_ms = played_out as f64 * 1000.0 / RATE as f64;
+            assert!(
+                (media_ms / out_ms - 2.0).abs() < 0.15,
+                "position {media_ms} ms after {out_ms} ms of output"
+            );
+            checked = true;
+            break;
+        }
+        assert!(
+            snap.position_ms >= last,
+            "the playhead never goes backwards"
+        );
+        last = snap.position_ms;
+    }
+    assert!(checked, "the stream produced enough output to measure");
+}
+
+#[test]
+fn changing_the_speed_during_playback_does_not_step_the_signal() {
+    let mut h = Harness::new(None);
+    h.stub.add(1, &[(300.0, RATE as usize * 12)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 12_000)], 0);
+    for (i, rate) in [1.0f32, 1.5, 2.0, 0.8, 1.0].into_iter().enumerate() {
+        h.player.set_playback_rate(rate);
+        for _ in 0..(6 + i) {
+            h.player.pump();
+        }
+    }
+    let natural = 0.7 * 2.0 * std::f32::consts::PI * 300.0 / RATE as f32;
+    let step = max_frame_step(&h.samples());
+    assert!(
+        step < natural * 1.7,
+        "largest step {step}, a clean tone steps {natural}"
+    );
+}
+
+#[test]
+fn a_playback_speed_holds_best_quality_back_and_returning_to_one_releases_it() {
+    let mut h = best_harness(kahawai_player_core::QualityMode::Best, true);
+    h.player.set_playback_rate(1.25);
+    h.stub.add(1, &[(440.0, 4410)]);
+    h.player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    let snap = h.player.snapshot();
+    assert_eq!(
+        snap.output_path,
+        OutputPath::Pcm,
+        "exclusive output cannot change the speed"
+    );
+    assert!(
+        snap.exclusive_blockers
+            .iter()
+            .any(|b| b == "Playback speed"),
+        "{:?}",
+        snap.exclusive_blockers
+    );
+
+    let mut normal = best_harness(kahawai_player_core::QualityMode::Best, true);
+    normal.player.set_playback_rate(1.0);
+    normal.stub.add(1, &[(440.0, 4410)]);
+    normal
+        .player
+        .play_queue(vec![track(1, AudioFormat::Wav, 100)], 0);
+    assert_eq!(
+        normal.player.snapshot().output_path,
+        OutputPath::PcmExclusive
+    );
+}
+
+#[test]
+fn the_speed_is_clamped_and_ignores_nonsense() {
+    let mut h = Harness::new(None);
+    h.player.set_playback_rate(9.0);
+    assert_eq!(h.player.snapshot().playback_rate, 3.0);
+    h.player.set_playback_rate(0.1);
+    assert_eq!(h.player.snapshot().playback_rate, 0.5);
+    h.player.set_playback_rate(f32::NAN);
+    assert_eq!(h.player.snapshot().playback_rate, 1.0);
+}

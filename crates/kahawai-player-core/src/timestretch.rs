@@ -153,6 +153,35 @@ impl TimeStretch {
         self.run(out);
     }
 
+    /// Is some input still held back, waiting for its frame to fill?
+    pub fn has_pending(&self) -> bool {
+        self.active && (self.base + self.mono.len() as i64) as u64 > self.media
+    }
+
+    /// The input has ended: append the audio still held back. The held
+    /// input is padded with silence just long enough to complete the last
+    /// frame, and the result is cut to the length the held media should
+    /// take, so the padding is never heard. Leaves the stage idle.
+    pub fn flush(&mut self, out: &mut Vec<f32>) {
+        if !self.has_pending() {
+            return;
+        }
+        let end = self.base + self.mono.len() as i64;
+        let remaining = (end - (self.prev_start + self.h as i64)).max(0) as f64;
+        let want = (remaining / self.rate as f64).ceil() as usize * self.channels;
+        let from = out.len();
+        let pad = vec![0.0f32; (self.n + self.delta + self.n) * self.channels];
+        self.push(&pad);
+        self.run(out);
+        out.truncate((from + want).min(out.len()));
+        self.media = end as u64;
+        self.inp.clear();
+        self.mono.clear();
+        self.tail.clear();
+        self.active = false;
+        self.base = self.media as i64;
+    }
+
     fn push(&mut self, input: &[f32]) {
         let ch = self.channels;
         let frames = input.len() / ch;
@@ -198,7 +227,8 @@ impl TimeStretch {
                 let o = self.at(s0);
                 for i in 0..self.h {
                     for c in 0..ch {
-                        self.tail[i * ch + c] = self.window[self.h + i] * self.inp[(o + i) * ch + c];
+                        self.tail[i * ch + c] =
+                            self.window[self.h + i] * self.inp[(o + i) * ch + c];
                     }
                 }
                 self.primed_tail = true;
@@ -214,7 +244,8 @@ impl TimeStretch {
             }
             for i in 0..self.h {
                 for c in 0..ch {
-                    self.tail[i * ch + c] = self.window[self.h + i] * self.inp[(o + self.h + i) * ch + c];
+                    self.tail[i * ch + c] =
+                        self.window[self.h + i] * self.inp[(o + self.h + i) * ch + c];
                 }
             }
             self.prev_start = s;
@@ -273,7 +304,9 @@ impl TimeStretch {
     /// is exactly what the next overlap-add would have produced.
     fn hand_over(&mut self, input: &[f32], out: &mut Vec<f32>) {
         self.push(input);
-        let from = self.at(self.prev_start + self.h as i64).min(self.mono.len());
+        let from = self
+            .at(self.prev_start + self.h as i64)
+            .min(self.mono.len());
         out.extend_from_slice(&self.inp[from * self.channels..]);
         self.media = (self.base + self.mono.len() as i64) as u64;
         self.inp.clear();
@@ -411,7 +444,11 @@ mod tests {
         let w = &out[FS as usize / 2..FS as usize / 2 + 8192];
         let (mut best, mut best_lag) = (f32::MIN, 0);
         for lag in (FS as usize / 400)..(FS as usize / 70) {
-            let c: f32 = w[..w.len() - lag].iter().zip(&w[lag..]).map(|(a, b)| a * b).sum();
+            let c: f32 = w[..w.len() - lag]
+                .iter()
+                .zip(&w[lag..])
+                .map(|(a, b)| a * b)
+                .sum();
             if c > best {
                 best = c;
                 best_lag = lag;
@@ -452,7 +489,10 @@ mod tests {
         assert_eq!(out.len() % 2, 0);
         let l: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
         let r: Vec<f32> = out.chunks_exact(2).map(|f| f[1]).collect();
-        let (lm, rm) = (&l[l.len() / 4..l.len() * 3 / 4], &r[r.len() / 4..r.len() * 3 / 4]);
+        let (lm, rm) = (
+            &l[l.len() / 4..l.len() * 3 / 4],
+            &r[r.len() / 4..r.len() * 3 / 4],
+        );
         assert!((freq_of(lm) - 300.0).abs() < 3.0, "left {}", freq_of(lm));
         assert!((freq_of(rm) - 600.0).abs() < 6.0, "right {}", freq_of(rm));
     }
@@ -485,8 +525,14 @@ mod tests {
         }
         // A clean 200 Hz sine at 0.5 never moves more than this per frame.
         let natural = 0.5 * 2.0 * std::f32::consts::PI * 200.0 / FS as f32;
-        let step = out.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
-        assert!(step < natural * 1.6, "largest step {step}, a clean tone steps {natural}");
+        let step = out
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            step < natural * 1.6,
+            "largest step {step}, a clean tone steps {natural}"
+        );
     }
 
     #[test]
@@ -508,13 +554,50 @@ mod tests {
         // After the hand-over the audio is the original, sample for sample,
         // through to the end of the input.
         let tail_len = FS as usize;
-        assert_eq!(&out[out.len() - tail_len..], &input[input.len() - tail_len..]);
+        assert_eq!(
+            &out[out.len() - tail_len..],
+            &input[input.len() - tail_len..]
+        );
         // And there is no jump where it joins.
         let natural = 0.5 * 2.0 * std::f32::consts::PI * 250.0 / FS as f32;
         let around = &out[stretched.saturating_sub(64)..(stretched + 4096).min(out.len())];
-        let step = around.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
-        assert!(step < natural * 1.6, "join stepped {step}, a clean tone steps {natural}");
-        assert_eq!(st.media_frames(), input.len() as u64, "every media frame was heard");
+        let step = around
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            step < natural * 1.6,
+            "join stepped {step}, a clean tone steps {natural}"
+        );
+        assert_eq!(
+            st.media_frames(),
+            input.len() as u64,
+            "every media frame was heard"
+        );
+    }
+
+    #[test]
+    fn flushing_at_the_end_plays_the_held_back_tail_and_no_padding() {
+        let input = sine(330.0, FS as usize * 3 + 1234, 2, 0.5);
+        for rate in [0.75f32, 1.0, 1.5, 2.5] {
+            let mut st = TimeStretch::new(2, FS);
+            st.set_rate(rate);
+            let mut out = run(&mut st, &input, 3000);
+            st.flush(&mut out);
+            let frames_in = input.len() / 2;
+            let want = frames_in as f64 / rate as f64;
+            assert!(
+                // Frames can land up to a search range either side of nominal.
+                (out.len() as f64 / 2.0 - want).abs() <= (st.delta + st.h) as f64 / rate as f64,
+                "rate {rate}: {} frames out, wanted {want}",
+                out.len() / 2
+            );
+            assert_eq!(st.media_frames(), frames_in as u64, "all media heard");
+            assert!(!st.has_pending());
+            // The last frames are the tone, not the zero padding.
+            let last = &out[out.len() - 400..];
+            assert!(rms(last) > 0.2, "rate {rate}: tail rms {}", rms(last));
+        }
     }
 
     #[test]
@@ -529,7 +612,10 @@ mod tests {
         out.clear();
         let quiet = sine(300.0, FS as usize, 1, 0.1);
         st.process(&quiet, &mut out);
-        assert!(out.iter().all(|v| v.abs() <= 0.1 + 1e-4), "nothing of the old signal leaks");
+        assert!(
+            out.iter().all(|v| v.abs() <= 0.1 + 1e-4),
+            "nothing of the old signal leaks"
+        );
     }
 
     #[test]

@@ -128,6 +128,8 @@ export interface PlayerState {
    * when the limiter is off, or the path bypasses it (DoP / bit-perfect).
    */
   limiter_gr_db?: number | null;
+  /** Playback speed (1 = as recorded); pitch is kept at any speed. */
+  playback_rate?: number;
   format: string | null;
   chain: string | null;
   /** "pcm-shared" (DSP chain active) or "dop-exclusive" (bit-perfect). */
