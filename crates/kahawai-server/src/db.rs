@@ -86,8 +86,9 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             17,
             include_str!("../migrations/017_audiobook_listeners.sql"),
         ),
-        (18, include_str!("../migrations/018_radio.sql")),
+        // 18 is main's 018_audiobook_shelf_dismiss.sql (not on this branch yet).
         (19, include_str!("../migrations/019_podcasts.sql")),
+        (20, include_str!("../migrations/020_radio.sql")),
     ];
     // One connection throughout: `PRAGMA foreign_keys` is per connection, and
     // 005 rebuilds `tracks`, which SQLite only allows with foreign keys off
@@ -466,7 +467,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
         );
 
         // Old row survived; new columns carry their defaults.
@@ -551,7 +552,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
         );
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
@@ -622,7 +623,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
         );
         let r =
             sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
@@ -812,13 +813,67 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
         );
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
         );
+    }
+
+    async fn has_table(pool: &SqlitePool, name: &str) -> bool {
+        sqlx::query("SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .get(0)
+    }
+
+    /// A database where 18 was main's audiobook-shelf migration (so the radio
+    /// migration, once numbered 18, was skipped) gets its radio tables; one
+    /// that already ran the radio migration as 18 reopens without error.
+    #[tokio::test]
+    async fn radio_tables_appear_whatever_ran_as_18() {
+        for radio_ran_as_18 in [false, true] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let db_path = dir.path().join("t.db");
+            let pool = open(&db_path).await.unwrap();
+            // Take the database back to "18 recorded, 20 not run".
+            for t in ["radio_favorites", "radio_history", "radio_cache"] {
+                sqlx::query(&format!("DROP TABLE {t}"))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("DELETE FROM schema_migrations WHERE version = 20")
+                .execute(&pool)
+                .await
+                .unwrap();
+            if radio_ran_as_18 {
+                let mut conn = pool.acquire().await.unwrap();
+                let mut tx = sqlx::Connection::begin(&mut *conn).await.unwrap();
+                apply_sql(&mut tx, include_str!("../migrations/020_radio.sql"))
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations (version) VALUES (18)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+
+            let pool = open(&db_path).await.unwrap();
+            for t in ["radio_favorites", "radio_history", "radio_cache"] {
+                assert!(
+                    has_table(&pool, t).await,
+                    "{t} (radio ran as 18: {radio_ran_as_18})"
+                );
+            }
+            assert!(versions(&pool).await.contains(&20));
+        }
     }
 }
