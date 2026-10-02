@@ -22,13 +22,23 @@ the server reads it, never changes it.
   at MusicBrainz, and adds missing years and covers from the Cover Art Archive. It only
   fills in what's missing, and sends album and artist names off your network, which is why
   it's off until you turn it on.
+- **Audiobooks:** keeps a separate library of audiobooks from their own folders, apart
+  from your music. Each folder is a book: its files are put in order (including `Disc 1`
+  and `Disc 2` folders), chapters are read from `.m4b` files, and the title, author,
+  narrator and series come from the tags or the folder name. The server remembers where
+  each listener is in every book, with bookmarks and a history of when they listened.
+  Identical copies of a book show once.
+- **Book info (optional, the same switch as album info):** fills in a book's missing
+  author, year and cover from Open Library, then Google Books. Like album info, it only
+  fills what's missing, never what you edited.
 - **Players stay current:** each player keeps its own copy of the library and asks only
   for what changed, so a restart doesn't reload everything.
 
 ## Your music and your privacy
 
 - **Nothing leaves your network** unless you turn on album info lookup, which sends album
-  and artist names to MusicBrainz.
+  and artist names to MusicBrainz, and book titles and authors to Open Library and
+  Google Books.
 - **The server has no authentication and no encryption.** Run it on a private network you
   trust.
 - **Your files are never modified.** Tags, covers and folders stay exactly as they are; the
@@ -40,7 +50,8 @@ Kahawai Server is Copyright (c) 2026 Kyo Suayan, and licensed under the GNU Affe
 General Public License, version 3 or later (see License below).
 
 MQA is a trademark of MQA Limited. MusicBrainz is a trademark of the MetaBrainz
-Foundation. Apple and macOS are trademarks of Apple Inc. Kahawai Server is an independent
+Foundation. Google Books is a trademark of Google LLC. Apple and macOS are trademarks of
+Apple Inc. Kahawai Server is an independent
 product and is not affiliated with or endorsed by any of these companies.
 
 ## License
@@ -71,6 +82,10 @@ The full license text is in the open-source notices.
   terms, when album info lookup is on.
 - **Cover Art Archive** (coverartarchive.org): album covers, which remain the property of
   their rights holders.
+- **Open Library** (openlibrary.org): book authors, years and covers (public-domain data
+  from the Internet Archive), when the lookup is on.
+- **Google Books** (books.google.com): book details and covers Open Library doesn't have,
+  when the lookup is on.
 
 ## Open-source software
 

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ChevronRight, Disc3, Info, ListMusic, ListPlus, MicVocal, Play, Plus } from "lucide-vue-next";
+import { usePlayToggle } from "../lib/playToggle";
+import { ChevronRight, Disc3, Info, ListMusic, ListPlus, MicVocal, Plus } from "lucide-vue-next";
 import { computed, ref } from "vue";
 import {
   ContextMenuContent,
@@ -55,6 +56,12 @@ function play(): void {
   else if (props.album) void actions.playAlbum(props.album);
 }
 
+/** Play, or Pause while this track (or one of this album's) plays. */
+const playItem = usePlayToggle(
+  (t) => (props.track ? t.id === props.track.id : props.album !== null && t.album_id === props.album.id),
+  play,
+);
+
 function info(): void {
   if (props.track) overlays.showInfo({ kind: "track", track: props.track });
   else if (props.album) overlays.showInfo({ kind: "album", album: props.album });
@@ -74,8 +81,8 @@ const contentClass =
     </ContextMenuTrigger>
     <ContextMenuPortal>
       <ContextMenuContent :class="contentClass" data-kw-fade data-testid="item-menu">
-        <ContextMenuItem :class="itemClass" :disabled="!canPlay" @select="play">
-          <span class="flex items-center gap-2"><Play class="size-4 text-dim" />Play</span>
+        <ContextMenuItem :class="itemClass" :disabled="!canPlay" data-testid="item-menu-play" @select="playItem.press()">
+          <span class="flex items-center gap-2"><component :is="playItem.icon" class="size-4 text-dim" />{{ playItem.label }}</span>
         </ContextMenuItem>
         <ContextMenuItem :class="itemClass" :disabled="!hasArtist" @select="actions.goToArtist(artistName)">
           <span class="flex items-center gap-2"><MicVocal class="size-4 text-dim" />Go to Artist</span>

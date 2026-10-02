@@ -29,6 +29,12 @@ runs quietly in the background.
 - **Album info, if you want it:** looks up missing years and covers at MusicBrainz and the
   Cover Art Archive. Off until you turn it on.
 - **Playlists,** including importing M3U files.
+- **Audiobooks, kept apart from your music:** point it at your audiobook folders and each
+  folder becomes a book, its parts in order and `.m4b` chapters read. Titles, authors and
+  narrators come from the tags or the folder name (`Author/Series/Vol 1 - 1999 - Title
+  {Narrator}`, or just `Title by Author`), and an optional lookup at Open Library and
+  Google Books fills a missing author, year or cover. It remembers where each listener is
+  in every book.
 - **A good neighbour:** quitting the app stops the server cleanly and tells connected
   players; logs are one click away for bug reports.
 
@@ -51,6 +57,14 @@ play it with sound quality taken seriously.
   an A/B blind test.
 - **Right-click anything:** play a track or album, jump to its artist or album, add it to
   the queue or a playlist without duplicates, or see its full details.
+- **Audiobooks:** a library of books as a grid or a list, with each book's format, and a
+  Continue listening shelf. Books pick up where you left off, with chapters, bookmarks,
+  listening history by day, a speed that keeps the voice natural (0.75× to 2.5×), skip
+  buttons, a sleep timer and a voice-tuned EQ preset. Now Playing shows the book, its
+  chapter and the time left. Your music queue waits while you listen and comes back
+  exactly as it was. Several listeners can share one server.
+- **Find your way back:** breadcrumbs show how you got to a page (Artists › Miles Davis ›
+  Kind of Blue), and Play buttons turn to Pause for whatever is playing.
 
 ## Important!
 
@@ -137,7 +151,7 @@ New here? Read top to bottom. Already know the codebase? Jump to whichever group
 - `docs/v1/kahawai-genre-normalization-spec.md` — genre normalization + browse/search.
 - `docs/v1/kahawai-metadata-enrichment-spec.md` — metadata remapping & external enrichment (Phase C: MusicBrainz and the Cover Art Archive, off by default).
 - `docs/v1/kahawai-player-catalog-cache-spec.md` — the player's local catalog cache: a snapshot, then only what changed (catalog revisions and deltas).
-- `docs/v1/kahawai-audiobook-spec.md` and `docs/v1/kahawai-audiobook-todo.md` — audiobooks: separate library, multi-part books and chapters, pitch-preserving speed, bookmarks and history, sleep timer, optional online details (built; not yet tried on the Mac).
+- `docs/v1/kahawai-audiobook-spec.md` and `docs/v1/kahawai-audiobook-todo.md` — audiobooks: separate library, multi-part books and chapters, pitch-preserving speed, bookmarks and history, sleep timer, several listeners, optional online details.
 - `player/DATABASE.md` — the player's schema, its key queries (its own and the server's), the indexes that serve them, and best practices.
 
 **Planning & scope**

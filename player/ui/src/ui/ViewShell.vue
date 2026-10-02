@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import type { ViewName } from "../stores/nav";
+import Breadcrumbs from "./Breadcrumbs.vue";
+
 /** Page frame shared by every main view: padding, title, subtitle, actions.
  *  `full` is for card grids (Albums): with `auto-fill` columns, giving it
  *  the whole panel means more columns show up on a wide display instead of
@@ -13,8 +16,17 @@
  *  parent scroll too. So the parent must be a flex column (App.vue makes
  *  <main> one, and non-scrolling, while Albums is showing). */
 withDefaults(
-  defineProps<{ title?: string; subtitle?: string; width?: "full" | "fluid" | "wide" | "medium" | "narrow" }>(),
-  { width: "wide" },
+  defineProps<{
+    title?: string;
+    subtitle?: string;
+    width?: "full" | "fluid" | "wide" | "medium" | "narrow";
+    /** A page inside a section (an album, an artist…) shows the breadcrumb:
+     *  this is its section, for when there is no trail to show. */
+    section?: ViewName;
+    /** The page's own title, the breadcrumb's last step. */
+    crumb?: string;
+  }>(),
+  { width: "wide", section: undefined, crumb: undefined },
 );
 const widths = {
   full: "max-w-none",
@@ -31,6 +43,7 @@ const widths = {
     class="px-6 pb-10 pt-5"
     :class="[widths[width], width === 'full' && 'flex min-h-0 flex-1 flex-col']"
   >
+    <Breadcrumbs v-if="section" :section="section" :current="crumb" />
     <div
       v-if="title || $slots.actions"
       class="mb-4 flex items-start justify-between gap-4"

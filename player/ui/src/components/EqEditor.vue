@@ -335,10 +335,8 @@ function choose(v: string | null): void {
           <UiSwitch :model-value="sel.enabled" label="On" @update:model-value="dsp.toggleRow(selected!)" />
           <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="removeSelected"><Trash2 /></UiButton>
         </template>
-        <template v-else>
-          <span>Select a point to edit it.</span>
-          <UiButton :disabled="!dsp.canAddBand" :title="dsp.canAddBand ? undefined : `At most ${MAX_EQ_BANDS} bands`" data-testid="add-band" @click="dsp.addBand(); selected = dsp.rows.length - 1"><Plus /> Add band</UiButton>
-        </template>
+        <span v-else>Select a point to edit it.</span>
+        <UiButton :disabled="!dsp.canAddBand" :title="dsp.canAddBand ? undefined : `At most ${MAX_EQ_BANDS} bands`" data-testid="add-band" @click="dsp.addBand(); selected = dsp.rows.length - 1"><Plus /> Add band</UiButton>
         <span v-if="dsp.rowError" class="text-danger" role="alert">{{ dsp.rowError }}</span>
       </div>
     </div>

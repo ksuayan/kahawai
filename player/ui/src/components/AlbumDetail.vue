@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { ChevronLeft, Play } from "lucide-vue-next";
+import { usePlayToggle } from "../lib/playToggle";
 import { computed, onMounted, ref, watch } from "vue";
 import { sortTracks, trackSortOptions } from "../lib/sorting";
 import { useLibraryStore } from "../stores/library";
-import { useNavStore } from "../stores/nav";
 import { useQueueStore } from "../stores/queue";
 import { useViewPrefsStore } from "../stores/viewPrefs";
 import { formatDuration, isPlayable, type Album, type Track } from "../types";
@@ -18,7 +17,6 @@ import TrackMenu from "./TrackMenu.vue";
 const props = defineProps<{ id: number }>();
 
 const lib = useLibraryStore();
-const nav = useNavStore();
 const queue = useQueueStore();
 const view = useViewPrefsStore();
 const SORTS = trackSortOptions("Track number");
@@ -56,6 +54,8 @@ function playAll(): void {
   const list = playableTracks();
   if (list.length > 0) void queue.playAll(list.map((x) => x.t), 0);
 }
+/** Play, or Pause while one of this album's tracks plays. */
+const playButton = usePlayToggle((t) => tracks.value.some((x) => x.id === t.id), playAll);
 
 function playFrom(track: Track): void {
   const list = playableTracks().map((x) => x.t);
@@ -70,10 +70,7 @@ function totalDuration(): string {
 </script>
 
 <template>
-  <ViewShell width="full">
-    <div class="shrink-0">
-      <UiButton variant="icon" class="mb-3" @click="nav.go('albums')"><ChevronLeft /> Albums</UiButton>
-    </div>
+  <ViewShell width="full" section="albums" :crumb="album?.title">
     <StateMessage v-if="loading" kind="loading">Loading album…</StateMessage>
     <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>
     <template v-else-if="album">
@@ -87,8 +84,8 @@ function totalDuration(): string {
             </p>
             <p class="m-0 mb-1 text-dim">{{ tracks.length }} tracks · {{ totalDuration() }}</p>
             <div class="mt-3 flex items-center gap-2">
-              <UiButton variant="primary" :disabled="playableTracks().length === 0" @click="playAll">
-                <Play class="fill-current" /> Play
+              <UiButton variant="primary" :disabled="playableTracks().length === 0" data-testid="play-all" @click="playButton.press()">
+                <component :is="playButton.icon" class="fill-current" /> {{ playButton.label }}
               </UiButton>
               <TrackMenu :tracks="tracks" :album-id="album.id" layout="buttons" />
             </div>

@@ -408,10 +408,18 @@ pub(crate) fn spawn_enrich(
                         "stopped: {why}; {} books done, the rest will be tried next time",
                         r.looked_up
                     ),
-                    None => format!(
-                        "looked up {} books: {} matched ({} covers), {} not found",
-                        r.looked_up, r.matched, r.covers, r.not_found
-                    ),
+                    None => {
+                        let mut m = format!(
+                            "looked up {} books: {} matched ({} covers), {} not found",
+                            r.looked_up, r.matched, r.covers, r.not_found
+                        );
+                        if let Some(why) = &r.google_skipped {
+                            m.push_str(&format!(
+                                "; Open Library only ({why}), the rest will be tried next time"
+                            ));
+                        }
+                        m
+                    }
                 };
                 s.jobs.finish(&job_id, r.offline.is_none(), Some(msg)).await;
                 if r.matched > 0 {
@@ -431,6 +439,8 @@ pub(crate) fn spawn_enrich(
 pub struct Book {
     pub id: i64,
     pub root_id: i64,
+    /// The book's folder.
+    pub path: String,
     pub title: String,
     pub author: Option<String>,
     pub narrator: Option<String>,
@@ -446,18 +456,29 @@ pub struct Book {
     pub last_played_at: Option<i64>,
     /// `position_ms / duration_ms`, 0 to 1.
     pub progress: f64,
+    /// The first file's format ("mp3", "m4a"…), bitrate (kbps), sample rate
+    /// and channels: what the book sounds like, for the list and Now Playing.
+    pub format: Option<String>,
+    pub bitrate: Option<i64>,
+    pub sample_rate: Option<i64>,
+    pub channels: Option<i64>,
 }
 
-const BOOK_COLS: &str = "b.id, b.root_id, b.title, b.author, b.narrator, b.series, b.series_index,
+const BOOK_COLS: &str =
+    "b.id, b.root_id, b.path, b.title, b.author, b.narrator, b.series, b.series_index,
      b.year, b.cover_hash, b.duration_ms, b.added_at, f.finished_at,
-     COALESCE(p.book_offset_ms, 0) AS position_ms, p.updated_at AS last_played_at";
+     COALESCE(p.book_offset_ms, 0) AS position_ms, p.updated_at AS last_played_at,
+     ft.format, ft.bitrate, ft.sample_rate, ft.channels";
 
-/// The joins that bring in one listener's place and finished flag. `uid` is a
-/// number we got from the database, never text from the request.
+/// The joins that bring in one listener's place and finished flag, and the
+/// book's first file (for the format). `uid` is a number we got from the
+/// database, never text from the request.
 fn listener_joins(uid: i64) -> String {
     format!(
         "LEFT JOIN audiobook_positions p ON p.book_id = b.id AND p.user_id = {uid}
-         LEFT JOIN audiobook_finished f ON f.book_id = b.id AND f.user_id = {uid}"
+         LEFT JOIN audiobook_finished f ON f.book_id = b.id AND f.user_id = {uid}
+         LEFT JOIN tracks ft ON ft.id = (SELECT ap.track_id FROM audiobook_parts ap
+                                         WHERE ap.book_id = b.id ORDER BY ap.part_index LIMIT 1)"
     )
 }
 
@@ -472,6 +493,7 @@ fn book_from_row(r: &SqliteRow) -> Book {
     Book {
         id: r.get("id"),
         root_id: r.get("root_id"),
+        path: r.get("path"),
         title: r.get("title"),
         author: r.get("author"),
         narrator: r.get("narrator"),
@@ -489,12 +511,17 @@ fn book_from_row(r: &SqliteRow) -> Book {
         } else {
             0.0
         },
+        format: r.get("format"),
+        bitrate: r.get("bitrate"),
+        sample_rate: r.get("sample_rate"),
+        channels: r.get("channels"),
     }
 }
 
 #[derive(Deserialize, Default)]
 pub struct ListQuery {
-    /// `continue`: books you have started, unfinished first, newest first.
+    /// `continue`: books you have started and not taken off the shelf,
+    /// unfinished first, newest first.
     pub shelf: Option<String>,
     pub q: Option<String>,
     pub author: Option<String>,
@@ -520,7 +547,7 @@ pub async fn books(pool: &SqlitePool, q: &ListQuery, uid: i64) -> Result<Vec<Boo
     let mut binds: Vec<String> = Vec::new();
     let continue_shelf = q.shelf.as_deref() == Some("continue");
     if continue_shelf {
-        sql.push_str(" AND p.book_id IS NOT NULL");
+        sql.push_str(" AND p.book_id IS NOT NULL AND p.dismissed = 0");
     }
     if let Some(text) = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         sql.push_str(" AND (b.title LIKE ? ESCAPE '\\' OR b.author LIKE ? ESCAPE '\\' OR b.narrator LIKE ? ESCAPE '\\' OR b.series LIKE ? ESCAPE '\\')");
@@ -566,6 +593,11 @@ pub struct Part {
     pub title: Option<String>,
     pub start_offset_ms: i64,
     pub duration_ms: i64,
+    /// The file's format, bitrate (kbps), sample rate and channels.
+    pub format: Option<String>,
+    pub bitrate: Option<i64>,
+    pub sample_rate: Option<i64>,
+    pub channels: Option<i64>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -693,8 +725,10 @@ pub async fn book_detail(
 
 async fn parts_of(pool: &SqlitePool, id: i64) -> Result<Vec<Part>, MusicError> {
     Ok(sqlx::query(
-        "SELECT id, track_id, part_index, title, start_offset_ms, duration_ms FROM audiobook_parts
-         WHERE book_id = ? ORDER BY part_index",
+        "SELECT ap.id, ap.track_id, ap.part_index, ap.title, ap.start_offset_ms, ap.duration_ms,
+                t.format, t.bitrate, t.sample_rate, t.channels
+         FROM audiobook_parts ap LEFT JOIN tracks t ON t.id = ap.track_id
+         WHERE ap.book_id = ? ORDER BY ap.part_index",
     )
     .bind(id)
     .fetch_all(pool)
@@ -708,6 +742,10 @@ async fn parts_of(pool: &SqlitePool, id: i64) -> Result<Vec<Part>, MusicError> {
         title: r.get("title"),
         start_offset_ms: r.get("start_offset_ms"),
         duration_ms: r.get("duration_ms"),
+        format: r.get("format"),
+        bitrate: r.get("bitrate"),
+        sample_rate: r.get("sample_rate"),
+        channels: r.get("channels"),
     })
     .collect())
 }
@@ -848,7 +886,9 @@ pub async fn save_position(
     sqlx::query(
         "INSERT INTO audiobook_positions (book_id, user_id, book_offset_ms, updated_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(book_id, user_id) DO UPDATE SET book_offset_ms = excluded.book_offset_ms,
-                                                     updated_at = excluded.updated_at",
+                                                     updated_at = excluded.updated_at,
+                                                     dismissed = CASE WHEN excluded.book_offset_ms = audiobook_positions.book_offset_ms
+                                                                      THEN audiobook_positions.dismissed ELSE 0 END",
     )
     .bind(id)
     .bind(uid)
@@ -974,6 +1014,23 @@ pub async fn mark_finished(
             .map_err(cvt)?;
     }
     Ok(Json(get_book(&s.pool, id, uid).await?))
+}
+
+/// Take a book off the listener's Continue listening shelf. The place in the
+/// book is kept; listening again puts it back on the shelf.
+pub async fn dismiss_from_shelf(
+    State(s): State<AppState>,
+    Listener(uid): Listener,
+    Path(id): Path<i64>,
+) -> ApiResult<StatusCode> {
+    get_book(&s.pool, id, uid).await?;
+    sqlx::query("UPDATE audiobook_positions SET dismissed = 1 WHERE book_id = ? AND user_id = ?")
+        .bind(id)
+        .bind(uid)
+        .execute(&s.pool)
+        .await
+        .map_err(cvt)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -1427,7 +1484,21 @@ mod tests {
         assert_eq!(saga["narrator"], "Folder Narrator");
         assert_eq!(saga["series_index"], 2.0);
         assert_eq!(saga["year"], 1999);
+        // What the book's first file is, for the list and Now Playing.
+        assert_eq!(saga["format"], "mp3");
+        assert!(saga["sample_rate"].as_i64().unwrap() > 0, "{saga}");
+        assert!(saga["channels"].as_i64().unwrap() > 0, "{saga}");
         let id = saga["id"].as_i64().unwrap();
+        let (_, d) = call(&e.app, Method::GET, &format!("/api/audiobooks/{id}"), None).await;
+        assert_eq!(d["format"], "mp3", "the detail carries it too");
+        assert_eq!(d["parts"][0]["format"], "mp3", "and each file");
+        assert!(
+            d["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("Folder Title {Folder Narrator}"),
+            "{d}"
+        );
         let (_, d) = call(&e.app, Method::GET, &format!("/api/audiobooks/{id}"), None).await;
         let parts = d["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 3, "CD 1 and CD 2 merge into one book");
@@ -1819,6 +1890,59 @@ mod tests {
             .map(|b| b["id"].as_i64().unwrap())
             .collect();
         assert_eq!(order, [ids[0], ids[1]], "unfinished first");
+    }
+
+    #[tokio::test]
+    async fn a_book_taken_off_the_shelf_keeps_its_place_and_comes_back_when_played() {
+        let e = env().await;
+        library(&e).await;
+        let (_, list) = call(&e.app, Method::GET, "/api/audiobooks", None).await;
+        let id = list[0]["id"].as_i64().unwrap();
+        let t = 1_800_000_000_000i64;
+        save_position(&e.state.pool, id, 500, t, 0).await.unwrap();
+        let shelf_ids = |v: serde_json::Value| -> Vec<i64> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["id"].as_i64().unwrap())
+                .collect()
+        };
+
+        let (st, _) = call(
+            &e.app,
+            Method::DELETE,
+            &format!("/api/audiobooks/{id}/continue"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, shelf) = call(&e.app, Method::GET, "/api/audiobooks?shelf=continue", None).await;
+        assert!(shelf_ids(shelf).is_empty(), "off the shelf");
+        let (_, book) = call(&e.app, Method::GET, &format!("/api/audiobooks/{id}"), None).await;
+        assert_eq!(book["position_ms"], 500, "the place is kept");
+
+        // A save that does not move (the app closing) leaves it off.
+        save_position(&e.state.pool, id, 500, t + 60_000, 0)
+            .await
+            .unwrap();
+        let (_, shelf) = call(&e.app, Method::GET, "/api/audiobooks?shelf=continue", None).await;
+        assert!(shelf_ids(shelf).is_empty());
+
+        // Listening again puts it back.
+        save_position(&e.state.pool, id, 900, t + 120_000, 0)
+            .await
+            .unwrap();
+        let (_, shelf) = call(&e.app, Method::GET, "/api/audiobooks?shelf=continue", None).await;
+        assert_eq!(shelf_ids(shelf), [id]);
+
+        let (st, _) = call(
+            &e.app,
+            Method::DELETE,
+            "/api/audiobooks/999999/continue",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

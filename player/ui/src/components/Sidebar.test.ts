@@ -31,11 +31,22 @@ describe("Sidebar", () => {
   it("keeps the parent section highlighted on detail pages", async () => {
     const { wrapper } = mountApp(Sidebar);
     const nav = useNavStore();
-    for (const [view, section] of [["album", "Albums"], ["artist", "Artists"], ["genre", "Genres"], ["playlist", "Playlists"]] as const) {
+    for (const [from, view, section] of [["albums", "album", "Albums"], ["artists", "artist", "Artists"], ["genres", "genre", "Genres"], ["playlists", "playlist", "Playlists"], ["audiobooks", "audiobook", "Audiobooks"]] as const) {
+      nav.go(from);
       nav.go(view, 7);
       await wrapper.vm.$nextTick();
       expect(wrapper.findAll('[aria-current="page"]').map((b) => b.text())).toEqual([section]);
     }
+  });
+
+  it("keeps the section the breadcrumb started from: an album opened from an artist keeps Artists lit", async () => {
+    const { wrapper } = mountApp(Sidebar);
+    const nav = useNavStore();
+    nav.go("artists");
+    nav.go("artist", 3);
+    nav.go("album", 9);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('[aria-current="page"]').map((b) => b.text())).toEqual(["Artists"]);
   });
 
   it("shows a queue count only when the queue is not empty", async () => {

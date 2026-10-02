@@ -44,6 +44,16 @@ export function duration(ms: number): string {
   return m === 0 ? `${h} h` : `${h} h ${m} min`;
 }
 
+/** What a book's (or a file's) audio is: "MP3 · 44.1 kHz · 64 kbps · mono". */
+export function audioFormat(a: { format?: string | null; bitrate?: number | null; sample_rate?: number | null; channels?: number | null }): string {
+  const parts: string[] = [];
+  if (a.format) parts.push(a.format.toUpperCase().replace("_", " "));
+  if (a.sample_rate) parts.push(`${Math.round(a.sample_rate / 100) / 10} kHz`);
+  if (a.bitrate) parts.push(`${a.bitrate} kbps`);
+  if (a.channels) parts.push(a.channels === 1 ? "mono" : a.channels === 2 ? "stereo" : `${a.channels} ch`);
+  return parts.join(" · ");
+}
+
 /** Time left at the current speed: "3 h 12 min left". */
 export function remainingText(durationMs: number, offsetMs: number, speed = 1): string {
   const left = Math.max(0, durationMs - offsetMs) / Math.max(0.5, speed);

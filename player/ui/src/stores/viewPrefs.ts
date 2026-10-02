@@ -21,6 +21,7 @@ export interface ViewPrefs {
   albumTracksSort: TrackSortKey;
   searchLayout: LayoutMode;
   searchSort: TrackSortKey;
+  audiobooksLayout: LayoutMode;
 }
 
 const DEFAULTS: ViewPrefs = {
@@ -38,6 +39,7 @@ const DEFAULTS: ViewPrefs = {
   albumTracksSort: "default",
   searchLayout: "list",
   searchSort: "default",
+  audiobooksLayout: "grid",
 };
 
 const KEY = "kahawai.viewPrefs";
@@ -56,6 +58,7 @@ function load(): ViewPrefs {
       "queueLayout",
       "albumTracksLayout",
       "searchLayout",
+      "audiobooksLayout",
     ] as const) {
       if (layouts.includes(raw[k] as string)) prefs[k] = raw[k] as LayoutMode;
     }

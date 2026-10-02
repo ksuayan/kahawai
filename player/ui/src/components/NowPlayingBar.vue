@@ -77,7 +77,7 @@ function goNowPlaying(): void {
         data-testid="identity"
         @click="goNowPlaying"
       >
-        <Artwork :hash="artworkHash" :size="44" :radius="6" :alt="track ? trackTitle(track) : 'No track'" />
+        <Artwork :hash="artworkHash" :placeholder="books.isActive ? 'book' : 'music'" :size="44" :radius="6" :alt="track ? trackTitle(track) : 'No track'" />
         <div class="min-w-0">
           <div class="truncate font-semibold group-hover:text-accent" data-testid="title">
             {{ books.isActive && books.active ? books.active.title : track ? trackTitle(track) : "Nothing playing" }}

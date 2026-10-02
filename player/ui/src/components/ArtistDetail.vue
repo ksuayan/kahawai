@@ -1,11 +1,9 @@
 <script setup lang="ts">
-import { ChevronLeft } from "lucide-vue-next";
 import { onMounted, ref, watch } from "vue";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import type { Album, Artist } from "../types";
 import StateMessage from "../ui/StateMessage.vue";
-import UiButton from "../ui/UiButton.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import AlbumCard from "./AlbumCard.vue";
 
@@ -42,8 +40,7 @@ watch(() => props.id, (id) => load(id));
 </script>
 
 <template>
-  <ViewShell width="fluid">
-    <UiButton variant="icon" class="mb-3" @click="nav.go('artists')"><ChevronLeft /> Artists</UiButton>
+  <ViewShell width="fluid" section="artists" :crumb="artist?.name">
     <StateMessage v-if="loading" kind="loading">Loading artist…</StateMessage>
     <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>
     <div v-else-if="artist">

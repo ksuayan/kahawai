@@ -542,6 +542,11 @@ export async function markAudiobookFinished(id: number, finished = true): Promis
   return post<Audiobook>(`/api/audiobooks/${id}/finished`, { finished });
 }
 
+/** Take a book off the Continue listening shelf; its place is kept. */
+export async function dismissAudiobookFromShelf(id: number): Promise<void> {
+  await del(`/api/audiobooks/${id}/continue`);
+}
+
 export async function fetchAudiobookHistory(id: number): Promise<AudiobookSession[]> {
   return get<AudiobookSession[]>(`/api/audiobooks/${id}/history`);
 }

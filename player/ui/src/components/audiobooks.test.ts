@@ -8,11 +8,13 @@ import { tauri } from "../test/tauri-mock";
 import { useAudiobooksStore } from "../stores/audiobooks";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
+import { useViewPrefsStore } from "../stores/viewPrefs";
 import type { Audiobook, AudiobookDetail } from "../types";
 import AudiobookControls from "./AudiobookControls.vue";
 import AudiobookDetailView from "./AudiobookDetail.vue";
 import AudiobookSection from "./AudiobookSection.vue";
 import AudiobooksView from "./AudiobooksView.vue";
+import NowPlayingView from "./NowPlayingView.vue";
 import SeekBar from "./SeekBar.vue";
 import Sidebar from "./Sidebar.vue";
 
@@ -34,6 +36,11 @@ const summary = (id: number, over: Partial<Audiobook> = {}): Audiobook => ({
   position_ms: 0,
   last_played_at: null,
   progress: 0,
+  path: `/books/Book ${id}`,
+  format: "mp3",
+  bitrate: 64,
+  sample_rate: 44100,
+  channels: 1,
   ...over,
 });
 
@@ -42,7 +49,7 @@ const detail = (over: Partial<AudiobookDetail> = {}): AudiobookDetail => ({
   narrator: "Nora Narrator",
   series: "Saga",
   series_index: 2,
-  parts: [{ id: 1, track_id: 101, part_index: 0, title: "One", start_offset_ms: 0, duration_ms: 36_000_000 }],
+  parts: [{ id: 1, track_id: 101, part_index: 0, title: "One", start_offset_ms: 0, duration_ms: 36_000_000, format: "mp3", bitrate: 64, sample_rate: 44100, channels: 1 }],
   chapters: [
     { id: 1, part_id: 1, title: "Opening", start_offset_ms: 0, duration_ms: 1_000_000 },
     { id: 2, part_id: 1, title: "The Middle", start_offset_ms: 1_000_000, duration_ms: 2_000_000 },
@@ -72,8 +79,63 @@ describe("Audiobooks library view", () => {
     expect(cards).toHaveLength(2);
     expect(cards[0].text()).toContain("Book 1");
     expect(cards[0].text()).toContain("Ann Author");
+    expect(cards[0].find('[data-placeholder="book"]').exists()).toBe(true); // no cover: an open book, not a note
     await cards[1].trigger("click");
     expect(useNavStore().view).toEqual({ name: "audiobook", id: 2 });
+  });
+
+  it("switches to a list, with progress and length per book, and remembers the choice", async () => {
+    routes([summary(1, { progress: 0.42, series: "Saga", series_index: 2 }), summary(2, { finished_at: 5 })]);
+    const { wrapper } = mountApp(AudiobooksView);
+    await settle();
+    await wrapper.get('button[aria-label="List"]').trigger("click");
+    await settle();
+    expect(useViewPrefsStore().prefs.audiobooksLayout).toBe("list");
+    expect(wrapper.find('[data-testid="book-card"]').exists()).toBe(false);
+    const rows = wrapper.findAll('[data-testid="book-row"]');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].text()).toContain("Ann Author · Saga #2");
+    expect(rows[0].text()).toContain("42%");
+    expect(rows[0].text()).toContain("10 h");
+    expect(rows[1].text()).toContain("Finished");
+    expect(rows[0].get('[data-testid="book-row-format"]').text()).toBe("MP3 · 44.1 kHz · 64 kbps · mono");
+    await rows[1].trigger("click");
+    expect(useNavStore().view).toEqual({ name: "audiobook", id: 2 });
+  });
+
+  it("a book's right-click menu plays it, shows its info and edits its details", async () => {
+    const calls = mockFetch({
+      "/api/audiobooks/1/history": () => json([]),
+      "/api/audiobooks/1": (_u: string, init?: RequestInit) => (init?.method === "PATCH" ? json(summary(1)) : json(detail())),
+      "/api/audiobooks": (url: string) => json(url.includes("shelf=continue") ? [] : [summary(1), summary(2)]),
+    });
+    const { wrapper } = mountApp(AudiobooksView);
+    await settle();
+    const rightClick = async () => {
+      wrapper.get('[data-testid="book-card"]').element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      await settle();
+    };
+    await rightClick();
+    expect(menuItems().map((e) => e.textContent?.trim())).toEqual(["Play", "Info", "Edit details"]);
+
+    menuItems()[1].click();
+    await settle();
+    const info = document.body.querySelector('[data-testid="book-info"]')!;
+    expect(info.textContent).toContain("Book 1");
+    expect(document.body.querySelector('[data-testid="book-info-Format"]')?.textContent?.trim()).toBe("MP3 · 44.1 kHz · 64 kbps · mono");
+    expect(document.body.querySelector('[data-testid="book-info-Folder"]')?.textContent?.trim()).toBe("/books/Book 1");
+    expect(document.body.querySelector('[data-testid="book-info-Narrator"]')?.textContent?.trim()).toBe("Nora Narrator");
+    useAudiobooksStore().bookDialog = null;
+    await settle();
+
+    await rightClick();
+    menuItems()[2].click();
+    await settle();
+    await typeInto(document.body.querySelector('[data-testid="edit-narrator"]') as HTMLInputElement, "New Voice");
+    (document.body.querySelector('[data-testid="edit-save"]') as HTMLElement).click();
+    await settle();
+    const patch = calls.find((c) => c.url.endsWith("/api/audiobooks/1") && c.init?.method === "PATCH");
+    expect(JSON.parse(String(patch?.init?.body)).narrator).toBe("New Voice");
   });
 
   it("has a Continue listening shelf with a progress bar, and hides finished books from it", async () => {
@@ -149,8 +211,22 @@ describe("Audiobook detail", () => {
     expect(wrapper.get('[data-testid="book-length"]').text()).toContain("7 h 12 min left"); // 9 h to go at 1.25x
     expect(wrapper.get('[data-testid="play-book"]').text()).toContain("Continue from 1:00:00");
     expect(wrapper.findAll('[data-testid="chapter"]')).toHaveLength(2);
+    expect(wrapper.findAll('[data-testid="chapter-format"]').map((e) => e.text())).toEqual(["MP3 · 44.1 kHz · 64 kbps · mono", "MP3 · 44.1 kHz · 64 kbps · mono"]);
     expect(wrapper.get('[data-testid="bookmark"]').text()).toContain("Great line");
     expect(wrapper.get('[data-testid="history-day"]').text()).toContain("stopped at 1:00:00, 10 min listened");
+  });
+
+  it("has the same breadcrumb as the other sections: Audiobooks › the book", async () => {
+    routes();
+    const { wrapper } = mountApp(AudiobookDetailView, { id: 1 }, {}, () => {
+      useNavStore().go("audiobooks");
+      useNavStore().go("audiobook", 1);
+    });
+    await settle();
+    expect(wrapper.get('[data-testid="crumb-current"]').text()).toBe("Book 1");
+    expect(useNavStore().trail.at(-1)?.label).toBe("Book 1");
+    await wrapper.get('[data-testid="crumb"]').trigger("click");
+    expect(useNavStore().view).toEqual({ name: "audiobooks", id: undefined });
   });
 
   it("Continue starts the book at the saved place with its speed", async () => {
@@ -260,6 +336,30 @@ describe("Audiobook controls", () => {
     await settle();
     return { books, player };
   }
+
+  it("Now Playing shows the book, not the file: title, author and narrator, chapter, progress, speed and format", async () => {
+    const { books } = await playing();
+    const w = mountOnSamePinia(NowPlayingView);
+    await settle();
+    expect(w.get('[data-testid="np-kind"]').text()).toBe("Audiobook");
+    expect(w.get('[data-testid="np-title"]').text()).toBe("Book 1");
+    expect(w.get('[data-testid="np-byline"]').text()).toBe("by Ann Author · read by Nora Narrator");
+    expect(w.get('[data-testid="np-series"]').text()).toBe("Saga, book 2");
+    const chapter = w.get('[data-testid="np-chapter"]').text();
+    expect(chapter).toContain("Chapter 1 of 2");
+    expect(chapter).toContain("Opening");
+    expect(chapter).toContain("0:05 of 16:40");
+    expect(w.get('[data-testid="np-book-progress"]').text()).toContain("0:05 of 10 h");
+    expect(w.get('[data-testid="np-speed"]').text()).toBe("1.25×");
+    expect(w.get('[data-testid="np-book-format"]').text()).toMatch(/kHz/);
+    expect(w.find('[data-placeholder="book"]').exists()).toBe(true);
+    // Book actions, not the music ones.
+    expect(w.find('[data-testid="add-to-queue"]').exists()).toBe(false);
+    expect(w.find('[data-testid="np-back-to-music"]').exists()).toBe(!!books.stash);
+    await w.get('[data-testid="np-book-details"]').trigger("click");
+    expect(useNavStore().view).toEqual({ name: "audiobook", id: 1 });
+    w.unmount();
+  });
 
   it("skips by the book's own seconds, adds a bookmark, and changes speed", async () => {
     await playing();

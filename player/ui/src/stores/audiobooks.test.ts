@@ -29,6 +29,11 @@ function book(over: Partial<AudiobookDetail> = {}): AudiobookDetail {
     position_ms: 0,
     last_played_at: null,
     progress: 0,
+    path: "/books/Book",
+    format: "mp3",
+    bitrate: 64,
+    sample_rate: 44100,
+    channels: 1,
     parts: [
       { id: 1, track_id: 101, part_index: 0, title: "One", start_offset_ms: 0, duration_ms: 200_000 },
       { id: 2, track_id: 102, part_index: 1, title: "Two", start_offset_ms: 200_000, duration_ms: 400_000 },
@@ -225,6 +230,26 @@ describe("speed, bookmarks", () => {
     expect(e.store.speed).toBe(1.75);
   });
 
+  it("the book's page shows the speed set while it plays", async () => {
+    const e = await setup();
+    await e.store.openDetail(7);
+    await e.store.start(7);
+    await e.store.setSpeed(2);
+    expect(e.store.speed).toBe(2);
+    expect(e.store.detail?.settings.speed).toBe(2);
+  });
+
+  it("setting another book's speed from its page leaves the playing book alone", async () => {
+    const e = await setup();
+    await e.store.start(7);
+    const rates = tauri.callsTo("set_playback_rate").length;
+    e.store.detail = book({ id: 8 });
+    await e.store.setSpeed(2, 8);
+    expect(tauri.callsTo("set_playback_rate")).toHaveLength(rates);
+    expect(e.store.speed).toBe(1.5);
+    expect(e.store.detail?.settings.speed).toBe(2);
+  });
+
   it("a bookmark is made at the current book offset", async () => {
     const e = await setup();
     await e.store.start(7);
@@ -234,6 +259,25 @@ describe("speed, bookmarks", () => {
     const post = e.fetchCalls.filter((c) => c.url.endsWith("/bookmarks") && c.init?.method === "POST").at(-1);
     expect(JSON.parse(String(post?.init?.body)).book_offset_ms).toBe(212_000);
     expect(e.store.active?.bookmarks).toHaveLength(1);
+  });
+});
+
+describe("the Continue listening shelf", () => {
+  it("a book taken off the shelf disappears and the server is told", async () => {
+    const e = await setup();
+    e.store.shelf = [book(), book({ id: 8, title: "Other" })];
+    await e.store.dismissFromShelf(7);
+    expect(e.store.continueShelf.map((b) => b.id)).toEqual([8]);
+    const del = e.fetchCalls.find((c) => c.url.endsWith("/api/audiobooks/7/continue"));
+    expect(del?.init?.method).toBe("DELETE");
+  });
+
+  it("comes back if the server refuses", async () => {
+    const e = await setup();
+    e.store.shelf = [book({ id: 9 })];
+    mockFetch({ "/api/audiobooks/9/continue": () => new Response("{}", { status: 500 }) });
+    await e.store.dismissFromShelf(9);
+    expect(e.store.continueShelf.map((b) => b.id)).toEqual([9]);
   });
 });
 

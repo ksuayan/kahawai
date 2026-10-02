@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { makeAlbum, makeTrack, mockFetch } from "../test/fixtures";
+import { makeAlbum, makeState, makeTrack, mockFetch } from "../test/fixtures";
 import { mountApp, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
 import { ResizeObserverStub } from "../test/resizeobserver-mock";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
+import { usePlayerStore } from "../stores/player";
 import { useQueueStore } from "../stores/queue";
 import { useViewPrefsStore } from "../stores/viewPrefs";
 import AlbumDetail from "./AlbumDetail.vue";
@@ -160,7 +161,7 @@ describe("ArtistDetail", () => {
     await settle();
     expect(wrapper.get("h2").text()).toBe("Phoebe Bridgers");
     expect(wrapper.text()).toContain("2 albums");
-    expect(wrapper.findAll(".font-semibold.truncate").map((t) => t.text())).toEqual(["Stranger in the Alps", "Punisher"]);
+    expect(wrapper.findAll(".font-semibold.truncate:not([aria-current])").map((t) => t.text())).toEqual(["Stranger in the Alps", "Punisher"]);
     await wrapper.findAll(".group")[0].trigger("click");
     expect(useNavStore().view).toEqual({ name: "album", id: 10 });
   });
@@ -219,6 +220,33 @@ describe("AlbumDetail", () => {
     await settle();
     const sent = (tauri.callsTo("queue_append")[0] as { tracks: { id: number }[] }).tracks.map((t) => t.id);
     expect(sent).toEqual([t1.id, t2.id]);
+  });
+
+  it("Play next sits beside Play and puts the playable tracks after the current one", async () => {
+    routes();
+    const { wrapper } = mountApp(AlbumDetail, { id: 5 });
+    await settle();
+    const labels = wrapper.findAll("header button").map((b) => b.text().trim()).filter(Boolean);
+    expect(labels.slice(0, 2)).toEqual(["Play", "Play next"]);
+    await wrapper.get('[data-testid="play-next"]').trigger("click");
+    await settle();
+    const sent = (tauri.callsTo("queue_insert_next")[0] as { tracks: { id: number }[] }).tracks.map((t) => t.id);
+    expect(sent).toEqual([t1.id, t2.id]);
+  });
+
+  it("Play becomes Pause while one of the album's tracks plays, and pauses it", async () => {
+    routes();
+    tauri.on("get_state", makeState({ status: "playing", track: t2 }));
+    const { wrapper } = mountApp(AlbumDetail, { id: 5 });
+    await usePlayerStore().init();
+    await settle();
+    const play = wrapper.get('[data-testid="play-all"]');
+    expect(play.text()).toBe("Pause");
+    expect(play.find("svg").classes().join(" ")).toContain("lucide-pause");
+    await play.trigger("click");
+    await settle();
+    expect(tauri.callsTo("pause")).toHaveLength(1);
+    expect(tauri.callsTo("queue_play")).toHaveLength(0);
   });
 
   it("Play queues the playable tracks from the start (skipping missing files)", async () => {

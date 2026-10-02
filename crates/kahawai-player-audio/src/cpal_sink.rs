@@ -2,7 +2,10 @@
 //!
 //! Contract with the engine:
 //! - `open()` negotiates the device config: the track's channel count is
-//!   mandatory (the engine does not remap channels); the track's sample
+//!   used when the device offers it; otherwise (a mono audiobook on a
+//!   stereo-only output) the device opens with more channels and `write()`
+//!   spreads the track's channels over them (mono goes to both left and
+//!   right). The engine never sees the difference. The track's sample
 //!   rate is used when the device supports it, otherwise the device rate
 //!   is used and the engine resamples (`preferred_sample_rate` reports
 //!   the real rate — hence "native rate where supported, resample only
@@ -91,7 +94,12 @@ pub struct CpalSink {
     stream: Option<cpal::Stream>,
     producer: Option<ringbuf::HeapProd<f32>>,
     stream_rate: Option<u32>,
+    /// Channels the device was opened with.
     channels: u16,
+    /// Channels the engine writes (the track's), when fewer than `channels`.
+    src_channels: u16,
+    /// Reused buffer for upmixed audio.
+    upmix: Vec<f32>,
     underruns: Arc<AtomicU64>,
     stream_error: Arc<AtomicBool>,
     /// What the engine wants the callback to do: false fades it out.
@@ -113,6 +121,8 @@ impl CpalSink {
             producer: None,
             stream_rate: None,
             channels: 0,
+            src_channels: 0,
+            upmix: Vec::new(),
             underruns: Arc::new(AtomicU64::new(0)),
             stream_error: Arc::new(AtomicBool::new(false)),
             audible: Arc::new(AtomicBool::new(true)),
@@ -164,6 +174,7 @@ impl CpalSink {
         self.producer = None;
         self.stream_rate = None;
         self.channels = 0;
+        self.src_channels = 0;
         self.stream_error.store(false, Ordering::SeqCst);
     }
 }
@@ -194,12 +205,22 @@ impl AudioSink for CpalSink {
             .map_err(|e| MusicError::Audio(format!("output configs: {e}")))?
             .collect();
         // Prefer f32; the callback works in f32 natively.
-        ranges.retain(|r| r.channels() == channels && r.sample_format() == cpal::SampleFormat::F32);
+        ranges.retain(|r| r.sample_format() == cpal::SampleFormat::F32);
+        let out_channels = output_channels(channels, ranges.iter().map(|r| r.channels()))
+            .ok_or_else(|| MusicError::Audio(format!("no {channels}-channel f32 output config")))?;
+        ranges.retain(|r| r.channels() == out_channels);
         let range = ranges
             .iter()
             .find(|r| r.min_sample_rate().0 <= want_rate && want_rate <= r.max_sample_rate().0)
             .or_else(|| ranges.first())
             .ok_or_else(|| MusicError::Audio(format!("no {channels}-channel f32 output config")))?;
+        if out_channels != channels {
+            tracing::info!(
+                track_channels = channels,
+                device_channels = out_channels,
+                "device has no matching channel layout; upmixing"
+            );
+        }
         let rate = want_rate.clamp(range.min_sample_rate().0, range.max_sample_rate().0);
         let config = range.with_sample_rate(cpal::SampleRate(rate)).config();
 
@@ -248,6 +269,7 @@ impl AudioSink for CpalSink {
         self.producer = Some(prod);
         self.stream_rate = Some(config.sample_rate.0);
         self.channels = config.channels;
+        self.src_channels = channels;
         self.stream = Some(stream);
         self.state = SinkState::Stopped;
         Ok(())
@@ -257,18 +279,28 @@ impl AudioSink for CpalSink {
         if self.stream_error.load(Ordering::SeqCst) {
             return Err(MusicError::Audio("output device error".into()));
         }
-        if chunk.channels as u16 != self.channels {
+        let frames: &[f32] = if chunk.channels as u16 == self.channels {
+            &chunk.frames
+        } else if chunk.channels as u16 == self.src_channels {
+            upmix(
+                &chunk.frames,
+                chunk.channels as usize,
+                self.channels as usize,
+                &mut self.upmix,
+            );
+            &self.upmix
+        } else {
             return Err(MusicError::Audio(format!(
                 "channel mismatch: chunk has {}, device opened {}",
                 chunk.channels, self.channels
             )));
-        }
+        };
         self.clean_end = false; // new audio is queued: the old stream is not what ends
         let prod = self
             .producer
             .as_mut()
             .ok_or_else(|| MusicError::Audio("sink not open".into()))?;
-        let mut rest = &chunk.frames[..];
+        let mut rest = frames;
         let deadline = Instant::now() + WRITE_DEADLINE;
         // Backpressure: wait until the queued audio is down to the target.
         let target = self.stream_rate.unwrap_or(48_000) as usize
@@ -388,6 +420,36 @@ impl AudioSink for CpalSink {
     }
 }
 
+/// The channel count to open the device with for a track of `want`
+/// channels: `want` itself when offered, else stereo for a mono track, else
+/// the smallest layout with more channels. `None` when every layout has
+/// fewer channels (the engine does not downmix).
+fn output_channels(want: u16, offered: impl Iterator<Item = u16>) -> Option<u16> {
+    let offered: Vec<u16> = offered.collect();
+    if offered.contains(&want) {
+        return Some(want);
+    }
+    if want == 1 && offered.contains(&2) {
+        return Some(2);
+    }
+    offered.into_iter().filter(|&c| c > want).min()
+}
+
+/// Spread interleaved `src` audio of `from` channels over `to` channels
+/// into `out`: channel `c` goes to output `c`, the rest are silent, except
+/// that mono is copied to the first two outputs (left and right).
+fn upmix(src: &[f32], from: usize, to: usize, out: &mut Vec<f32>) {
+    out.clear();
+    out.resize(src.len() / from * to, 0.0);
+    for (i, frame) in src.chunks_exact(from).enumerate() {
+        let dst = &mut out[i * to..(i + 1) * to];
+        dst[..from].copy_from_slice(frame);
+        if from == 1 && to >= 2 {
+            dst[1] = frame[0];
+        }
+    }
+}
+
 /// One cpal output device, for the shell's device list.
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
@@ -414,6 +476,46 @@ pub fn list_output_devices() -> Vec<DeviceInfo> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod upmix_tests {
+    use super::*;
+
+    #[test]
+    fn a_layout_the_device_offers_is_used_as_is() {
+        assert_eq!(output_channels(2, [2, 8].into_iter()), Some(2));
+        assert_eq!(output_channels(1, [1, 2].into_iter()), Some(1));
+    }
+
+    #[test]
+    fn mono_opens_stereo_and_wider_falls_back_to_the_next_size_up() {
+        assert_eq!(output_channels(1, [8, 2, 4].into_iter()), Some(2));
+        assert_eq!(output_channels(1, [8, 4].into_iter()), Some(4));
+        assert_eq!(output_channels(3, [2, 8, 6].into_iter()), Some(6));
+    }
+
+    #[test]
+    fn a_device_with_fewer_channels_is_refused() {
+        assert_eq!(output_channels(6, [2].into_iter()), None);
+        assert_eq!(output_channels(1, std::iter::empty()), None);
+    }
+
+    #[test]
+    fn mono_is_heard_on_left_and_right() {
+        let mut out = Vec::new();
+        upmix(&[0.1, -0.2, 0.3], 1, 2, &mut out);
+        assert_eq!(out, [0.1, 0.1, -0.2, -0.2, 0.3, 0.3]);
+        upmix(&[0.5], 1, 4, &mut out);
+        assert_eq!(out, [0.5, 0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn extra_channels_are_silent() {
+        let mut out = vec![9.0; 3];
+        upmix(&[0.1, 0.2, 0.3, 0.4], 2, 4, &mut out);
+        assert_eq!(out, [0.1, 0.2, 0.0, 0.0, 0.3, 0.4, 0.0, 0.0]);
+    }
 }
 
 #[cfg(test)]

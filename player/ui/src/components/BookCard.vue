@@ -28,7 +28,7 @@ const subtitle = computed(() => {
     @click="$emit('open', book.id)"
   >
     <div class="relative">
-      <Artwork :hash="book.cover_hash" :radius="6" :alt="book.title" fluid class="transition group-hover:brightness-110" />
+      <Artwork :hash="book.cover_hash" placeholder="book" :radius="6" :alt="book.title" fluid class="transition group-hover:brightness-110" />
       <span
         v-if="book.finished_at"
         class="absolute right-1.5 top-1.5 flex size-5 items-center justify-center rounded-full bg-accent text-white"

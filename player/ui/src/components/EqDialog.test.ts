@@ -230,6 +230,11 @@ describe("EQ point severity colours", () => {
     const note = document.body.querySelector('[data-testid="eq-band-severity"]')!;
     expect(note.getAttribute("data-severity")).toBe("bad");
     expect(note.textContent).toContain("Bad for sound quality");
+    const add = document.body.querySelector<HTMLButtonElement>('[data-testid="add-band"]')!;
+    expect(add.disabled).toBe(false); // a selected band does not hide Add band
+    add.click();
+    await settle();
+    expect(dsp.rows).toHaveLength(2);
   });
 
   it("a disabled band is grey, whatever its settings", async () => {

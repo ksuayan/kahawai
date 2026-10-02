@@ -22,7 +22,12 @@ const props = withDefaults(
   { nearEndRows: 20, getKey: undefined },
 );
 const emit = defineEmits<{ (e: "near-end"): void }>();
-defineSlots<{ item(props: { item: T; index: number }): unknown; footer?(): unknown }>();
+defineSlots<{
+  item(props: { item: T; index: number }): unknown;
+  /** Drawn over the rows, in their coordinates (drag outlines, drop markers). */
+  overlay?(): unknown;
+  footer?(): unknown;
+}>();
 
 const scrollEl = ref<HTMLElement | null>(null);
 const scrollMemory = useScrollMemoryStore();
@@ -53,8 +58,8 @@ useOwnScrollMemory(scrollEl, () => props.scrollKey);
 </script>
 
 <template>
-  <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto">
-    <div :style="{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }">
+  <div ref="scrollEl" class="min-h-0 flex-1 overflow-y-auto" data-scroller>
+    <div :style="{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }" data-rows>
       <div
         v-for="row in virtualizer.getVirtualItems()"
         :key="String(row.key)"
@@ -69,6 +74,7 @@ useOwnScrollMemory(scrollEl, () => props.scrollKey);
       >
         <slot name="item" :item="items[row.index]" :index="row.index" />
       </div>
+      <slot name="overlay" />
     </div>
     <slot name="footer" />
   </div>

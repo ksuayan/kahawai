@@ -390,6 +390,9 @@ pub struct EnrichReport {
     pub not_found: u64,
     /// Stopped early because the service could not be reached.
     pub offline: Option<String>,
+    /// Google Books (the fallback) refused or could not be reached, so the
+    /// rest of the job used Open Library alone.
+    pub google_skipped: Option<String>,
     pub cancelled: bool,
 }
 
@@ -439,6 +442,8 @@ pub async fn enrich_books(
     let total = todo.len() as u64;
     let mut report = EnrichReport::default();
     for (n, (id, title, author, has_author, has_year, has_cover)) in todo.into_iter().enumerate() {
+        // A folder named "Title by Author" is searched as just that.
+        let (title, author) = crate::audiobooks::untangle_author(title, author);
         if !matches!(
             jobs.get(job_id).map(|j| j.status),
             Some(JobStatus::Queued | JobStatus::Running)
@@ -449,9 +454,16 @@ pub async fn enrich_books(
         let mut fill = Fill::default();
         let (mut got_author, mut got_year, mut got_cover) = (has_author, has_year, has_cover);
         let mut matched = false;
+        // Still blank after Open Library while Google Books was skipped: ask
+        // again next time rather than marking the book as asked.
+        let mut missed_google = false;
         // Open Library first, then Google Books for what is still missing.
         for source in 0..2 {
             if got_author && got_year && got_cover {
+                break;
+            }
+            if source == 1 && report.google_skipped.is_some() {
+                missed_google = true;
                 break;
             }
             let found = if source == 0 {
@@ -461,9 +473,18 @@ pub async fn enrich_books(
             };
             let candidates = match found {
                 Ok(c) => c,
-                Err(LookupError::Unreachable(m)) => {
+                // Open Library is the main source: without it, stop.
+                Err(LookupError::Unreachable(m)) if source == 0 => {
                     report.offline = Some(m);
                     return Ok(report);
+                }
+                // Google Books is only the fallback (and often refuses
+                // requests without a key): carry on without it.
+                Err(LookupError::Unreachable(m)) => {
+                    tracing::warn!(error = %m, "Google Books unavailable; using Open Library only");
+                    report.google_skipped = Some(m);
+                    missed_google = true;
+                    continue;
                 }
                 Err(LookupError::Failed(m)) => {
                     tracing::warn!(book = id, error = %m, "audiobook lookup failed");
@@ -513,11 +534,11 @@ pub async fn enrich_books(
             }
         }
         sqlx::query(
-            "UPDATE audiobooks SET author = COALESCE(author, ?), year = COALESCE(year, ?), enriched_at = ? WHERE id = ?",
+            "UPDATE audiobooks SET author = COALESCE(author, ?), year = COALESCE(year, ?), enriched_at = COALESCE(?, enriched_at) WHERE id = ?",
         )
         .bind(fill.author)
         .bind(fill.year)
-        .bind(crate::audiobooks::now_ms())
+        .bind((!missed_google).then(crate::audiobooks::now_ms))
         .bind(id)
         .execute(pool)
         .await
@@ -811,6 +832,57 @@ mod tests {
                 .get(0);
         assert_eq!(asked, 0, "they will be tried again next time");
         let _ = ids;
+    }
+
+    #[tokio::test]
+    async fn a_busy_google_books_is_skipped_and_open_library_results_are_kept() {
+        let hits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ol = stub(hits.clone()).await;
+        // Google Books that always says 429.
+        let app = Router::new().route("/volumes", get(|| async { StatusCode::TOO_MANY_REQUESTS }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gb = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // Dune's folder name carries the author; Open Library finds it.
+        let (_d, pool, ids) =
+            db_with_books(&[("Gaia Only", None, 0), ("Dune by Frank Herbert", None, 0)]).await;
+        let jobs = JobStore::new();
+        let job = jobs
+            .create(kahawai_core::JobKind::EnrichBooks, "t".into(), None)
+            .await;
+        jobs.set_status(&job.id, JobStatus::Running).await;
+        let client = BookClient::with_bases(&ol, &ol, &gb, Duration::from_millis(1));
+        let r = enrich_books(&pool, &client, None, &jobs, &job.id, |_, _| {})
+            .await
+            .unwrap();
+        assert!(r.offline.is_none(), "{r:?}");
+        assert!(r.google_skipped.is_some());
+        assert_eq!((r.looked_up, r.matched), (2, 1), "{r:?}");
+        assert!(
+            hits.lock().unwrap().contains(&"ol:Dune".to_string()),
+            "searched by the title alone"
+        );
+        let dune = sqlx::query("SELECT author, year FROM audiobooks WHERE id = ?")
+            .bind(ids[1])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            dune.get::<Option<String>, _>("author").as_deref(),
+            Some("Frank Herbert")
+        );
+        assert_eq!(dune.get::<Option<i64>, _>("year"), Some(1965));
+        let gaia: Option<i64> = sqlx::query("SELECT enriched_at FROM audiobooks WHERE id = ?")
+            .bind(ids[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            gaia.is_none(),
+            "Google Books was skipped: asked again next time"
+        );
     }
 
     #[tokio::test]

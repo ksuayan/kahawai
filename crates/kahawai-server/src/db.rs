@@ -86,7 +86,10 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             17,
             include_str!("../migrations/017_audiobook_listeners.sql"),
         ),
-        // 18 is main's 018_audiobook_shelf_dismiss.sql (not on this branch yet).
+        (
+            18,
+            include_str!("../migrations/018_audiobook_shelf_dismiss.sql"),
+        ),
         (19, include_str!("../migrations/019_podcasts.sql")),
         (20, include_str!("../migrations/020_radio.sql")),
     ];
@@ -104,6 +107,21 @@ async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             .fetch_one(&mut *conn)
             .await?
             .get(0);
+    // Builds of claude/online-sources numbered the radio migration 18 before
+    // it became 20, so a database from one of them has 18 recorded without the
+    // audiobook shelf migration that 18 now is. Forget that 18 (it is checked
+    // by its column, and 020 re-runs the radio part safely).
+    let has_dismissed: bool = sqlx::query(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('audiobook_positions') WHERE name = 'dismissed'",
+    )
+    .fetch_one(&mut *conn)
+    .await?
+    .get(0);
+    if !has_dismissed {
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 18")
+            .execute(&mut *conn)
+            .await?;
+    }
     let applied: Vec<i64> = sqlx::query("SELECT version FROM schema_migrations")
         .fetch_all(&mut *conn)
         .await?
@@ -467,7 +485,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
 
         // Old row survived; new columns carry their defaults.
@@ -552,7 +570,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
         let rows = sqlx::query("SELECT format, mqa, mqa_checked FROM tracks ORDER BY path")
             .fetch_all(&pool)
@@ -623,7 +641,7 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
         let r =
             sqlx::query("SELECT id, hash, hash_algo, title, album_id, file_size, mqa FROM tracks")
@@ -813,13 +831,13 @@ mod tests {
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
         pool.close().await;
         let pool = open(&db_path).await.unwrap();
         assert_eq!(
             versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
     }
 
@@ -853,6 +871,11 @@ mod tests {
                 .await
                 .unwrap();
             if radio_ran_as_18 {
+                // A database from such a build never had the shelf column.
+                sqlx::query("ALTER TABLE audiobook_positions DROP COLUMN dismissed")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
                 let mut conn = pool.acquire().await.unwrap();
                 let mut tx = sqlx::Connection::begin(&mut *conn).await.unwrap();
                 apply_sql(&mut tx, include_str!("../migrations/020_radio.sql"))
@@ -874,6 +897,17 @@ mod tests {
                 );
             }
             assert!(versions(&pool).await.contains(&20));
+            let dismissed: bool = sqlx::query(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('audiobook_positions') WHERE name = 'dismissed'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+            assert!(
+                dismissed,
+                "the shelf migration ran (radio ran as 18: {radio_ran_as_18})"
+            );
         }
     }
 }
