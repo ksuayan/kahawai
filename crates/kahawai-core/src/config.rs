@@ -32,6 +32,10 @@ fn default_ladder() -> Vec<StreamFormat> {
     vec![StreamFormat::Passthrough, StreamFormat::Flac]
 }
 
+fn default_podcast_refresh_hours() -> u32 {
+    6
+}
+
 /// v1 server configuration. v1 is LAN-only: no auth, no TLS (spec §3.6, §8).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -47,6 +51,14 @@ pub struct ServerConfig {
     /// through the API stays too), and the desktop app edits this list.
     #[serde(default)]
     pub audiobook_dirs: Vec<PathBuf>,
+    /// Where downloaded podcast episodes go. `None` = a `podcasts` folder next
+    /// to the database.
+    #[serde(default)]
+    pub podcast_dir: Option<PathBuf>,
+    /// How often subscribed podcasts are checked for new episodes, in hours.
+    /// 0 turns the background check off (the refresh button still works).
+    #[serde(default = "default_podcast_refresh_hours")]
+    pub podcast_refresh_hours: u32,
     /// Preferred format ladder, first satisfiable entry wins
     /// (see [`crate::format::transcode_ladder`]).
     #[serde(default = "default_ladder")]
@@ -170,6 +182,8 @@ impl Default for ServerConfig {
         Self {
             music_dirs: Vec::new(),
             audiobook_dirs: Vec::new(),
+            podcast_dir: None,
+            podcast_refresh_hours: default_podcast_refresh_hours(),
             bind: default_bind(),
             db_path: default_db_path(),
             preferred_ladder: default_ladder(),

@@ -13,6 +13,7 @@ use sqlx::Row;
 
 use crate::api::ApiError;
 use crate::db::cvt;
+use crate::podcast_dl;
 use crate::podcast_feed;
 use crate::podcasts::{self, FeedRow, Refreshed};
 use crate::AppState;
@@ -56,6 +57,10 @@ pub async fn add_feed(State(s): State<AppState>, Json(b): Json<NewFeed>) -> ApiR
     let id = podcasts::insert_feed(&s.pool, &url, &parsed.title).await?;
     let stored =
         podcasts::store(&s.pool, id, &parsed, etag.as_deref(), modified.as_deref()).await?;
+    let state = s.clone();
+    tokio::spawn(async move {
+        let _ = podcast_dl::auto_download(&state, id).await;
+    });
     let out = Subscribed {
         feed: podcasts::get_feed(&s.pool, id).await?,
         episodes_added: stored.episodes_added,
@@ -90,7 +95,16 @@ pub async fn refresh(
             .map(|f| f.id)
             .collect(),
     };
-    Ok(Json(refresh_many(&s.pool, ids).await))
+    let done = refresh_many(&s.pool, ids).await;
+    for r in &done {
+        if r.error.is_none() && !r.unchanged {
+            let (state, id) = (s.clone(), r.feed_id);
+            tokio::spawn(async move {
+                let _ = podcast_dl::auto_download(&state, id).await;
+            });
+        }
+    }
+    Ok(Json(done))
 }
 
 async fn refresh_many(pool: &sqlx::SqlitePool, ids: Vec<i64>) -> Vec<Refreshed> {
@@ -253,6 +267,124 @@ pub async fn mark_played(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// --- downloads --------------------------------------------------------------
+
+/// `POST /api/podcasts/episodes/{id}/download`: queue the download (a job).
+pub async fn download(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let job = podcast_dl::spawn_download(s, id).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
+/// `DELETE /api/podcasts/episodes/{id}/download`: cancel it, or delete the file.
+pub async fn delete_download(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<StatusCode> {
+    podcast_dl::remove_download(&s, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/podcasts/episodes/{id}/file`: the downloaded audio, with byte ranges.
+pub async fn episode_file(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Response> {
+    let row = sqlx::query("SELECT file_path, enclosure_type FROM podcast_episodes WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&s.pool)
+        .await
+        .map_err(cvt)?
+        .ok_or_else(|| MusicError::NotFound(format!("episode {id}")))?;
+    let path: Option<String> = row.get(0);
+    let path = path.ok_or_else(|| MusicError::NotFound("that episode is not downloaded".into()))?;
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| MusicError::NotFound("the downloaded file is missing".into()))?;
+    let mime = match podcast_dl::extension_for(row.get::<Option<String>, _>(1).as_deref(), &path) {
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" => "audio/ogg",
+        "opus" => "audio/opus",
+        "flac" => "audio/flac",
+        "wav" => "audio/wav",
+        _ => "audio/mpeg",
+    };
+    crate::api::serve_ranged(file, &headers, mime).await
+}
+
+#[derive(Serialize)]
+pub struct FolderInfo {
+    pub path: String,
+    /// The folder exists (or could be made) and can be written to.
+    pub usable: bool,
+    pub episodes_downloaded: i64,
+    pub bytes_downloaded: u64,
+}
+
+/// `GET /api/podcasts/folder`: where downloads go and what is in it.
+pub async fn folder(State(s): State<AppState>) -> ApiResult<Json<FolderInfo>> {
+    let root = podcast_dl::podcast_root(&s.config.read().unwrap());
+    let usable = tokio::fs::create_dir_all(&root).await.is_ok();
+    let paths: Vec<String> =
+        sqlx::query("SELECT file_path FROM podcast_episodes WHERE file_path IS NOT NULL")
+            .fetch_all(&s.pool)
+            .await
+            .map_err(cvt)?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+    let mut bytes = 0u64;
+    for p in &paths {
+        bytes += tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0);
+    }
+    Ok(Json(FolderInfo {
+        path: root.to_string_lossy().to_string(),
+        usable,
+        episodes_downloaded: paths.len() as i64,
+        bytes_downloaded: bytes,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct FeedSettings {
+    pub auto_download: Option<bool>,
+    pub keep_n: Option<i64>,
+    pub delete_played_after_days: Option<i64>,
+}
+
+/// `PUT /api/podcasts/feeds/{id}/settings`: how this feed downloads and tidies.
+pub async fn put_feed_settings(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Json(b): Json<FeedSettings>,
+) -> ApiResult<Json<FeedRow>> {
+    let cur = podcasts::get_feed(&s.pool, id).await?;
+    let keep = b.keep_n.unwrap_or(cur.keep_n);
+    let days = b
+        .delete_played_after_days
+        .unwrap_or(cur.delete_played_after_days);
+    if !(1..=100).contains(&keep) {
+        return Err(MusicError::BadRequest("keep_n must be 1 to 100".into()).into());
+    }
+    if !(0..=365).contains(&days) {
+        return Err(
+            MusicError::BadRequest("delete_played_after_days must be 0 to 365".into()).into(),
+        );
+    }
+    sqlx::query(
+        "UPDATE podcast_feeds SET auto_download = ?, keep_n = ?, delete_played_after_days = ? WHERE id = ?",
+    )
+    .bind(i64::from(b.auto_download.unwrap_or(cur.auto_download)))
+    .bind(keep)
+    .bind(days)
+    .bind(id)
+    .execute(&s.pool)
+    .await
+    .map_err(cvt)?;
+    Ok(Json(podcasts::get_feed(&s.pool, id).await?))
+}
+
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Imported {
     pub added: usize,
@@ -402,12 +534,16 @@ mod tests {
     }
 
     fn feed_xml(title: &str, eps: &[(&str, &str)]) -> String {
+        feed_xml_at("https://cdn.example", title, eps)
+    }
+
+    fn feed_xml_at(audio_base: &str, title: &str, eps: &[(&str, &str)]) -> String {
         let items: String = eps
             .iter()
             .map(|(g, d)| {
                 format!(
                     "<item><title>Episode {g}</title><guid>{g}</guid><pubDate>{d}</pubDate>\
-                     <enclosure url=\"https://cdn.example/{g}.mp3\" length=\"10\" type=\"audio/mpeg\"/>\
+                     <enclosure url=\"{audio_base}/audio/{g}.mp3\" length=\"10\" type=\"audio/mpeg\"/>\
                      <itunes:duration>10:00</itunes:duration></item>"
                 )
             })
@@ -458,7 +594,42 @@ mod tests {
                 "/page",
                 get(|| async { axum::response::Html("<html><head><link rel=\"alternate\" type=\"application/rss+xml\" href=\"/feed\"></head></html>") }),
             )
-            .route("/gone", get(|| async { StatusCode::NOT_FOUND }));
+            .route("/gone", get(|| async { StatusCode::NOT_FOUND }))
+            .route(
+                "/audio/{name}",
+                get(
+                    |axum::extract::Path(name): axum::extract::Path<String>,
+                     headers: axum::http::HeaderMap| async move {
+                        if name.starts_with("html") {
+                            return axum::response::Html("<html>login</html>").into_response();
+                        }
+                        let body: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+                        if let Some(r) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+                            if let Some(from) = r
+                                .strip_prefix("bytes=")
+                                .and_then(|s| s.strip_suffix('-'))
+                                .and_then(|s| s.parse::<usize>().ok())
+                            {
+                                let part = body[from.min(body.len())..].to_vec();
+                                return (
+                                    StatusCode::PARTIAL_CONTENT,
+                                    [
+                                        (header::CONTENT_TYPE, "audio/mpeg".to_string()),
+                                        (
+                                            header::CONTENT_RANGE,
+                                            format!("bytes {from}-{}/{}", body.len() - 1, body.len()),
+                                        ),
+                                        (header::HeaderName::from_static("x-saw-range"), r.to_string()),
+                                    ],
+                                    part,
+                                )
+                                    .into_response();
+                            }
+                        }
+                        ([(header::CONTENT_TYPE, "audio/mpeg")], body).into_response()
+                    },
+                ),
+            );
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -782,6 +953,438 @@ mod tests {
             Method::GET,
             &format!("/api/podcasts/feeds/{id}/episodes"),
             None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    fn audio_bytes() -> Vec<u8> {
+        (0..50_000u32).map(|i| (i % 251) as u8).collect()
+    }
+
+    async fn subscribe(e: &Env, base: &str) -> i64 {
+        let (st, out) = call(
+            &e.app,
+            Method::POST,
+            "/api/podcasts/feeds",
+            Some(serde_json::json!({"url": format!("{base}/feed")})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{out}");
+        out["feed"]["id"].as_i64().unwrap()
+    }
+
+    fn use_folder(e: &Env) -> std::path::PathBuf {
+        let dir = e._dir.path().join("podcasts");
+        e.state.config.write().unwrap().podcast_dir = Some(dir.clone());
+        dir
+    }
+
+    /// Wait until the episode's file exists (downloads run in the background).
+    async fn wait_downloaded(e: &Env, feed: i64, n: usize) -> serde_json::Value {
+        for _ in 0..200 {
+            let (_, eps) = call(
+                &e.app,
+                Method::GET,
+                &format!("/api/podcasts/feeds/{feed}/episodes"),
+                None,
+            )
+            .await;
+            if eps
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|x| x["downloaded"] == true)
+                .count()
+                >= n
+            {
+                return eps;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the downloads did not finish");
+    }
+
+    async fn no_auto(e: &Env, feed: i64) {
+        call(
+            &e.app,
+            Method::PUT,
+            &format!("/api/podcasts/feeds/{feed}/settings"),
+            Some(serde_json::json!({"auto_download": false})),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn new_episodes_download_by_themselves_into_show_folders() {
+        let e = env().await;
+        let dir = use_folder(&e);
+        let (base, _s) = site(String::new()).await;
+        *_s.feed.lock().unwrap() = feed_xml_at(&base, "My Show", &[("a", D1), ("b", D2)]);
+        let feed = subscribe(&e, &base).await;
+        let eps = wait_downloaded(&e, feed, 2).await;
+        let path = dir.join("My Show").join("2026-03-03 - Episode b.mp3");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            audio_bytes(),
+            "the whole file, intact"
+        );
+        assert!(dir
+            .join("My Show")
+            .join("2026-03-02 - Episode a.mp3")
+            .is_file());
+        assert!(eps[0]["downloaded"] == true);
+        // The file is served with byte ranges.
+        let id = eps[0]["id"].as_i64().unwrap();
+        let (st, body) = call_raw(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/episodes/{id}/file"),
+            None,
+        )
+        .await;
+        assert_eq!((st, body.len()), (StatusCode::OK, 50_000));
+        let req = Request::builder()
+            .uri(format!("/api/podcasts/episodes/{id}/file"))
+            .header("range", "bytes=100-199")
+            .body(Body::empty())
+            .unwrap();
+        let res = e.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        let (st, _) = call_raw(
+            &e.app,
+            Method::GET,
+            "/api/podcasts/episodes/9999/file",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        // Folder info.
+        let (_, f) = call(&e.app, Method::GET, "/api/podcasts/folder", None).await;
+        assert_eq!(f["episodes_downloaded"], 2);
+        assert_eq!(f["bytes_downloaded"], 100_000);
+        assert_eq!(f["usable"], true);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_download_resumes_from_its_partial_file() {
+        let e = env().await;
+        let dir = use_folder(&e);
+        let (base, s) = site(String::new()).await;
+        *s.feed.lock().unwrap() = feed_xml_at(&base, "Resume", &[("a", D1)]);
+        // Subscribe without downloading, then leave a partial file as a dropped download would.
+        let (_, out) = call(
+            &e.app,
+            Method::POST,
+            "/api/podcasts/feeds",
+            Some(serde_json::json!({"url": format!("{base}/feed")})),
+        )
+        .await;
+        let feed = out["feed"]["id"].as_i64().unwrap();
+        no_auto(&e, feed).await;
+        let eps = {
+            // Auto-download may already have started; start over from a clean slate.
+            let (_, eps) = call(
+                &e.app,
+                Method::GET,
+                &format!("/api/podcasts/feeds/{feed}/episodes"),
+                None,
+            )
+            .await;
+            eps
+        };
+        let id = eps[0]["id"].as_i64().unwrap();
+        let (st, _) = call(
+            &e.app,
+            Method::DELETE,
+            &format!("/api/podcasts/episodes/{id}/download"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let target = dir.join("Resume").join("2026-03-02 - Episode a.mp3");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(format!("{}.part", target.display()), &audio_bytes()[..1000]).unwrap();
+        let (st, job) = call(
+            &e.app,
+            Method::POST,
+            &format!("/api/podcasts/episodes/{id}/download"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
+        wait_downloaded(&e, feed, 1).await;
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            audio_bytes(),
+            "the first 1000 bytes were not fetched again"
+        );
+        assert!(!std::path::Path::new(&format!("{}.part", target.display())).exists());
+        // Already there: asking again is a conflict, not a second copy.
+        let (st, _) = call(
+            &e.app,
+            Method::POST,
+            &format!("/api/podcasts/episodes/{id}/download"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_link_that_opens_a_web_page_fails_cleanly() {
+        let e = env().await;
+        let dir = use_folder(&e);
+        let (base, s) = site(String::new()).await;
+        *s.feed.lock().unwrap() = feed_xml_at(&base, "Paywall", &[("html1", D1)]);
+        let feed = subscribe(&e, &base).await;
+        no_auto(&e, feed).await;
+        let (_, eps) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/feeds/{feed}/episodes"),
+            None,
+        )
+        .await;
+        let id = eps[0]["id"].as_i64().unwrap();
+        // Wait out any automatic attempt, then ask explicitly.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let _ = call(
+            &e.app,
+            Method::POST,
+            &format!("/api/podcasts/episodes/{id}/download"),
+            None,
+        )
+        .await;
+        let mut message = String::new();
+        for _ in 0..100 {
+            let (_, jobs) = call(&e.app, Method::GET, "/api/jobs", None).await;
+            if let Some(j) = jobs.as_array().and_then(|a| {
+                a.iter()
+                    .find(|j| j["kind"] == "podcast_download" && j["status"] == "failed")
+            }) {
+                message = j["message"].as_str().unwrap_or("").to_string();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(message.contains("web page"), "{message}");
+        let (_, eps) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/feeds/{feed}/episodes"),
+            None,
+        )
+        .await;
+        assert_eq!(eps[0]["downloaded"], false);
+        assert!(!dir
+            .join("Paywall")
+            .join("2026-03-02 - Episode html1.mp3")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn keep_n_clears_played_episodes_first_then_the_oldest() {
+        let e = env().await;
+        let dir = use_folder(&e);
+        let (base, s) = site(String::new()).await;
+        *s.feed.lock().unwrap() = feed_xml_at(&base, "Keep", &[("a", D1), ("b", D2), ("c", D3)]);
+        let feed = subscribe(&e, &base).await;
+        no_auto(&e, feed).await;
+        let (_, eps) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/feeds/{feed}/episodes"),
+            None,
+        )
+        .await;
+        let ids: std::collections::HashMap<String, i64> = eps
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                (
+                    x["guid"].as_str().unwrap().to_string(),
+                    x["id"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        // All three on disk; the newest (c) was played.
+        for (g, id) in &ids {
+            let p = dir.join(format!("Keep/{g}.mp3"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"x").unwrap();
+            sqlx::query("UPDATE podcast_episodes SET file_path = ? WHERE id = ?")
+                .bind(p.to_string_lossy().to_string())
+                .bind(id)
+                .execute(&e.state.pool)
+                .await
+                .unwrap();
+        }
+        call(
+            &e.app,
+            Method::POST,
+            &format!("/api/podcasts/episodes/{}/played", ids["c"]),
+            None,
+        )
+        .await;
+        // Keep 2, auto on: the played one goes, the older two stay.
+        call(
+            &e.app,
+            Method::PUT,
+            &format!("/api/podcasts/feeds/{feed}/settings"),
+            Some(serde_json::json!({"auto_download": true, "keep_n": 2})),
+        )
+        .await;
+        assert_eq!(
+            podcast_dl::enforce_keep(&e.state.pool, feed).await.unwrap(),
+            1
+        );
+        assert!(!dir.join("Keep/c.mp3").exists(), "played goes first");
+        assert!(dir.join("Keep/a.mp3").exists() && dir.join("Keep/b.mp3").exists());
+        // Keep 1: now the oldest unplayed goes.
+        call(
+            &e.app,
+            Method::PUT,
+            &format!("/api/podcasts/feeds/{feed}/settings"),
+            Some(serde_json::json!({"keep_n": 1})),
+        )
+        .await;
+        assert_eq!(
+            podcast_dl::enforce_keep(&e.state.pool, feed).await.unwrap(),
+            1
+        );
+        assert!(!dir.join("Keep/a.mp3").exists() && dir.join("Keep/b.mp3").exists());
+        // The episodes themselves are still listed.
+        let (_, eps) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/feeds/{feed}/episodes"),
+            None,
+        )
+        .await;
+        assert_eq!(eps.as_array().unwrap().len(), 3);
+        // With automatic downloading off nothing is cleared.
+        call(
+            &e.app,
+            Method::PUT,
+            &format!("/api/podcasts/feeds/{feed}/settings"),
+            Some(serde_json::json!({"auto_download": false, "keep_n": 1})),
+        )
+        .await;
+        assert_eq!(
+            podcast_dl::enforce_keep(&e.state.pool, feed).await.unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn played_files_are_cleared_after_the_chosen_number_of_days() {
+        let e = env().await;
+        let dir = use_folder(&e);
+        let (base, s) = site(String::new()).await;
+        *s.feed.lock().unwrap() =
+            feed_xml_at(&base, "Tidy", &[("old", D1), ("new", D2), ("unplayed", D3)]);
+        let feed = subscribe(&e, &base).await;
+        no_auto(&e, feed).await;
+        let (_, eps) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/feeds/{feed}/episodes"),
+            None,
+        )
+        .await;
+        let now = crate::podcasts::now_ms();
+        for x in eps.as_array().unwrap() {
+            let g = x["guid"].as_str().unwrap();
+            let p = dir.join(format!("Tidy/{g}.mp3"));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"x").unwrap();
+            let played = match g {
+                "old" => Some(now - 10 * 86_400_000),
+                "new" => Some(now - 3 * 86_400_000),
+                _ => None,
+            };
+            sqlx::query("UPDATE podcast_episodes SET file_path = ?, played_at = ? WHERE id = ?")
+                .bind(p.to_string_lossy().to_string())
+                .bind(played)
+                .bind(x["id"].as_i64().unwrap())
+                .execute(&e.state.pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            podcast_dl::janitor(&e.state.pool, now).await.unwrap(),
+            1,
+            "default is 7 days"
+        );
+        assert!(!dir.join("Tidy/old.mp3").exists());
+        assert!(dir.join("Tidy/new.mp3").exists() && dir.join("Tidy/unplayed.mp3").exists());
+        // 0 means never.
+        call(
+            &e.app,
+            Method::PUT,
+            &format!("/api/podcasts/feeds/{feed}/settings"),
+            Some(serde_json::json!({"delete_played_after_days": 0})),
+        )
+        .await;
+        assert_eq!(
+            podcast_dl::janitor(&e.state.pool, now + 400 * 86_400_000)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_download_removes_the_file_and_feed_settings_are_checked() {
+        let e = env().await;
+        let dir = use_folder(&e);
+        let (base, s) = site(String::new()).await;
+        *s.feed.lock().unwrap() = feed_xml_at(&base, "Del", &[("a", D1)]);
+        let feed = subscribe(&e, &base).await;
+        let eps = wait_downloaded(&e, feed, 1).await;
+        let id = eps[0]["id"].as_i64().unwrap();
+        let file = dir.join("Del").join("2026-03-02 - Episode a.mp3");
+        assert!(file.is_file());
+        no_auto(&e, feed).await;
+        let (st, _) = call(
+            &e.app,
+            Method::DELETE,
+            &format!("/api/podcasts/episodes/{id}/download"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        assert!(!file.exists());
+        assert!(!dir.join("Del").exists(), "the empty show folder goes too");
+        let (_, eps) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/feeds/{feed}/episodes"),
+            None,
+        )
+        .await;
+        assert_eq!(eps[0]["downloaded"], false);
+        for bad in [
+            serde_json::json!({"keep_n": 0}),
+            serde_json::json!({"keep_n": 101}),
+            serde_json::json!({"delete_played_after_days": 366}),
+        ] {
+            let (st, _) = call(
+                &e.app,
+                Method::PUT,
+                &format!("/api/podcasts/feeds/{feed}/settings"),
+                Some(bad),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+        }
+        let (st, _) = call(
+            &e.app,
+            Method::PUT,
+            "/api/podcasts/feeds/999/settings",
+            Some(serde_json::json!({})),
         )
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);

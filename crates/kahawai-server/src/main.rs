@@ -26,6 +26,7 @@ mod menu;
 mod musicbrainz;
 mod normalize;
 mod podcast_api;
+mod podcast_dl;
 mod podcast_feed;
 mod podcasts;
 mod radio;
@@ -198,6 +199,19 @@ pub fn app(state: AppState) -> Router {
             get(podcast_api::list_episodes),
         )
         .route("/api/podcasts/refresh", post(podcast_api::refresh))
+        .route("/api/podcasts/folder", get(podcast_api::folder))
+        .route(
+            "/api/podcasts/feeds/{id}/settings",
+            put(podcast_api::put_feed_settings),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/download",
+            post(podcast_api::download).delete(podcast_api::delete_download),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/file",
+            get(podcast_api::episode_file),
+        )
         .route(
             "/api/podcasts/episodes/{id}/played",
             post(podcast_api::mark_played),
@@ -488,6 +502,10 @@ pub async fn run_server_with_ready(
             audiobooks_api::spawn_audiobook_scan(state.clone(), job.id, guard);
         }
     }
+
+    // Subscribed podcasts are checked every few hours, new episodes fetched
+    // and old played ones cleared (podcast_refresh_hours; 0 turns it off).
+    podcast_dl::spawn_scheduler(state.clone());
 
     // S9: the startup scan is a real persisted job (visible in /api/jobs),
     // not a bare background task — it survives the same lifecycle, progress,

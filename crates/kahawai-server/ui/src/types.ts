@@ -147,7 +147,7 @@ export type JobStatus = "queued" | "running" | "done" | "failed" | "paused" | "c
 
 export interface ScanJob {
   id: string;
-  kind: "scan" | "hash_files" | "enrich_books";
+  kind: "scan" | "hash_files" | "enrich_books" | "podcast_download";
   label: string;
   progress: number;
   status: JobStatus;

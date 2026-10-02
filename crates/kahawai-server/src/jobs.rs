@@ -54,6 +54,7 @@ fn kind_to_str(kind: JobKind) -> &'static str {
         JobKind::HashFiles => "hash_files",
         JobKind::EnrichMetadata => "enrich_metadata",
         JobKind::EnrichBooks => "enrich_books",
+        JobKind::PodcastDownload => "podcast_download",
     }
 }
 
@@ -65,6 +66,7 @@ fn kind_from_str(s: &str) -> Option<JobKind> {
         "hash_files" => Some(JobKind::HashFiles),
         "enrich_metadata" => Some(JobKind::EnrichMetadata),
         "enrich_books" => Some(JobKind::EnrichBooks),
+        "podcast_download" => Some(JobKind::PodcastDownload),
         _ => None,
     }
 }

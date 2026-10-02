@@ -1533,6 +1533,10 @@ pub async fn create_job(
             "start an audiobook lookup with POST /api/audiobooks/enrich".to_string(),
         )
         .into()),
+        JobKind::PodcastDownload => Err(MusicError::BadRequest(
+            "download an episode with POST /api/podcasts/episodes/{id}/download".to_string(),
+        )
+        .into()),
         JobKind::Transcode => {
             let job = s.jobs.create(body.kind, body.label, None).await;
             // Demo worker: ticks progress to Done. Real bulk-transcode
@@ -1781,7 +1785,7 @@ async fn cached_chain(plan: transcode::TranscodePlan) -> Result<String, ApiError
 /// Serve an open file honoring the request's `Range`: `200` whole, `206`
 /// for a satisfiable single range, `416` with `Content-Range: bytes
 /// */{total}` otherwise.
-async fn serve_ranged(
+pub(crate) async fn serve_ranged(
     file: tokio::fs::File,
     headers: &HeaderMap,
     content_type: &'static str,

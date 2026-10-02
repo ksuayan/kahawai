@@ -340,6 +340,8 @@ pub enum JobKind {
     /// Look up audiobooks' missing author, year and cover online (Open
     /// Library, then Google Books).
     EnrichBooks,
+    /// Download one podcast episode's audio into the podcast folder.
+    PodcastDownload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
