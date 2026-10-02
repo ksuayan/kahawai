@@ -4,11 +4,11 @@ import type { LayoutMode } from "../stores/viewPrefs";
 import UiButton from "../ui/UiButton.vue";
 import UiSelect from "../ui/UiSelect.vue";
 
-/** A list view's controls: List/Grid (omit `layout` to hide it) and Sort. */
+/** A list view's controls: List/Grid (omit `layout` to hide it) and Sort (omit `sortOptions` to hide it). */
 defineProps<{
   layout?: LayoutMode;
-  sort: S;
-  sortOptions: { value: S; label: string }[];
+  sort?: S;
+  sortOptions?: { value: S; label: string }[];
 }>();
 const emit = defineEmits<{
   (e: "update:layout", v: LayoutMode): void;
@@ -39,10 +39,11 @@ const emit = defineEmits<{
       </UiButton>
     </div>
     <UiSelect
+      v-if="sortOptions"
       aria-label="Sort"
       title="Sort"
       trigger-class="w-56"
-      :model-value="sort"
+      :model-value="sort ?? null"
       :options="sortOptions"
       @update:model-value="(v) => v !== null && emit('update:sort', v as S)"
     />

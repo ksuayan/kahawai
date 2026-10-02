@@ -19,6 +19,7 @@ import {
   markAudiobookFinished,
   saveAudiobookPosition,
   saveAudiobookSettings,
+  dismissAudiobookFromShelf,
   scanAudiobooks,
   setAudiobookListener,
   type AudiobookListener,
@@ -180,6 +181,18 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     } finally {
       loading.value = false;
       loaded.value = true;
+    }
+  }
+
+  /** Take a book off the Continue listening shelf (its place is kept; playing it puts it back). */
+  async function dismissFromShelf(id: number): Promise<void> {
+    const before = shelf.value;
+    shelf.value = before.filter((b) => b.id !== id);
+    try {
+      await dismissAudiobookFromShelf(id);
+    } catch (e) {
+      shelf.value = before;
+      toasts.push("error", "Couldn't remove the book from Continue listening", { detail: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -429,14 +442,20 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   }
 
   // --- speed and skip settings -------------------------------------------------
-  async function setSpeed(v: number): Promise<void> {
-    const a = active.value;
+  /**
+   * Set a book's speed (the playing book's by default). The engine changes
+   * only for the playing book; the playing copy and the detail copy of the
+   * book both show the new speed.
+   */
+  async function setSpeed(v: number, id = active.value?.id ?? detail.value?.id): Promise<void> {
+    if (id == null) return;
     const speedNow = clampSpeed(v);
-    await setPlaybackRate(speedNow);
-    if (!a) return;
-    a.settings = { ...a.settings, speed: speedNow };
+    if (active.value?.id === id) await setPlaybackRate(speedNow);
+    for (const b of [active.value, detail.value]) {
+      if (b?.id === id) b.settings = { ...b.settings, speed: speedNow };
+    }
     try {
-      await saveAudiobookSettings(a.id, { speed: speedNow });
+      await saveAudiobookSettings(id, { speed: speedNow });
     } catch {
       /* the speed still applies; it just is not remembered */
     }
@@ -502,6 +521,17 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
       toasts.push("info", "Looking up this book online", { ttl: 3000 });
     } catch (e) {
       toasts.push("error", "Could not look up this book", { detail: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /** The Info or Edit details dialog opened from a book's menu, with the book in full. */
+  const bookDialog = ref<{ kind: "info" | "edit"; book: AudiobookDetail } | null>(null);
+
+  async function showBookDialog(kind: "info" | "edit", id: number): Promise<void> {
+    try {
+      bookDialog.value = { kind, book: await fetchAudiobook(id) };
+    } catch (e) {
+      toasts.push("error", "Could not load this book", { detail: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -624,6 +654,9 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     history,
     openDetail,
     refreshDetail,
+    dismissFromShelf,
+    bookDialog,
+    showBookDialog,
     active,
     isActive,
     stash,

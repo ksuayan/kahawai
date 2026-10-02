@@ -38,10 +38,12 @@ const props = withDefaults(
     /** Multi-track context (album). `track` wins when both are given. */
     tracks?: Track[] | null;
     albumId?: number | null;
-    /** "menu" (default): one ⋯ button. "buttons": labelled Add to queue / Add to playlist… buttons. */
+    /** "menu" (default): one ⋯ button. "buttons": labelled Play next / Add to queue / Add to playlist… buttons. */
     layout?: "menu" | "buttons";
+    /** Offer Play next in the "buttons" layout (off where the track is the one playing). */
+    showPlayNext?: boolean;
   }>(),
-  { track: null, tracks: null, albumId: null, layout: "menu" },
+  { track: null, tracks: null, albumId: null, layout: "menu", showPlayNext: true },
 );
 
 const queue = useQueueStore();
@@ -147,6 +149,9 @@ const menuLabel = computed(() => {
 <template>
   <span class="inline-block" @dblclick.stop>
     <span v-if="layout === 'buttons'" class="flex flex-wrap items-center gap-2" data-testid="track-actions">
+      <UiButton v-if="showPlayNext" :disabled="list.length === 0 || busy" data-testid="play-next" @click="playNext">
+        <ListStart /> Play next
+      </UiButton>
       <UiButton :disabled="list.length === 0 || busy" data-testid="add-to-queue" @click="addToQueue">
         <ListPlus /> Add to queue
       </UiButton>

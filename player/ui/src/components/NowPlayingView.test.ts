@@ -135,6 +135,7 @@ describe("NowPlayingView", () => {
     expect(w.get('[data-testid="add-to-queue"]').text()).toContain("Add to queue");
     expect(w.get('[data-testid="add-to-playlist"]').text()).toContain("Add to playlist");
     expect(w.find('[aria-label^="Actions for"]').exists()).toBe(false);
+    expect(w.find('[data-testid="play-next"]').exists()).toBe(false); // it is the track playing
     expect(w.get('[data-testid="add-to-queue"] svg').classes().join(" ")).toContain("lucide-list-plus");
     // The source format appears once (inside the path badge), not as a separate tag.
     expect(w.text().match(/FLAC · 24\/96k/g)).toHaveLength(1);

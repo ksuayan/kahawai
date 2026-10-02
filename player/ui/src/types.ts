@@ -851,6 +851,13 @@ export interface Audiobook {
   last_played_at: number | null;
   /** 0 to 1. */
   progress: number;
+  /** The book's folder. */
+  path: string;
+  /** The first file's format ("mp3", "m4a"…), bitrate in kbps, sample rate and channels. */
+  format: string | null;
+  bitrate: number | null;
+  sample_rate: number | null;
+  channels: number | null;
 }
 
 export interface AudiobookPart {
@@ -860,6 +867,11 @@ export interface AudiobookPart {
   title: string | null;
   start_offset_ms: number;
   duration_ms: number;
+  /** The file's format, bitrate (kbps), sample rate and channels. */
+  format?: string | null;
+  bitrate?: number | null;
+  sample_rate?: number | null;
+  channels?: number | null;
 }
 
 export interface AudiobookChapter {

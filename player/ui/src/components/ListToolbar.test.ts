@@ -24,6 +24,12 @@ describe("ListToolbar", () => {
     expect(wrapper.emitted("update:sort")).toEqual([["year-desc"]]);
   });
 
+  it("hides the sort menu when there's nothing to sort by", () => {
+    const { wrapper } = mountApp(ListToolbar, { layout: "grid" });
+    expect(wrapper.find('[aria-label="Layout"]').exists()).toBe(true);
+    expect(wrapper.find('[role="combobox"]').exists()).toBe(false);
+  });
+
   it("hides the layout toggle when there's no layout to choose", () => {
     const { wrapper } = mountApp(ListToolbar, { sort: "artist-asc", sortOptions: SORT_OPTIONS });
     expect(wrapper.find('[aria-label="Layout"]').exists()).toBe(false);

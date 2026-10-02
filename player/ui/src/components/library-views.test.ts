@@ -221,6 +221,18 @@ describe("AlbumDetail", () => {
     expect(sent).toEqual([t1.id, t2.id]);
   });
 
+  it("Play next sits beside Play and puts the playable tracks after the current one", async () => {
+    routes();
+    const { wrapper } = mountApp(AlbumDetail, { id: 5 });
+    await settle();
+    const labels = wrapper.findAll("header button").map((b) => b.text().trim()).filter(Boolean);
+    expect(labels.slice(0, 2)).toEqual(["Play", "Play next"]);
+    await wrapper.get('[data-testid="play-next"]').trigger("click");
+    await settle();
+    const sent = (tauri.callsTo("queue_insert_next")[0] as { tracks: { id: number }[] }).tracks.map((t) => t.id);
+    expect(sent).toEqual([t1.id, t2.id]);
+  });
+
   it("Play queues the playable tracks from the start (skipping missing files)", async () => {
     routes();
     const { wrapper } = mountApp(AlbumDetail, { id: 5 });

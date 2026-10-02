@@ -5,6 +5,8 @@ import { useDspStore } from "../stores/dsp";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
+import { useAudiobooksStore } from "../stores/audiobooks";
+import { audioFormat } from "../lib/audiobook";
 import { audioPathLabel } from "../signalPath";
 import { isPlayable, mqaLabel, mqaTitle, trackTitle, unplayableReason } from "../types";
 import StateMessage from "../ui/StateMessage.vue";
@@ -18,6 +20,7 @@ const player = usePlayerStore();
 const lib = useLibraryStore();
 const nav = useNavStore();
 const dsp = useDspStore();
+const books = useAudiobooksStore();
 
 const track = computed(() => player.currentTrack);
 
@@ -51,6 +54,7 @@ const artworkHash = computed(() => {
         <div class="mb-5 flex flex-wrap gap-2">
           <UiBadge v-if="track.mqa" variant="accent" :title="mqaTitle(track)" data-testid="mqa-badge">{{ mqaLabel(track) }}</UiBadge>
           <UiBadge variant="accent" :title="`Audio chain: ${player.chain ?? '—'}`">{{ audioPath }}</UiBadge>
+          <UiBadge v-if="books.isActive && audioFormat(track)" title="This file's format, sample rate, bitrate and channels" data-testid="np-book-format">{{ audioFormat(track) }}</UiBadge>
           <UiBadge
             v-if="player.isBitPerfect"
             variant="ok"
@@ -69,7 +73,7 @@ const artworkHash = computed(() => {
           <UiBadge v-if="!isPlayable(track)" variant="danger">{{ unplayableReason(track) }}</UiBadge>
         </div>
 
-        <div class="mb-4"><TrackMenu :track="track" layout="buttons" /></div>
+        <div class="mb-4"><TrackMenu :track="track" layout="buttons" :show-play-next="false" /></div>
 
         <StateMessage v-if="player.error" kind="error">{{ player.error }}</StateMessage>
       </div>

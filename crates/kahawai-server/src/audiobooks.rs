@@ -138,6 +138,51 @@ pub fn parse_folder(components: &[String]) -> FolderMeta {
     meta
 }
 
+/// "Title by Author" (a common way to name a book's folder or album tag)
+/// split into the title and the author. Only a plausible name is taken: two
+/// to six words after the last " by ", each starting with a capital, so
+/// "Stand by Me" or "Death by Misadventure: A Novel" stay whole.
+pub fn split_title_by_author(s: &str) -> Option<(String, String)> {
+    let lower = s.to_lowercase();
+    let at = lower.rfind(" by ")?;
+    // `to_lowercase` can change byte lengths outside ASCII; only trust the
+    // index when it lands on the same " by " in the original.
+    if !s.is_char_boundary(at) || !s.get(at..at + 4)?.eq_ignore_ascii_case(" by ") {
+        return None;
+    }
+    let (title, author) = (clean(&s[..at])?, clean(&s[at + 4..])?);
+    let names: Vec<&str> = author
+        .split([',', '&'])
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    let plausible = !names.is_empty()
+        && names.iter().all(|n| {
+            let words: Vec<&str> = n.split_whitespace().filter(|w| *w != "and").collect();
+            (2..=6).contains(&words.len())
+                && words
+                    .iter()
+                    .all(|w| w.chars().next().is_some_and(char::is_uppercase))
+                && !n.contains(':')
+        });
+    plausible.then_some((title, author))
+}
+
+/// A title and author with "Title by Author" taken apart when there is no
+/// real author (none, or the same text as the title).
+pub fn untangle_author(title: String, author: Option<String>) -> (String, Option<String>) {
+    let author_is_title = author
+        .as_deref()
+        .is_some_and(|a| a.eq_ignore_ascii_case(&title));
+    if author.is_some() && !author_is_title {
+        return (title, author);
+    }
+    match split_title_by_author(&title) {
+        Some((t, a)) => (t, Some(a)),
+        None => (title, author),
+    }
+}
+
 /// Field precedence: embedded tags win, the folder fills blanks.
 pub fn merge_field(tag: Option<String>, folder: Option<String>) -> Option<String> {
     tag.and_then(|t| clean(&t)).or(folder)
@@ -556,6 +601,35 @@ mod pure_tests {
         assert_eq!(m.title.as_deref(), Some("Some Title"));
 
         let m = parse_folder(&comps("Just A Title"));
+        assert_eq!(
+            split_title_by_author("Broken Bone China by Laura Childs"),
+            Some(("Broken Bone China".into(), "Laura Childs".into()))
+        );
+        assert_eq!(
+            split_title_by_author("Big Picture Economics by Joel L. Naroff, Ron Scherer"),
+            Some((
+                "Big Picture Economics".into(),
+                "Joel L. Naroff, Ron Scherer".into()
+            ))
+        );
+        assert_eq!(split_title_by_author("Stand by Me"), None);
+        assert_eq!(
+            split_title_by_author("Killed by lightning in the park"),
+            None
+        );
+        assert_eq!(split_title_by_author("Barack Obama Presidency"), None);
+        assert_eq!(
+            untangle_author(
+                "Between Sisters by Kristin Hannah".into(),
+                Some("Between Sisters by Kristin Hannah".into())
+            ),
+            ("Between Sisters".into(), Some("Kristin Hannah".into()))
+        );
+        assert_eq!(
+            untangle_author("Dune by Night Writers".into(), Some("Frank Herbert".into())),
+            ("Dune by Night Writers".into(), Some("Frank Herbert".into())),
+            "a real author is kept"
+        );
         assert_eq!(m.title.as_deref(), Some("Just A Title"));
         assert_eq!(m.author, None);
     }
@@ -1489,6 +1563,7 @@ async fn store_book(
     let title = merge_field(tag_album, folder.title.clone())
         .unwrap_or_else(|| rel.last().cloned().unwrap_or_default());
     let author = merge_field(tag_author, folder.author.clone());
+    let (title, author) = untangle_author(title, author);
     let narrator = merge_field(tag_narrator, folder.narrator.clone());
     let series = folder
         .series

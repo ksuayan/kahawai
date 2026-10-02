@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { BookmarkPlus, Check, Pencil, Play, RotateCcw, Search, Trash2 } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
-import { clock, dayLine, duration, groupByDay, remainingText, SPEEDS, speedLabel } from "../lib/audiobook";
+import { audioFormat, clock, dayLine, duration, groupByDay, remainingText, SPEEDS, speedLabel } from "../lib/audiobook";
 import { useAudiobooksStore } from "../stores/audiobooks";
 import { useNavStore } from "../stores/nav";
 import StateMessage from "../ui/StateMessage.vue";
@@ -27,8 +27,14 @@ const chapterNow = computed(() => (playingThis.value ? books.chapterIndex : -1))
 const days = computed(() => groupByDay(books.history));
 const started = computed(() => (book.value?.position_ms ?? 0) > 0);
 
+/** Each chapter's file format ("MP3 · 44.1 kHz · 64 kbps · mono"), from the part it is in. */
+const chapterFormats = computed(() => {
+  const parts = new Map((book.value?.parts ?? []).map((p) => [p.id, audioFormat(p)]));
+  return (book.value?.chapters ?? []).map((c) => parts.get(c.part_id) ?? "");
+});
+
 const speedOptions = SPEEDS.map((s) => ({ value: String(s), label: speedLabel(s) }));
-const bookSpeed = computed(() => String(book.value?.settings.speed ?? 1));
+const bookSpeed = computed(() => String(playingThis.value ? books.speed : (book.value?.settings.speed ?? 1)));
 
 async function play(from?: number): Promise<void> {
   await books.start(props.id, from);
@@ -90,7 +96,7 @@ const subtitle = computed(() => {
               trigger-class="w-[90px]"
               :model-value="bookSpeed"
               :options="speedOptions"
-              @update:model-value="(v) => books.setSpeed(Number(v))"
+              @update:model-value="(v) => books.setSpeed(Number(v), props.id)"
             />
             <span class="text-faint">remembered for this book</span>
           </div>
@@ -110,7 +116,8 @@ const subtitle = computed(() => {
             >
               <span class="w-7 shrink-0 text-right tabular-nums text-faint">{{ i + 1 }}</span>
               <span class="min-w-0 flex-1 truncate">{{ c.title }}</span>
-              <span class="shrink-0 tabular-nums text-xs text-dim">{{ clock(c.start_offset_ms) }}</span>
+              <span v-if="chapterFormats[i]" class="hidden shrink-0 text-xs font-normal tabular-nums text-faint min-[700px]:inline" data-testid="chapter-format">{{ chapterFormats[i] }}</span>
+              <span class="w-16 shrink-0 text-right tabular-nums text-xs text-dim">{{ clock(c.start_offset_ms) }}</span>
             </button>
           </li>
         </ol>

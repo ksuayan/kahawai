@@ -187,6 +187,10 @@ pub fn app(state: AppState) -> Router {
             "/api/audiobooks/{id}/finished",
             post(audiobooks_api::mark_finished),
         )
+        .route(
+            "/api/audiobooks/{id}/continue",
+            axum::routing::delete(audiobooks_api::dismiss_from_shelf),
+        )
         .route("/api/audiobooks/{id}/history", get(audiobooks_api::history))
         .route("/api/audiobooks/{id}/resolve", get(audiobooks_api::resolve))
         .route(
