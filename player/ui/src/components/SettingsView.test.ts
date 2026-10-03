@@ -784,7 +784,7 @@ describe("Settings: logs", () => {
     expect(tauri.callsTo("reveal_logs")).toHaveLength(1);
   });
 
-  it("on Android, points to logcat instead of Finder", async () => {
+  it("on Android, points to logcat instead of Finder and drops desktop-only sections", async () => {
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}; // the section is app-only
     const realUA = navigator.userAgent;
     Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (Linux; Android 12; R4)", configurable: true });
@@ -793,6 +793,9 @@ describe("Settings: logs", () => {
       expect(w.find('[data-testid="reveal-logs"]').exists()).toBe(false);
       expect(w.text()).toContain("adb logcat -s kahawai");
       expect(w.find('[data-testid="verbose-logging-toggle"]').exists()).toBe(true);
+      // No keyboard, no WebKit inspector on Android.
+      expect(w.text()).not.toContain("Keyboard shortcuts");
+      expect(w.text()).not.toContain("Developer tools");
     } finally {
       Object.defineProperty(navigator, "userAgent", { value: realUA, configurable: true });
     }

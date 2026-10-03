@@ -41,6 +41,9 @@ import { useOverlaysStore } from "../stores/overlays";
 
 const settings = useSettingsStore();
 const { isPhone } = useBreakpoint();
+/** The Android / iOS app: no keyboard shortcuts or WebKit developer tools, no
+ *  Finder, and the log goes to the system log instead of a file. */
+const mobileApp = isMobileApp();
 const theme = useThemeStore();
 const overlays = useOverlaysStore();
 const developer = useDeveloperStore();
@@ -227,8 +230,6 @@ if (inTauri()) void refreshArtStats();
 // --- Verbose logging ----------------------------------------------------------
 
 const verboseLogging = ref(false);
-/** Android / iOS: no Finder, and the log goes to the system log instead of a file. */
-const mobileApp = isMobileApp();
 if (inTauri()) void getVerboseLogging().then((v) => (verboseLogging.value = v));
 
 async function setVerboseLogging(v: boolean): Promise<void> {
@@ -605,7 +606,7 @@ const dopRates = computed(() =>
       </UiButton>
     </SettingsSection>
 
-    <SettingsSection title="Keyboard shortcuts">
+    <SettingsSection v-if="!mobileApp" title="Keyboard shortcuts">
       <UiHint>Available everywhere except while typing in a text field.</UiHint>
       <ul class="m-0 grid list-none grid-cols-1 gap-x-4 gap-y-1.5 p-0 min-[560px]:grid-cols-2">
         <li v-for="[key, desc] in KEYBOARD_MAP" :key="key" class="flex items-center gap-2.5 text-dim">
@@ -639,7 +640,7 @@ const dopRates = computed(() =>
       </UiHint>
     </SettingsSection>
 
-    <SettingsSection v-if="inTauri()" title="Developer tools">
+    <SettingsSection v-if="inTauri() && !mobileApp" title="Developer tools">
       <UiHint>
         For troubleshooting. Right-clicking where the app has no menu of its own then shows WebKit's menu
         (Reload, Inspect Element), and the Web Inspector is available. Leave it off otherwise.

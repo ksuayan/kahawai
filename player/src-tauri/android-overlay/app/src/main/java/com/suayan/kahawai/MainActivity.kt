@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -32,6 +33,7 @@ class MainActivity : TauriActivity() {
     super.onWebViewCreate(webView)
     webView.addJavascriptInterface(InsetsBridge(), "KahawaiInsets")
     webView.addJavascriptInterface(PlaybackBridge(), "KahawaiPlayback")
+    handleBack(webView)
     ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
       val density = view.resources.displayMetrics.density
@@ -41,6 +43,47 @@ class MainActivity : TauriActivity() {
         (view as WebView).evaluateJavascript("window.dispatchEvent(new Event('kahawai-insets'))", null)
       }
       insets
+    }
+  }
+
+  // Back asks the page first (player/ui/src/lib/backButton.ts): it closes
+  // the open sheet, dialog or menu, or goes back a step of the breadcrumb.
+  // The page keeps no browser history, so the generated WryActivity's own
+  // handler (WebView history, else close) shut the app on the first press.
+  // When the page has nothing to undo, the app goes to the background, like
+  // Home: playback carries on.
+  //
+  // Every WebView passes through here (the splash's too, which stays alive
+  // hidden), and WryActivity adds its own callback for each one. The last
+  // callback added runs first, so ours is moved to the end every time; it
+  // asks each WebView in turn until one has the hook.
+  private val webViews = mutableListOf<WebView>()
+  private val backCallback = object : OnBackPressedCallback(true) {
+    override fun handleOnBackPressed() = askPage(0)
+  }
+
+  private fun handleBack(webView: WebView) {
+    webViews.add(webView)
+    backCallback.remove()
+    onBackPressedDispatcher.addCallback(this, backCallback)
+  }
+
+  private fun askPage(index: Int) {
+    val webView = webViews.getOrNull(index)
+    if (webView == null) {
+      moveTaskToBack(true)
+      return
+    }
+    try {
+      webView.evaluateJavascript("window.kahawaiBack ? String(window.kahawaiBack() === true) : 'none'") { answer ->
+        when (answer) {
+          "\"true\"" -> {}
+          "\"false\"" -> moveTaskToBack(true)
+          else -> askPage(index + 1)
+        }
+      }
+    } catch (_: Exception) {
+      askPage(index + 1) // a WebView already torn down
     }
   }
 

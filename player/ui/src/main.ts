@@ -4,6 +4,7 @@ import { createApp } from "vue";
 import { createPinia } from "pinia";
 import App from "./App.vue";
 import { watchNativeInsets } from "./lib/insets";
+import { installBackHandler } from "./lib/backButton";
 // IBM Plex Sans, bundled (OFL) so the UI looks the same on every machine and
 // works offline. Latin + Latin Extended; other scripts use the system fallback.
 import "@fontsource/ibm-plex-sans/latin-400.css";
@@ -29,6 +30,7 @@ async function start(): Promise<void> {
   await loadUiState();
   const app = createApp(App);
   app.use(createPinia());
+  installBackHandler(); // Android's Back button (lib/backButton)
   useThemeStore().init(); // before mount: no flash of the wrong theme
   // No WebKit menu (Reload, Inspect) in a release build unless the user asked.
   const developer = useDeveloperStore();
