@@ -75,7 +75,7 @@ function totalDuration(): string {
     <StateMessage v-else-if="error" kind="error">{{ error }}</StateMessage>
     <template v-else-if="album">
       <header class="mb-5 flex shrink-0 flex-wrap items-end justify-between gap-5">
-        <div class="flex gap-5">
+        <div class="flex flex-col gap-4 min-[720px]:flex-row min-[720px]:gap-5">
           <Artwork :hash="album.artwork_hash" :size="180" :radius="6" :alt="album.title" />
           <div>
             <h2 class="heading-1 mb-1.5 mt-1">{{ album.title }}</h2>

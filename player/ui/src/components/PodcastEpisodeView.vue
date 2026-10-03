@@ -41,7 +41,7 @@ const numbering = computed(() => {
     <StateMessage v-if="podcasts.error && !ep" kind="error">{{ podcasts.error }}</StateMessage>
     <StateMessage v-else-if="!ep" kind="loading">Loading…</StateMessage>
     <template v-else>
-      <header class="flex gap-5">
+      <header class="flex flex-col gap-4 min-[720px]:flex-row min-[720px]:gap-5">
         <Artwork :url="ep.image_url || ep.feed.image_url" placeholder="podcast" :size="160" :radius="8" :alt="ep.feed.title" />
         <div class="min-w-0 flex-1">
           <button type="button" class="border-0 bg-transparent p-0 text-left text-[13px] text-accent hover:underline" data-testid="episode-show" @click="nav.go('podcast', ep.feed.id)">{{ ep.feed.title }}</button>

@@ -45,7 +45,7 @@ const iconFailed = ref(false);
       <div class="truncate text-xs text-dim" :title="subtitle">{{ subtitle }}</div>
     </div>
     <div class="flex min-h-7 flex-wrap items-center justify-between gap-1">
-      <UiBadge v-if="codec || bitrate" variant="default" data-testid="station-codec">
+      <UiBadge v-if="codec || bitrate" class="max-[719px]:hidden" variant="default" data-testid="station-codec">
         {{ [codec, bitrate ? `${bitrate} kbps` : null].filter(Boolean).join(" · ") }}
       </UiBadge>
       <span v-if="disabledReason" class="text-xs text-faint" data-testid="station-unplayable">{{ disabledReason }}</span>
@@ -61,7 +61,7 @@ const iconFailed = ref(false);
       <div class="truncate font-semibold" :class="playing && 'text-accent'">{{ name }}</div>
       <div class="truncate text-xs text-dim">{{ subtitle }}</div>
     </div>
-    <UiBadge v-if="codec || bitrate" variant="default" data-testid="station-codec">
+    <UiBadge v-if="codec || bitrate" class="max-[719px]:hidden" variant="default" data-testid="station-codec">
       {{ [codec, bitrate ? `${bitrate} kbps` : null].filter(Boolean).join(" · ") }}
     </UiBadge>
     <span v-if="disabledReason" class="text-xs text-faint" data-testid="station-unplayable">{{ disabledReason }}</span>

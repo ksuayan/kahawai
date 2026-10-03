@@ -44,7 +44,7 @@ async function unsubscribe(): Promise<void> {
     <StateMessage v-if="!feed && podcasts.error" kind="error">{{ podcasts.error }}</StateMessage>
     <StateMessage v-else-if="!feed" kind="loading">Loading…</StateMessage>
     <template v-else>
-      <header class="mb-5 flex gap-5">
+      <header class="mb-5 flex flex-col gap-4 min-[720px]:flex-row min-[720px]:gap-5">
         <Artwork :url="feed.image_url" placeholder="podcast" :size="180" :radius="8" :alt="feed.title" />
         <div class="min-w-0 flex-1">
           <h2 class="heading-1 m-0 mb-1" data-testid="podcast-title">{{ feed.title }}</h2>

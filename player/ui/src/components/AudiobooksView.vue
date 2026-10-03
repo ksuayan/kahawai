@@ -75,7 +75,7 @@ const filtered = (): boolean => !!(books.query.q || books.query.author || books.
     <template #actions>
       <UiInput
         v-model="books.query.q"
-        class="w-[220px]"
+        class="w-full min-[720px]:w-[220px]"
         type="search"
         placeholder="Title, author, narrator…"
         aria-label="Search audiobooks"
@@ -152,7 +152,7 @@ const filtered = (): boolean => !!(books.query.q || books.query.author || books.
     <StateMessage v-else-if="books.books.length === 0" kind="empty">
       No audiobooks yet. Add a folder of them in Settings, under Audiobooks.
     </StateMessage>
-    <VirtualGrid v-else-if="view.prefs.audiobooksLayout === 'grid'" :items="books.books" scroll-key="audiobooks">
+    <VirtualGrid v-else-if="view.prefs.audiobooksLayout === 'grid'" :items="books.books" scroll-key="audiobooks" :min-cell-width="150">
       <template #item="{ item }">
         <BookContextMenu :book="item"><BookCard :book="item" @open="(id) => nav.go('audiobook', id)" /></BookContextMenu>
       </template>
@@ -177,7 +177,7 @@ const filtered = (): boolean => !!(books.query.q || books.query.author || books.
           <span class="w-24 shrink-0 text-right text-xs tabular-nums text-faint" data-testid="book-row-progress">
             {{ item.finished_at ? "Finished" : item.progress > 0 ? `${Math.round(item.progress * 100)}%` : "" }}
           </span>
-          <span class="w-20 shrink-0 text-right text-xs tabular-nums text-dim">{{ duration(item.duration_ms) }}</span>
+          <span class="hidden w-20 shrink-0 text-right text-xs tabular-nums text-dim min-[720px]:block">{{ duration(item.duration_ms) }}</span>
         </button>
         </BookContextMenu>
       </template>

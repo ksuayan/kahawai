@@ -187,14 +187,14 @@ async function saveAsPlaylist(name: string): Promise<void> {
               :class="sorted ? 'opacity-30' : 'cursor-grab'"
             />
           </span>
-          <span class="w-7 shrink-0 text-right tabular-nums text-faint">{{ i + 1 }}</span>
+          <span class="hidden w-7 shrink-0 text-right tabular-nums text-faint min-[720px]:block">{{ i + 1 }}</span>
           <Artwork :hash="coverOf(t)" :size="36" :radius="4" />
           <div class="min-w-0 flex-1">
             <div class="truncate">{{ trackTitle(t) }}</div>
             <div v-if="detailLine(t)" class="truncate text-xs text-dim" data-testid="detail-line">{{ detailLine(t) }}</div>
           </div>
-          <UiBadge :title="qualityTitle(t)" data-testid="format-badge">{{ formatBadge(t) }}</UiBadge>
-          <UiBadge v-if="t.mqa" variant="accent" :title="mqaTitle(t)" data-testid="mqa-badge">{{ mqaLabel(t) }}</UiBadge>
+          <UiBadge class="max-[719px]:hidden" :title="qualityTitle(t)" data-testid="format-badge">{{ formatBadge(t) }}</UiBadge>
+          <UiBadge v-if="t.mqa" class="max-[719px]:hidden" variant="accent" :title="mqaTitle(t)" data-testid="mqa-badge">{{ mqaLabel(t) }}</UiBadge>
           <span class="shrink-0 tabular-nums text-dim">{{ formatDuration(t.duration_ms) }}</span>
           <span class="flex shrink-0 gap-0.5">
             <UiButton

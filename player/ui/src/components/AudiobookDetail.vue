@@ -59,7 +59,7 @@ const subtitle = computed(() => {
     <StateMessage v-if="books.error && !book" kind="error">{{ books.error }}</StateMessage>
     <StateMessage v-else-if="!book" kind="loading">Loading…</StateMessage>
     <template v-else>
-      <div class="flex gap-5">
+      <div class="flex flex-col gap-4 min-[720px]:flex-row min-[720px]:gap-5">
         <Artwork :hash="book.cover_hash" placeholder="book" :size="180" :radius="8" :alt="book.title" />
         <div class="min-w-0 flex-1">
           <h2 class="heading-1 m-0 mb-1" data-testid="book-title">{{ book.title }}</h2>

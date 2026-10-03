@@ -74,7 +74,7 @@ async function setRule(feedId: number, key: "auto_download" | "keep_n" | "delete
     <section aria-label="Download rules">
       <h3 class="heading-3 mb-2">Rules for each show</h3>
       <StateMessage v-if="podcasts.feeds.length === 0" kind="empty">No shows yet.</StateMessage>
-      <table v-else class="w-full border-collapse text-[13px]" data-testid="download-rules">
+      <table v-else class="hidden w-full border-collapse text-[13px] min-[720px]:table" data-testid="download-rules">
         <thead>
           <tr class="text-left text-xs text-dim">
             <th class="py-1 font-semibold">Show</th>
@@ -92,6 +92,24 @@ async function setRule(feedId: number, key: "auto_download" | "keep_n" | "delete
           </tr>
         </tbody>
       </table>
+      <!-- Phone: one card per show — the four table columns don't fit at 360px. -->
+      <ul v-if="podcasts.feeds.length" class="m-0 list-none p-0 min-[720px]:hidden" data-testid="download-rules-cards">
+        <li v-for="f in podcasts.feeds" :key="f.id" class="mb-3 rounded-lg border border-line bg-raised p-3" data-testid="download-rule-card">
+          <div class="mb-1 truncate text-[13px] font-semibold">{{ f.title }}</div>
+          <div class="flex items-center justify-between gap-3 py-1.5">
+            <span class="text-[13px] text-dim">Download new episodes</span>
+            <UiSwitch :model-value="f.auto_download" :aria-label="`Download new episodes of ${f.title}`" @update:model-value="(v) => setRule(f.id, 'auto_download', v)" />
+          </div>
+          <div class="flex items-center justify-between gap-3 py-1.5">
+            <span class="text-[13px] text-dim">Keep unplayed</span>
+            <UiInput class="w-[70px]" type="number" min="1" max="100" :model-value="String(f.keep_n)" :aria-label="`Episodes of ${f.title} to keep`" @change="(e: Event) => setRule(f.id, 'keep_n', (e.target as HTMLInputElement).value)" />
+          </div>
+          <div class="flex items-center justify-between gap-3 py-1.5">
+            <span class="text-[13px] text-dim">Delete played after (days)</span>
+            <UiInput class="w-[70px]" type="number" min="0" max="365" :model-value="String(f.delete_played_after_days)" :aria-label="`Days before played episodes of ${f.title} are deleted`" @change="(e: Event) => setRule(f.id, 'delete_played_after_days', (e.target as HTMLInputElement).value)" />
+          </div>
+        </li>
+      </ul>
     </section>
   </ViewShell>
 </template>

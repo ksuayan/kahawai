@@ -43,7 +43,7 @@ function subtitle(a: { artist?: string | null; year?: number | null; track_count
     <StateMessage v-if="lib.loading" kind="loading">Loading albums…</StateMessage>
     <StateMessage v-else-if="lib.error" kind="error">{{ lib.error }}</StateMessage>
     <StateMessage v-else-if="albums.length === 0" kind="empty">No albums found.</StateMessage>
-    <VirtualGrid v-else-if="view.prefs.albumsLayout === 'grid'" :items="albums" scroll-key="albums">
+    <VirtualGrid v-else-if="view.prefs.albumsLayout === 'grid'" :items="albums" scroll-key="albums" :min-cell-width="150">
       <template #item="{ item }">
         <AlbumCard :album="item" :subtitle="subtitle(item)" @open="(id) => nav.go('album', id)" />
       </template>

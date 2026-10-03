@@ -143,7 +143,7 @@ const playingId = computed(() => radio.stationFavorite?.id ?? null);
       </StateMessage>
       <template v-else>
         <div class="mb-3 flex flex-wrap gap-2">
-          <UiInput v-model="radio.query.q" class="w-[220px]" type="search" placeholder="Station name…" aria-label="Search stations" data-testid="station-search" />
+          <UiInput v-model="radio.query.q" class="w-full min-[720px]:w-[220px]" type="search" placeholder="Station name…" aria-label="Search stations" data-testid="station-search" />
           <UiSelect aria-label="Genre" trigger-class="w-[170px]" :model-value="radio.query.tag || null" :options="tagOptions" @update:model-value="(v) => (radio.query.tag = v ?? '')" />
           <UiSelect aria-label="Country" trigger-class="w-[170px]" :model-value="radio.query.country || null" :options="countryOptions" @update:model-value="(v) => (radio.query.country = v ?? '')" />
           <UiSelect aria-label="Language" trigger-class="w-[170px]" :model-value="radio.query.language || null" :options="languageOptions" @update:model-value="(v) => (radio.query.language = v ?? '')" />

@@ -72,7 +72,7 @@ async function add(url: string): Promise<void> {
         <h3 class="heading-3 mb-2 flex items-center gap-2"><ListEnd class="size-4" /> Up Next</h3>
         <ol class="m-0 list-none p-0">
           <li v-for="(e, i) in podcasts.upNext" :key="e.id" class="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-hover" data-testid="up-next-row">
-            <span class="w-5 shrink-0 text-right text-xs tabular-nums text-faint">{{ i + 1 }}</span>
+            <span class="hidden w-5 shrink-0 text-right text-xs tabular-nums text-faint min-[720px]:block">{{ i + 1 }}</span>
             <Artwork :url="e.image_url || e.feed_image_url" placeholder="podcast" :size="36" :radius="4" :alt="e.feed_title" />
             <button type="button" class="min-w-0 flex-1 border-0 bg-transparent p-0 text-left" @click="nav.go('episode', e.id)">
               <span class="block truncate font-semibold text-fg">{{ e.title }}</span>

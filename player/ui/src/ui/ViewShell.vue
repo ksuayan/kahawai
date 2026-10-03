@@ -46,14 +46,14 @@ const widths = {
     <Breadcrumbs v-if="section" :section="section" :current="crumb" />
     <div
       v-if="title || $slots.actions"
-      class="mb-4 flex items-start justify-between gap-4"
+      class="mb-4 flex flex-col gap-3 min-[720px]:flex-row min-[720px]:items-start min-[720px]:justify-between min-[720px]:gap-4"
       :class="width === 'full' && 'shrink-0'"
     >
       <div>
         <h2 v-if="title" class="heading-1 m-0 mb-1">{{ title }}</h2>
         <p v-if="subtitle" class="m-0 text-dim">{{ subtitle }}</p>
       </div>
-      <div v-if="$slots.actions" class="flex items-center gap-2"><slot name="actions" /></div>
+      <div v-if="$slots.actions" class="flex flex-wrap items-center gap-2"><slot name="actions" /></div>
     </div>
     <slot />
   </div>
