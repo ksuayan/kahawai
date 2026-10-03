@@ -12,7 +12,6 @@ import { useViewPrefsStore } from "../stores/viewPrefs";
 import type { Audiobook, AudiobookDetail } from "../types";
 import AudiobookControls from "./AudiobookControls.vue";
 import AudiobookDetailView from "./AudiobookDetail.vue";
-import AudiobookSection from "./AudiobookSection.vue";
 import AudiobooksView from "./AudiobooksView.vue";
 import NowPlayingView from "./NowPlayingView.vue";
 import SeekBar from "./SeekBar.vue";
@@ -411,67 +410,25 @@ describe("Audiobook controls", () => {
   });
 });
 
-describe("Settings: audiobook folders", () => {
-  it("lists, adds and removes a folder, and shows the server's reason when it refuses", async () => {
-    let roots = [{ id: 1, path: "/srv/books", name: "Books" }];
-    const calls = mockFetch({
-      "/api/audiobook-roots/1": (_u: string, init?: RequestInit) => {
-        if (init?.method === "DELETE") roots = [];
-        return new Response(null, { status: 204 });
-      },
-      "/api/audiobook-roots": (_u: string, init?: RequestInit) => {
-        if (init?.method === "POST") {
-          const body = JSON.parse(String(init.body));
-          if (body.path === "/nope") return json({ error: "/nope is not a folder" }, 400);
-          roots = [...roots, { id: 2, path: body.path, name: "More" }];
-          return json(roots[1], 201);
-        }
-        return json(roots);
-      },
-      "/api/audiobooks": () => json([]),
-    });
-    const { wrapper } = mountApp(AudiobookSection);
-    await settle();
-    expect(wrapper.get('[data-testid="audiobook-roots"]').text()).toContain("/srv/books");
-    await typeInto(wrapper.get<HTMLInputElement>('[data-testid="root-path"]').element, "/nope");
-    await wrapper.get('[data-testid="add-root"]').trigger("click");
-    await settle();
-    expect(wrapper.text()).toContain("/nope is not a folder");
-    await typeInto(wrapper.get<HTMLInputElement>('[data-testid="root-path"]').element, "/srv/more");
-    await wrapper.get('[data-testid="add-root"]').trigger("click");
-    await settle();
-    expect(wrapper.findAll('[data-testid="remove-root"]')).toHaveLength(2);
-    await wrapper.findAll('[data-testid="remove-root"]')[0].trigger("click");
-    await settle();
-    expect(calls.some((c) => c.url.endsWith("/audiobook-roots/1") && c.init?.method === "DELETE")).toBe(true);
-  });
-});
-
-
 describe("Audiobook listeners", () => {
-  it("adds a listener, sends their name with audiobook calls only, and remembers the choice", async () => {
-    let listeners = [{ id: 0, name: "Default", books_started: 0 }];
+  it("sends the chosen listener's name with audiobook calls only, and remembers the choice", async () => {
+    const listeners = [
+      { id: 0, name: "Default", books_started: 0 },
+      { id: 1, name: "Ann B", books_started: 0 },
+    ];
     const calls = mockFetch({
-      "/api/audiobook-listeners": (_u: string, init?: RequestInit) => {
-        if (init?.method === "POST") {
-          const body = JSON.parse(String(init.body));
-          listeners = [...listeners, { id: 1, name: body.name, books_started: 0 }];
-          return json(listeners[1], 201);
-        }
-        return json(listeners);
-      },
-      "/api/audiobook-roots": () => json([]),
+      "/api/audiobook-listeners": () => json(listeners),
       "/api/audiobooks": () => json([]),
     });
-    const { wrapper } = mountApp(AudiobookSection);
+    mountApp(AudiobooksView);
     await settle();
-    await typeInto(wrapper.get<HTMLInputElement>('[data-testid="new-listener"]').element, "Ann B");
-    await wrapper.get('[data-testid="add-listener"]').trigger("click");
+    const before = calls.length; // the view's own first load, as Default
+    await useAudiobooksStore().switchListener("Ann B");
     await settle();
 
     expect(localStorage.getItem("kahawai.audiobook-listener")).toBe("Ann B");
     const header = (c: { init?: RequestInit }) => (c.init?.headers as Record<string, string> | undefined)?.["X-Kahawai-Listener"];
-    const library = calls.filter((c) => c.url.includes("/api/audiobooks"));
+    const library = calls.slice(before).filter((c) => c.url.includes("/api/audiobooks"));
     expect(library.length).toBeGreaterThan(0);
     expect(library.every((c) => header(c) === "Ann%20B")).toBe(true);
   });

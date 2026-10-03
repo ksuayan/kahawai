@@ -2,25 +2,19 @@ import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 import {
   addAudiobookBookmark,
-  addAudiobookListener,
-  addAudiobookRoot,
   deleteAudiobookBookmark,
-  deleteAudiobookListener,
-  deleteAudiobookRoot,
   editAudiobook,
   editAudiobookBookmark,
   enrichAudiobooks,
   fetchAudiobook,
   fetchAudiobookHistory,
   fetchAudiobookListeners,
-  fetchAudiobookRoots,
   fetchAudiobooks,
   fetchTrack,
   markAudiobookFinished,
   saveAudiobookPosition,
   saveAudiobookSettings,
   dismissAudiobookFromShelf,
-  scanAudiobooks,
   setAudiobookListener,
   type AudiobookListener,
   type AudiobookMetaEdit,
@@ -45,7 +39,6 @@ import type {
   Audiobook,
   AudiobookBookmark,
   AudiobookDetail,
-  AudiobookRoot,
   AudiobookSession,
   Track,
 } from "../types";
@@ -125,19 +118,6 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     await loadLibrary();
   }
 
-  async function addListener(name: string): Promise<void> {
-    const made = await addAudiobookListener(name);
-    await loadListeners();
-    await switchListener(made.name);
-  }
-
-  async function removeListener(id: number): Promise<void> {
-    const gone = listeners.value.find((l) => l.id === id);
-    await deleteAudiobookListener(id);
-    if (gone && (gone.name === listener.value || (id === 0 && !listener.value))) await switchListener("");
-    await loadListeners();
-  }
-
   // --- library ---------------------------------------------------------------
   const books = ref<Audiobook[]>([]);
   const shelf = ref<Audiobook[]>([]);
@@ -151,7 +131,6 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   /** The library has been loaded at least once (so a catalog update should refresh it). */
   const loaded = ref(false);
   const error = ref<string | null>(null);
-  const roots = ref<AudiobookRoot[]>([]);
 
   const authors = computed(() => [...new Set(books.value.map((b) => b.author).filter((a): a is string => !!a))].sort((a, b) => a.localeCompare(b)));
   const seriesNames = computed(() => [...new Set(books.value.map((b) => b.series).filter((a): a is string => !!a))].sort((a, b) => a.localeCompare(b)));
@@ -628,26 +607,6 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     else volumeBefore = null;
   }
 
-  // --- folders -----------------------------------------------------------------
-  async function loadRoots(): Promise<void> {
-    roots.value = await fetchAudiobookRoots();
-  }
-  async function addRoot(path: string, name?: string): Promise<void> {
-    await addAudiobookRoot(path, name);
-    await loadRoots();
-    // The server starts scanning the new folder: follow it.
-    void useJobsStore().refresh();
-    toasts.push("info", "Scanning the audiobook folder", { ttl: 3000 });
-  }
-  async function removeRoot(id: number): Promise<void> {
-    await deleteAudiobookRoot(id);
-    await Promise.all([loadRoots(), loadLibrary()]);
-  }
-  async function rescan(): Promise<void> {
-    await scanAudiobooks();
-    void useJobsStore().refresh();
-  }
-
   return {
     books,
     partIds,
@@ -657,13 +616,10 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     loading,
     loaded,
     error,
-    roots,
     listener,
     listeners,
     loadListeners,
     switchListener,
-    addListener,
-    removeListener,
     authors,
     seriesNames,
     loadLibrary,
@@ -706,9 +662,5 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     startSleepMinutes,
     startSleepEndOfChapter,
     cancelSleep,
-    loadRoots,
-    addRoot,
-    removeRoot,
-    rescan,
   };
 });

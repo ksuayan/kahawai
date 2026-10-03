@@ -7,7 +7,6 @@ import type {
   Audiobook,
   AudiobookBookmark,
   AudiobookDetail,
-  AudiobookRoot,
   AudiobookSession,
   AudiobookSettings,
   Genre,
@@ -610,14 +609,6 @@ export async function fetchAudiobookListeners(): Promise<AudiobookListener[]> {
   return get<AudiobookListener[]>("/api/audiobook-listeners");
 }
 
-export async function addAudiobookListener(name: string): Promise<AudiobookListener> {
-  return post<AudiobookListener>("/api/audiobook-listeners", { name });
-}
-
-export async function deleteAudiobookListener(id: number): Promise<void> {
-  return del(`/api/audiobook-listeners/${id}`);
-}
-
 // --- internet radio ------------------------------------------------------------
 
 export async function searchRadio(q: RadioQuery): Promise<RadioStation[]> {
@@ -663,25 +654,9 @@ export async function logRadioHeard(stationName: string, streamTitle: string): P
   await post("/api/radio/history", { station_name: stationName, stream_title: streamTitle }).catch(() => undefined);
 }
 
-export async function fetchAudiobookRoots(): Promise<AudiobookRoot[]> {
-  return get<AudiobookRoot[]>("/api/audiobook-roots");
-}
-
-export async function addAudiobookRoot(path: string, name?: string): Promise<AudiobookRoot> {
-  return post<AudiobookRoot>("/api/audiobook-roots", { path, name });
-}
-
-export async function deleteAudiobookRoot(id: number): Promise<void> {
-  return del(`/api/audiobook-roots/${id}`);
-}
-
 /** Look up the missing author, year and cover of one book (or every book without them) online. */
 export async function enrichAudiobooks(bookId?: number): Promise<JobInfo> {
   return post<JobInfo>("/api/audiobooks/enrich", bookId === undefined ? {} : { book_id: bookId });
-}
-
-export async function scanAudiobooks(): Promise<JobInfo> {
-  return post<JobInfo>("/api/audiobooks/scan", {});
 }
 
 // --- podcasts --------------------------------------------------------------------

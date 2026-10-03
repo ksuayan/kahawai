@@ -924,12 +924,6 @@ export interface AudiobookSession {
   listened_ms: number;
 }
 
-export interface AudiobookRoot {
-  id: number;
-  path: string;
-  name: string;
-}
-
 // --- internet radio -------------------------------------------------------------
 
 /** `player-state.radio`: what the playing station says, and whether the connection is up. */

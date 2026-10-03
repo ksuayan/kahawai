@@ -32,7 +32,6 @@ import AnalogSection from "./AnalogSection.vue";
 import EqEditor from "./EqEditor.vue";
 import CrossfeedSection from "./CrossfeedSection.vue";
 import LimiterSection from "./LimiterSection.vue";
-import AudiobookSection from "./AudiobookSection.vue";
 import SettingsSection from "./SettingsSection.vue";
 import { useBreakpoint } from "../lib/breakpoint";
 import { isMobileApp } from "../lib/platform";
@@ -570,10 +569,6 @@ const dopRates = computed(() =>
         </div>
         <div><UiButton variant="icon" @click="jobs.refresh()"><RefreshCw /> Refresh</UiButton></div>
       </div>
-    </SettingsSection>
-
-    <SettingsSection title="Audiobooks">
-      <AudiobookSection />
     </SettingsSection>
 
     <SettingsSection v-if="inTauri()" title="Album art cache">
