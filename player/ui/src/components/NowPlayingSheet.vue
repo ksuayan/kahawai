@@ -45,6 +45,12 @@ function onPointerUp(e: PointerEvent): void {
   if (shouldClose) emit("update:open", false);
 }
 
+/** The browser took the gesture over (or the touch was lost): spring back, stay open. */
+function onPointerCancel(): void {
+  dragging.value = false;
+  dragY.value = 0;
+}
+
 function close(): void {
   emit("update:open", false);
 }
@@ -65,7 +71,7 @@ function close(): void {
         <p id="sheet-desc" class="sr-only">Now playing. Swipe down or press Escape to close.</p>
         <!-- drag handle -->
         <div
-          class="sticky top-0 flex justify-center bg-raised pb-1 pt-2"
+          class="sticky top-0 flex touch-none justify-center bg-raised pb-2 pt-3"
           data-testid="sheet-handle"
           role="button"
           tabindex="0"
@@ -73,6 +79,7 @@ function close(): void {
           @pointerdown="onPointerDown"
           @pointermove="onPointerMove"
           @pointerup="onPointerUp"
+          @pointercancel="onPointerCancel"
           @keydown.escape="close()"
         >
           <span class="h-1 w-10 rounded-full bg-active" aria-hidden="true" />

@@ -784,6 +784,20 @@ describe("Settings: logs", () => {
     expect(tauri.callsTo("reveal_logs")).toHaveLength(1);
   });
 
+  it("on Android, points to logcat instead of Finder", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}; // the section is app-only
+    const realUA = navigator.userAgent;
+    Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (Linux; Android 12; R4)", configurable: true });
+    try {
+      const w = await mountSettings();
+      expect(w.find('[data-testid="reveal-logs"]').exists()).toBe(false);
+      expect(w.text()).toContain("adb logcat -s kahawai");
+      expect(w.find('[data-testid="verbose-logging-toggle"]').exists()).toBe(true);
+    } finally {
+      Object.defineProperty(navigator, "userAgent", { value: realUA, configurable: true });
+    }
+  });
+
   it("toggles verbose logging", async () => {
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}; // the section is app-only
     tauri.on("get_verbose_logging", false);

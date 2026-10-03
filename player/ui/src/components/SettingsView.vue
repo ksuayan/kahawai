@@ -35,6 +35,7 @@ import LimiterSection from "./LimiterSection.vue";
 import AudiobookSection from "./AudiobookSection.vue";
 import SettingsSection from "./SettingsSection.vue";
 import { useBreakpoint } from "../lib/breakpoint";
+import { isMobileApp } from "../lib/platform";
 import { useThemeStore } from "../stores/theme";
 import { useOverlaysStore } from "../stores/overlays";
 
@@ -226,6 +227,8 @@ if (inTauri()) void refreshArtStats();
 // --- Verbose logging ----------------------------------------------------------
 
 const verboseLogging = ref(false);
+/** Android / iOS: no Finder, and the log goes to the system log instead of a file. */
+const mobileApp = isMobileApp();
 if (inTauri()) void getVerboseLogging().then((v) => (verboseLogging.value = v));
 
 async function setVerboseLogging(v: boolean): Promise<void> {
@@ -613,17 +616,23 @@ const dopRates = computed(() =>
     </SettingsSection>
 
     <SettingsSection v-if="inTauri()" title="Logs">
-      <UiHint>
+      <UiHint v-if="mobileApp">
+        If something goes wrong, the log shows what happened. On Android it goes to the system log:
+        with the device connected by USB, read it with <code>adb logcat -s kahawai</code>.
+      </UiHint>
+      <UiHint v-else>
         If something goes wrong, the log shows what happened. Attach it (kahawai-player.log) when you
         report a problem.
       </UiHint>
-      <UiButton data-testid="reveal-logs" @click="revealLogs()">Reveal Logs in Finder</UiButton>
-      <UiSwitch
-        :model-value="verboseLogging"
-        label="Verbose logging"
-        data-testid="verbose-logging-toggle"
-        @update:model-value="(v) => setVerboseLogging(v)"
-      />
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <UiButton v-if="!mobileApp" data-testid="reveal-logs" @click="revealLogs()">Reveal Logs in Finder</UiButton>
+        <UiSwitch
+          :model-value="verboseLogging"
+          label="Verbose logging"
+          data-testid="verbose-logging-toggle"
+          @update:model-value="(v) => setVerboseLogging(v)"
+        />
+      </div>
       <UiHint>
         Debug-level tracing. Development builds always log verbosely; this adds it to production builds.
         May include file paths.
