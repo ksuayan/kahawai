@@ -46,13 +46,28 @@ impl LoggingConfig {
     }
 }
 
-/// Effective level: dev builds are always verbose; prod follows the toggle.
+/// Effective filter: dev builds are always verbose; prod follows the toggle.
+/// Verbose means debug for our own crates (`kahawai*`) only: libraries stay at
+/// info, where at debug some (html5ever, jni) log every step they take.
 /// `RUST_LOG` still wins when set (handled in [`init`]).
 fn level(verbose: bool) -> &'static str {
     if cfg!(debug_assertions) || verbose {
-        "debug"
+        VERBOSE
     } else {
         "info"
+    }
+}
+
+const VERBOSE: &str = "info,kahawai=debug";
+
+/// The same rule for the `log` facade, which some dependencies (the `jni`
+/// crate, chattily at trace level) write to directly, past the tracing filter.
+#[cfg(target_os = "android")]
+fn log_level(verbose: bool) -> log::LevelFilter {
+    if level(verbose) == VERBOSE {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
     }
 }
 
@@ -77,11 +92,16 @@ pub fn init() {
 
     #[cfg(target_os = "android")]
     {
+        // Debug at most: trace-level library chatter (the jni crate logs every
+        // call) would bury everything else. The global log level then follows
+        // the same dev / prod / toggle rule as tracing.
         android_logger::init_once(
             android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Trace)
+                .with_max_level(log::LevelFilter::Debug)
+                .with_filter(env_filter::Builder::new().parse(VERBOSE).build())
                 .with_tag("kahawai"),
         );
+        log::set_max_level(log_level(false));
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             log::error!("panic: {info}");
@@ -100,6 +120,8 @@ pub fn apply_verbose(verbose: bool) {
     if let Some(handle) = FILTER_HANDLE.get() {
         let _ = handle.modify(|f| *f = EnvFilter::new(level(verbose)));
     }
+    #[cfg(target_os = "android")]
+    log::set_max_level(log_level(verbose));
 }
 
 /// Tracing → logcat layer (Android only). `android_logger` owns the logcat
@@ -114,7 +136,13 @@ struct LogcatFields(String);
 impl tracing::field::Visit for LogcatFields {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         use std::fmt::Write as _;
-        let _ = write!(self.0, "{}={:?} ", field.name(), value);
+        // The message first and bare; the other fields as name=value after it.
+        if field.name() == "message" {
+            let rest = std::mem::take(&mut self.0);
+            let _ = write!(self.0, "{value:?} {rest}");
+        } else {
+            let _ = write!(self.0, "{}={:?} ", field.name(), value);
+        }
     }
 }
 
@@ -137,6 +165,15 @@ where
             tracing::Level::DEBUG => log::Level::Debug,
             tracing::Level::TRACE => log::Level::Trace,
         };
-        log::log!(level, "[{}] {}", event.metadata().target(), fields.0);
+        // Logged under the event's own module, so logcat shows where it came
+        // from rather than this layer.
+        log::logger().log(
+            &log::Record::builder()
+                .level(level)
+                .target(event.metadata().target())
+                .module_path(Some(event.metadata().target()))
+                .args(format_args!("{}", fields.0.trim_end()))
+                .build(),
+        );
     }
 }

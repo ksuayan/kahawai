@@ -1943,6 +1943,7 @@ name = "kahawai-player"
 version = "0.1.0"
 dependencies = [
  "android_logger",
+ "env_filter",
  "fs4",
  "kahawai-core",
  "kahawai-player-api",
