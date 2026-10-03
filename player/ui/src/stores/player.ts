@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   getState as fetchState,
   nextTrack,
@@ -19,6 +19,7 @@ import {
   type RepeatMode,
 } from "../tauri";
 import type { PlayerState, StreamFormat, Track } from "../types";
+import { notifyPlaybackState } from "../lib/playbackService";
 
 /**
  * Mirrors the Rust core's playback state via the `player-state` event.
@@ -94,6 +95,13 @@ export const usePlayerStore = defineStore("player", () => {
   const currentTrack = computed(() => raw.value?.track ?? null);
   const isPlaying = computed(() => status.value === "playing");
   const isLoading = computed(() => status.value === "loading");
+  // Android: keep the foreground service (and its wake lock) in sync with
+  // playback so Doze never throttles the audio thread mid-track. The bridge
+  // no-ops where it does not exist (desktop, browsers). Track changes while
+  // playing refresh the notification text.
+  watch([isPlaying, currentTrack], ([playing, track]) => {
+    notifyPlaybackState(playing, track?.title ?? null, track?.artist ?? null);
+  });
   const durationMs = computed(() => raw.value?.duration_ms ?? null);
   const bufferedMs = computed(() => raw.value?.buffered_ms ?? null);
   const downloadBps = computed(() => raw.value?.download_bps ?? null);

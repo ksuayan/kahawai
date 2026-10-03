@@ -128,9 +128,13 @@ if [[ ! -d src-tauri/gen/android ]]; then
 fi
 
 # Our own Android sources over the generated project (gitignored): see
-# player/src-tauri/android-overlay (the MainActivity that passes the system
-# bars' size to the page).
+# player/src-tauri/android-overlay (the MainActivity with its JS bridges,
+# the PlaybackService for background audio).
 cp -R "$ROOT/player/src-tauri/android-overlay/." "$ROOT/player/src-tauri/gen/android/"
+
+# Background-audio manifest entries (foreground-service permissions and the
+# PlaybackService declaration) merged into the generated manifest.
+python3 "$ROOT/scripts/android-manifest-overlay.py"
 
 # Old device WebViews ignore Tailwind 4's cascade layers; flatten them (vite.config.ts).
 export KAHAWAI_LEGACY_WEBVIEW=1
