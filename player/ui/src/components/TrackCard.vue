@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { joinParts } from "../lib/format";
 import { isPlayable, trackTitle, unplayableReason, type Track } from "../types";
 import Artwork from "./Artwork.vue";
 import ItemContextMenu from "./ItemContextMenu.vue";
@@ -56,7 +57,7 @@ const title = computed(() => trackTitle(props.track));
         </span>
       </div>
       <div class="mt-2 truncate font-semibold" :class="current && 'text-accent'">{{ title }}</div>
-      <div class="truncate text-xs text-dim">{{ [track.artist, track.album].filter(Boolean).join(" — ") }}</div>
+      <div class="truncate text-xs text-dim">{{ joinParts([track.artist, track.album], " — ") }}</div>
     </button>
     <div v-if="showMenu" class="absolute right-1.5 top-1.5 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
       <TrackMenu :track="track" />

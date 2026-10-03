@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
+import { joinParts } from "../lib/format";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import type { Album, Artist } from "../types";
@@ -52,7 +53,7 @@ watch(() => props.id, (id) => load(id));
           v-for="album in albums"
           :key="album.id"
           :album="album"
-          :subtitle="[album.year ? String(album.year) : null, `${album.track_count} tracks`].filter(Boolean).join(' · ')"
+          :subtitle="joinParts([album.year ? String(album.year) : null, `${album.track_count} tracks`])"
           @open="(id) => nav.go('album', id)"
         />
       </div>

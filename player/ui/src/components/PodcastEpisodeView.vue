@@ -2,6 +2,7 @@
 import { ArrowDownToLine, Check, ExternalLink, ListEnd, ListX, LoaderCircle, Trash2, Undo2, X } from "lucide-vue-next";
 import { computed, onMounted, watch } from "vue";
 import { clock, dayLine, duration, groupByDay, remainingText } from "../lib/audiobook";
+import { joinParts } from "../lib/format";
 import { usePlayToggle } from "../lib/playToggle";
 import { episodeDate, episodeOfTrack, episodeProgress, sizeText } from "../lib/podcast";
 import { useNavStore } from "../stores/nav";
@@ -32,7 +33,7 @@ const progress = computed(() => (ep.value ? episodeProgress({ position_ms: offse
 const numbering = computed(() => {
   const e = ep.value;
   if (!e) return "";
-  return [e.season != null ? `Season ${e.season}` : null, e.episode != null ? `Episode ${e.episode}` : null].filter(Boolean).join(", ");
+  return joinParts([e.season != null ? `Season ${e.season}` : null, e.episode != null ? `Episode ${e.episode}` : null], ", ");
 });
 </script>
 
@@ -41,13 +42,13 @@ const numbering = computed(() => {
     <StateMessage v-if="podcasts.error && !ep" kind="error">{{ podcasts.error }}</StateMessage>
     <StateMessage v-else-if="!ep" kind="loading">Loading…</StateMessage>
     <template v-else>
-      <header class="flex flex-col gap-4 min-[720px]:flex-row min-[720px]:gap-5">
+      <header class="detail-hero">
         <Artwork :url="ep.image_url || ep.feed.image_url" placeholder="podcast" :size="160" :radius="8" :alt="ep.feed.title" />
         <div class="min-w-0 flex-1">
           <button type="button" class="border-0 bg-transparent p-0 text-left text-[13px] text-accent hover:underline" data-testid="episode-show" @click="nav.go('podcast', ep.feed.id)">{{ ep.feed.title }}</button>
           <h2 class="heading-1 m-0 mb-1 mt-1" data-testid="episode-heading">{{ ep.title }}</h2>
           <p class="m-0 text-xs text-dim" data-testid="episode-facts">
-            {{ [episodeDate(ep.published_at), numbering, ep.duration_ms ? duration(ep.duration_ms) : ""].filter(Boolean).join(" · ") }}
+            {{ joinParts([episodeDate(ep.published_at), numbering, ep.duration_ms ? duration(ep.duration_ms) : ""]) }}
             <template v-if="offset > 0 && !played && ep.duration_ms"> · {{ remainingText(ep.duration_ms, offset, playingThis ? podcasts.speed : ep.feed.speed) }}</template>
             <template v-if="played"> · played</template>
           </p>

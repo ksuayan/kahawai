@@ -2,6 +2,7 @@
 import { ArrowDown, ArrowUp, Star, Trash2 } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { RADIO_SORTS, sortStations } from "../lib/radioSort";
+import { joinParts } from "../lib/format";
 import { useRadioStore } from "../stores/radio";
 import { useViewPrefsStore } from "../stores/viewPrefs";
 import StateMessage from "../ui/StateMessage.vue";
@@ -74,7 +75,6 @@ async function add(): Promise<void> {
   }
 }
 
-const sub = (parts: (string | null | undefined)[]): string => parts.filter(Boolean).join(" · ");
 const tags = (t: string | null): string | null => (t ? t.split(",").slice(0, 3).join(", ") : null);
 const playingId = computed(() => radio.stationFavorite?.id ?? null);
 </script>
@@ -117,7 +117,7 @@ const playingId = computed(() => radio.stationFavorite?.id ?? null);
           v-for="(f, i) in favorites"
           :key="f.id"
           :name="f.name"
-          :subtitle="sub([tags(f.tags), f.country, f.manual ? 'Added by address' : null])"
+          :subtitle="joinParts([tags(f.tags), f.country, f.manual ? 'Added by address' : null])"
           :favicon="f.favicon"
           :codec="f.codec"
           :bitrate="f.bitrate"
@@ -156,7 +156,7 @@ const playingId = computed(() => radio.stationFavorite?.id ?? null);
             v-for="s in results"
             :key="s.station_uuid || s.url"
             :name="s.name"
-            :subtitle="sub([tags(s.tags), s.country, s.clicks ? `${s.clicks.toLocaleString()} listens` : null])"
+            :subtitle="joinParts([tags(s.tags), s.country, s.clicks ? `${s.clicks.toLocaleString()} listens` : null])"
             :favicon="s.favicon"
             :codec="s.codec"
             :bitrate="s.bitrate"

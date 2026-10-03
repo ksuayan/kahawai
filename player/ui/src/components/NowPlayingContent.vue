@@ -2,6 +2,7 @@
 withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
 import { BookOpen, BookmarkPlus, Info, ListEnd, Moon, Music, Podcast } from "lucide-vue-next";
 import { computed } from "vue";
+import { joinParts } from "../lib/format";
 import { useDspStore } from "../stores/dsp";
 import { useLibraryStore } from "../stores/library";
 import { usePlayerStore } from "../stores/player";
@@ -38,7 +39,7 @@ const book = computed(() => (books.isActive ? books.active : null));
 const byline = computed(() => {
   const b = book.value;
   if (!b) return "";
-  return [b.author && `by ${b.author}`, b.narrator && `read by ${b.narrator}`].filter(Boolean).join(" · ");
+  return joinParts([b.author && `by ${b.author}`, b.narrator && `read by ${b.narrator}`]);
 });
 const series = computed(() => {
   const b = book.value;

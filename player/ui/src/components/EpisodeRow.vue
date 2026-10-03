@@ -3,6 +3,7 @@ import { ArrowDownToLine, Check, ListEnd, ListX, LoaderCircle, Trash2, Undo2, X 
 import { ContextMenuContent, ContextMenuItem, ContextMenuPortal, ContextMenuRoot, ContextMenuSeparator, ContextMenuTrigger } from "reka-ui";
 import { computed } from "vue";
 import { clock, duration } from "../lib/audiobook";
+import { joinParts } from "../lib/format";
 import { usePlayToggle } from "../lib/playToggle";
 import { episodeDate, episodeOfTrack, episodeProgress, sizeText } from "../lib/podcast";
 import { useNavStore } from "../stores/nav";
@@ -36,7 +37,7 @@ const meta = computed(() => {
     parts.push(e.position_ms > 0 && !played.value ? `${clock(e.duration_ms - e.position_ms)} left` : duration(e.duration_ms));
   }
   if (props.showFeed) parts.unshift(e.feed_title);
-  return parts.filter(Boolean).join(" · ");
+  return joinParts(parts);
 });
 </script>
 

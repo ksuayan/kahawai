@@ -2,6 +2,7 @@
 import { ChevronDown, ChevronUp, GripVertical, Repeat, Repeat1, Shuffle, X } from "lucide-vue-next";
 import { computed, ref } from "vue";
 import { useBreakpoint } from "../lib/breakpoint";
+import { joinParts } from "../lib/format";
 import { useRowDrag } from "../lib/rowDrag";
 import { sortTracks, trackSortOptions } from "../lib/sorting";
 import { useLibraryStore } from "../stores/library";
@@ -71,7 +72,7 @@ function coverOf(t: Track): string | null {
 }
 
 function detailLine(t: Track): string {
-  return [t.artist, t.album].filter(Boolean).join(" — ");
+  return joinParts([t.artist, t.album], " — ");
 }
 
 function rowTitle(t: Track): string {

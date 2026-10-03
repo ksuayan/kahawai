@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Play, Radio } from "lucide-vue-next";
 import { ref } from "vue";
+import { joinParts } from "../lib/format";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
 
@@ -46,7 +47,7 @@ const iconFailed = ref(false);
     </div>
     <div class="flex min-h-7 flex-wrap items-center justify-between gap-1">
       <UiBadge v-if="codec || bitrate" class="max-[719px]:hidden" variant="default" data-testid="station-codec">
-        {{ [codec, bitrate ? `${bitrate} kbps` : null].filter(Boolean).join(" · ") }}
+        {{ joinParts([codec, bitrate ? `${bitrate} kbps` : null]) }}
       </UiBadge>
       <span v-if="disabledReason" class="text-xs text-faint" data-testid="station-unplayable">{{ disabledReason }}</span>
       <span class="ml-auto flex items-center gap-0.5"><slot /></span>
@@ -62,7 +63,7 @@ const iconFailed = ref(false);
       <div class="truncate text-xs text-dim">{{ subtitle }}</div>
     </div>
     <UiBadge v-if="codec || bitrate" class="max-[719px]:hidden" variant="default" data-testid="station-codec">
-      {{ [codec, bitrate ? `${bitrate} kbps` : null].filter(Boolean).join(" · ") }}
+      {{ joinParts([codec, bitrate ? `${bitrate} kbps` : null]) }}
     </UiBadge>
     <span v-if="disabledReason" class="text-xs text-faint" data-testid="station-unplayable">{{ disabledReason }}</span>
     <slot />

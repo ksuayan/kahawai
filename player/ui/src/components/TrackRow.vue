@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { fireContextMenu, useLongPress } from "../lib/longpress";
+import { joinParts } from "../lib/format";
 import { useBreakpoint } from "../lib/breakpoint";
 import {
   formatBadge,
@@ -78,7 +79,7 @@ function onTap(e: MouseEvent): void {
     <div class="min-w-0 flex-1">
       <div class="truncate">{{ title }}</div>
       <div v-if="track.artist || track.album" class="truncate text-xs text-dim">
-        {{ [track.artist, track.album].filter(Boolean).join(" — ") }}
+        {{ joinParts([track.artist, track.album], " — ") }}
       </div>
     </div>
     <UiBadge class="max-[719px]:hidden" :title="qualityTitle(track)" data-testid="format-badge">{{ formatBadge(track) }}</UiBadge>
