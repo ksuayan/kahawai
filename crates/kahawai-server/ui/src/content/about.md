@@ -31,14 +31,23 @@ the server reads it, never changes it.
 - **Book info (optional, the same switch as album info):** fills in a book's missing
   author, year and cover from Open Library, then Google Books. Like album info, it only
   fills what's missing, never what you edited.
+- **Podcasts:** subscribes to shows by their feed address (or an OPML file from another
+  app), checks for new episodes on a schedule, and downloads them into a folder you choose,
+  keeping as many as you ask and clearing played files after the days you set. An episode
+  that isn't downloaded is streamed from the podcast when a player plays it. Where each
+  episode was left off is kept here, for every player.
+- **Internet radio:** keeps your favorite stations and the songs you heard. With Online
+  sources on (off by default), players can search radio-browser.info's station directory
+  through the server.
 - **Players stay current:** each player keeps its own copy of the library and asks only
   for what changed, so a restart doesn't reload everything.
 
 ## Your music and your privacy
 
-- **Nothing leaves your network** unless you turn on album info lookup, which sends album
-  and artist names to MusicBrainz, and book titles and authors to Open Library and
-  Google Books.
+- **Nothing leaves your network** unless you ask for it. Album info lookup sends album and
+  artist names to MusicBrainz, and book titles and authors to Open Library and Google
+  Books. Podcasts you subscribe to are fetched from their own hosts. Online sources sends
+  your station searches to radio-browser.info.
 - **The server has no authentication and no encryption.** Run it on a private network you
   trust.
 - **Your files are never modified.** Tags, covers and folders stay exactly as they are; the
@@ -86,6 +95,7 @@ The full license text is in the open-source notices.
   from the Internet Archive), when the lookup is on.
 - **Google Books** (books.google.com): book details and covers Open Library doesn't have,
   when the lookup is on.
+- **radio-browser.info**: the community station directory, when Online sources is on.
 
 ## Open-source software
 

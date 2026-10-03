@@ -407,3 +407,9 @@ export async function appReady(): Promise<void> {
 export async function revealLogs(): Promise<void> {
   if (inTauri()) await cmd("reveal_logs");
 }
+
+/** Open a web or mail link in the default browser (outside the app: show notes, a show's site). */
+export async function openUrl(url: string): Promise<void> {
+  if (inTauri()) await cmd("open_url", { url });
+  else window.open(url, "_blank", "noopener");
+}

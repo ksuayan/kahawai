@@ -34,7 +34,7 @@ const title = computed(() => trackTitle(props.track));
   >
     <button
       type="button"
-      class="block w-full rounded-lg p-0 text-left outline-none focus-visible:outline-2 focus-visible:outline-accent"
+      class="block w-full rounded-lg p-0 text-left outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       :title="playable ? `${title}\nClick to play` : `${title} — ${unplayableReason(track)}`"
       :disabled="!playable"
       @click="emit('play', track)"
@@ -46,7 +46,7 @@ const title = computed(() => trackTitle(props.track));
           :alt="track.album ?? title"
           fluid
           class="transition group-hover:brightness-110"
-          :class="current && 'outline outline-2 outline-accent'"
+          :class="current && 'outline outline-2 -outline-offset-2 outline-accent'"
         />
         <span
           v-if="badge !== null"

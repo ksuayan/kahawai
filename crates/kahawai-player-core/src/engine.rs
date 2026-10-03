@@ -98,6 +98,11 @@ pub fn resolve_format(
     per_track: Option<StreamFormat>,
     dsd_story: DsdStory,
 ) -> StreamFormat {
+    // A podcast episode is served as it is (often straight from the podcast's
+    // own host): there is no other rendition to ask for.
+    if kahawai_core::podcast_episode_of(track.id).is_some() {
+        return StreamFormat::Passthrough;
+    }
     if let Some(f) = per_track {
         return f;
     }
@@ -144,6 +149,46 @@ pub enum PlayerStatus {
     Playing,
     Paused,
 }
+
+/// What the Player knows about the radio station that is playing; absent for
+/// anything else. A station is a queue item with a negative id whose `path` is
+/// its stream address.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RadioNow {
+    /// The song the station says is playing (`StreamTitle`), when it says.
+    pub title: Option<String>,
+    /// Connection lost: trying again.
+    pub reconnecting: bool,
+    /// Which try this is (0 while connected).
+    pub attempt: u32,
+    /// Bitrate the station announced, kbps.
+    pub bitrate_kbps: Option<u32>,
+    /// Why the last connection was lost, while reconnecting.
+    pub reason: Option<String>,
+}
+
+/// What the radio connection learns while it runs on another thread.
+#[derive(Debug, Default, Clone)]
+pub struct RadioShared {
+    pub title: Option<String>,
+    pub bitrate_kbps: Option<u32>,
+}
+
+/// The reconnect state of the station being played.
+struct RadioSession {
+    track_id: i64,
+    shared: Arc<Mutex<RadioShared>>,
+    attempt: u32,
+    retry_at: Option<Instant>,
+    /// It has played at least once: a later loss is a dropout, not a bad address.
+    connected_once: bool,
+    reason: Option<String>,
+}
+
+/// Waits between tries after a connection is lost (the last repeats).
+const RADIO_BACKOFF_S: [u64; 5] = [1, 2, 5, 15, 60];
+/// A station that has never played is given up on after this many tries.
+const RADIO_FIRST_TRIES: u32 = 3;
 
 /// The analog stage's effect on the level (K-weighted, smoothed over a few
 /// seconds). Relative readings, for level-matching an A/B comparison.
@@ -216,6 +261,9 @@ pub struct PlayerSnapshot {
     /// Playback speed (1.0 = as recorded); pitch is kept at any speed.
     #[serde(default = "unit_rate")]
     pub playback_rate: f32,
+    /// The radio station playing, when one is.
+    #[serde(default)]
+    pub radio: Option<RadioNow>,
     /// The rendition actually streaming (explicit `?format=` value).
     pub format: Option<StreamFormat>,
     /// `X-Transcode-Chain` of the active response.
@@ -262,6 +310,7 @@ impl Default for PlayerSnapshot {
             analog_level: None,
             limiter_gr_db: None,
             playback_rate: 1.0,
+            radio: None,
             format: None,
             chain: None,
             output_path: OutputPath::Pcm,
@@ -627,6 +676,10 @@ pub struct Player {
     /// The network part of an open that is still running off the playback
     /// thread (the player is `Loading`).
     pending_open: Option<PendingOpen>,
+    /// Reconnect state of the radio station in the queue, if that is what plays.
+    radio: Option<RadioSession>,
+    /// Milliseconds per second of reconnect backoff (1000; tests shrink it).
+    radio_wait_ms_per_s: u64,
     /// What to do once the open in flight settles (see [`OpenFollowUp`]).
     follow_up: Option<OpenFollowUp>,
     /// How long `open_current` waits inline for an open before the player
@@ -727,6 +780,8 @@ impl Player {
             starved_since: None,
             stall_timeout: STALL_TIMEOUT,
             pending_open: None,
+            radio: None,
+            radio_wait_ms_per_s: 1000,
             follow_up: None,
             open_wait: OPEN_FAST_WAIT,
             chain_stale: false,
@@ -773,6 +828,7 @@ impl Player {
     /// Replace the queue and start playing at `index`.
     pub fn play_queue(&mut self, tracks: Vec<Track>, index: usize) {
         self.error = None;
+        self.radio = None;
         self.queue.set_tracks(tracks);
         if self.queue.is_empty() {
             self.stop();
@@ -792,6 +848,7 @@ impl Player {
     /// plays a moment of the wrong place.
     pub fn play_queue_at(&mut self, tracks: Vec<Track>, index: usize, position_ms: u64) {
         self.error = None;
+        self.radio = None;
         self.queue.set_tracks(tracks);
         if self.queue.is_empty() {
             self.stop();
@@ -1134,6 +1191,7 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
+        self.radio = None;
         self.skip_exclusive_track = None;
         self.pending_open = None;
         self.follow_up = None;
@@ -1185,6 +1243,10 @@ impl Player {
     /// the server); passthrough restarts the byte stream and the engine
     /// skips decoded frames to the target (C1 limitation, documented).
     pub fn seek_ms(&mut self, ms: u64) {
+        // A live stream has no timeline.
+        if self.queue.current().is_some_and(|t| t.id < 0) {
+            return;
+        }
         let Some(duration) = self.queue.current().map(|t| t.duration_ms) else {
             return;
         };
@@ -1492,6 +1554,7 @@ impl Player {
                 return;
             }
         };
+        self.sync_radio_session(&track);
         self.status = PlayerStatus::Loading;
         self.error = None;
         self.exclusive_decision = self.auto_wants_exclusive();
@@ -1681,7 +1744,13 @@ impl Player {
         // first-play of a track; the gain is cached by (track, format).
         // Cost: double LAN bandwidth + a second server transcode for
         // uncached tracks. DoP never reaches this path.
-        let scan = self.loudness.enabled() && !want_bp && !self.loudness.has_levels(track.id, fmt);
+        // Not for podcast episodes: the pre-scan reads the whole file first, and
+        // an episode that is not downloaded comes from the podcast's host.
+        let scan = track.id >= 0
+            && kahawai_core::podcast_episode_of(track.id).is_none()
+            && self.loudness.enabled()
+            && !want_bp
+            && !self.loudness.has_levels(track.id, fmt);
         let open = PcmOpen {
             track: track.clone(),
             seek,
@@ -1689,6 +1758,7 @@ impl Player {
             want_bp,
             next_id,
             passthrough_seek,
+            radio: self.radio_shared_for(track),
         };
         // Everything that waits on the network (the pre-scan, the request, the
         // container probe) runs off the playback thread, so a dead network here
@@ -1709,6 +1779,7 @@ impl Player {
             want_bp,
             next_id,
             passthrough_seek,
+            radio: _,
         } = open;
         let track = &track;
         let OpenedPcm {
@@ -1922,7 +1993,9 @@ impl Player {
         let since = *self.starved_since.get_or_insert_with(Instant::now);
         if since.elapsed() >= self.stall_timeout {
             tracing::warn!(waited = ?since.elapsed(), "stream starved; giving up");
-            self.fail("The connection to the server was lost.");
+            if !self.radio_lost("The station stopped sending audio.") {
+                self.fail("The connection to the server was lost.");
+            }
         }
     }
 
@@ -1969,7 +2042,10 @@ impl Player {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if pending.started.elapsed() >= self.stall_timeout {
                     tracing::warn!("stream open timed out; giving up");
-                    self.fail("Couldn't reach the server.");
+                    self.pending_open = None;
+                    if !self.radio_lost("Couldn't reach the station.") {
+                        self.fail("Couldn't reach the server.");
+                    }
                     self.settle_open();
                 }
             }
@@ -1985,10 +2061,15 @@ impl Player {
         self.resume_at_ms = None;
         match (kind, result) {
             (OpenKind::Pcm(open), OpenResult::Pcm(Ok(opened))) => self.finish_pcm(open, opened),
-            (OpenKind::Pcm(_), OpenResult::Pcm(Err(failure))) => self.fail(match failure {
-                OpenFailure::Stream => "Couldn't get the stream from the server.",
-                OpenFailure::Decode => "Couldn't decode this file.",
-            }),
+            (OpenKind::Pcm(_), OpenResult::Pcm(Err(failure))) => {
+                let why = match failure {
+                    OpenFailure::Stream => "Couldn't get the stream from the server.",
+                    OpenFailure::Decode => "Couldn't decode this file.",
+                };
+                if !self.radio_lost(why) {
+                    self.fail(why);
+                }
+            }
             (OpenKind::Dop(open), OpenResult::Dop(Ok(opened))) => {
                 let (track, seek) = (open.track.clone(), open.seek);
                 if let Err(why) = self.finish_dop(open, opened) {
@@ -2059,6 +2140,12 @@ impl Player {
         }
     }
 
+    /// Scale the radio reconnect waits (1, 2, 5, 15, 60 s) to this many
+    /// milliseconds per second. Exposed for tests.
+    pub fn set_radio_backoff_ms_per_s(&mut self, ms: u64) {
+        self.radio_wait_ms_per_s = ms;
+    }
+
     /// How long a starved stream is waited for before playback stops with an
     /// error (30 s by default). Exposed for tests.
     pub fn set_stall_timeout(&mut self, d: Duration) {
@@ -2077,6 +2164,17 @@ impl Player {
             return;
         }
         if self.active.is_none() {
+            // A station that dropped out waits its turn before trying again.
+            if let Some(at) = self.radio.as_ref().and_then(|r| r.retry_at) {
+                let now = Instant::now();
+                if now < at {
+                    std::thread::sleep(POLL_WAIT.min(at - now));
+                    return;
+                }
+                if let Some(r) = self.radio.as_mut() {
+                    r.retry_at = None;
+                }
+            }
             self.open_current(None);
             if self.active.is_none() {
                 return;
@@ -2115,6 +2213,9 @@ impl Player {
             }
             Polled::Failed(e) => {
                 tracing::warn!(error = %e, "decode failed");
+                if self.radio_lost(&e.to_string()) {
+                    return;
+                }
                 self.fail("Couldn't decode this file.");
                 return;
             }
@@ -2130,6 +2231,10 @@ impl Player {
             flushed_tail = decoded_frames > 0;
         }
         if decoded_frames == 0 {
+            // A station never ends: when its stream does, the connection broke.
+            if self.radio_lost("the station stopped sending audio") {
+                return;
+            }
             // A response that never yields audio is skipped, but a streak
             // longer than the queue means every track is poison - fail
             // instead of looping forever (repeat-all would never end).
@@ -2147,6 +2252,7 @@ impl Player {
             return;
         }
         self.empty_streak = 0;
+        self.radio_playing();
         let preamp_db = self.preamp_db_in_effect();
         let play_rate = self.playback_rate;
         let active = match self.active.as_mut() {
@@ -2418,7 +2524,85 @@ impl Player {
         }
     }
 
+    // -- radio ---------------------------------------------------------------
+
+    fn sync_radio_session(&mut self, track: &Track) {
+        if track.id >= 0 {
+            self.radio = None;
+        } else if self.radio.as_ref().map(|r| r.track_id) != Some(track.id) {
+            self.radio = Some(RadioSession {
+                track_id: track.id,
+                shared: Arc::new(Mutex::new(RadioShared::default())),
+                attempt: 0,
+                retry_at: None,
+                connected_once: false,
+                reason: None,
+            });
+        }
+    }
+
+    fn radio_shared_for(&self, track: &Track) -> Option<Arc<Mutex<RadioShared>>> {
+        if track.id >= 0 {
+            return None;
+        }
+        self.radio
+            .as_ref()
+            .filter(|r| r.track_id == track.id)
+            .map(|r| r.shared.clone())
+    }
+
+    fn radio_now(&self) -> Option<RadioNow> {
+        let current = self.queue.current()?;
+        let r = self.radio.as_ref().filter(|r| r.track_id == current.id)?;
+        let shared = r.shared.lock().expect("radio lock").clone();
+        Some(RadioNow {
+            title: shared.title,
+            reconnecting: r.attempt > 0,
+            attempt: r.attempt,
+            bitrate_kbps: shared.bitrate_kbps,
+            reason: r.reason.clone(),
+        })
+    }
+
+    /// Audio is flowing from the station: whatever went wrong is over.
+    fn radio_playing(&mut self) {
+        if let Some(r) = self.radio.as_mut() {
+            r.attempt = 0;
+            r.connected_once = true;
+            r.retry_at = None;
+            r.reason = None;
+        }
+    }
+
+    /// The station's connection failed or ended. If a station is what is
+    /// playing, plan another try (1, 2, 5, 15, then every 60 s) and say so;
+    /// returns whether it did. A station that has never played gives up after
+    /// a few tries, because the address is likely bad.
+    fn radio_lost(&mut self, why: &str) -> bool {
+        let playing_station = self.queue.current().is_some_and(|t| t.id < 0)
+            && matches!(self.status, PlayerStatus::Playing | PlayerStatus::Loading);
+        let per_s = self.radio_wait_ms_per_s;
+        let Some(r) = self.radio.as_mut().filter(|_| playing_station) else {
+            return false;
+        };
+        r.attempt += 1;
+        if !r.connected_once && r.attempt > RADIO_FIRST_TRIES {
+            return false;
+        }
+        let wait = RADIO_BACKOFF_S[(r.attempt as usize - 1).min(RADIO_BACKOFF_S.len() - 1)];
+        r.retry_at = Some(Instant::now() + Duration::from_millis(wait * per_s));
+        r.reason = Some(why.to_string());
+        tracing::info!(attempt = r.attempt, wait_s = wait, %why, "radio connection lost; will retry");
+        self.pending_open = None;
+        self.starved_since = None;
+        self.active = None;
+        let _ = self.sink.stop();
+        self.status = PlayerStatus::Playing;
+        true
+    }
+
     fn fail(&mut self, msg: &str) {
+        self.radio = None;
         self.pending_open = None;
         self.starved_since = None;
         self.error = Some(msg.to_string());
@@ -2489,6 +2673,7 @@ impl Player {
             },
             limiter_gr_db: self.limiter_gr(),
             playback_rate: self.playback_rate,
+            radio: self.radio_now(),
             format,
             chain,
             output_path: self.output_path,
@@ -3390,6 +3575,8 @@ struct PcmOpen {
     want_bp: bool,
     next_id: Option<i64>,
     passthrough_seek: bool,
+    /// Set for a radio station: where its title and bitrate are reported.
+    radio: Option<Arc<Mutex<RadioShared>>>,
 }
 
 #[derive(Clone)]
@@ -3451,6 +3638,9 @@ fn run_pcm_open(
     open: &PcmOpen,
     scan: bool,
 ) -> Result<OpenedPcm, OpenFailure> {
+    if open.track.id < 0 {
+        return open_radio(transport, open);
+    }
     let levels = scan.then(|| scan_track_levels(transport, open.track.id, open.fmt));
     let opts = StreamOptions {
         format: Some(open.fmt),
@@ -3492,6 +3682,47 @@ fn run_pcm_open(
         skip,
         feed,
         levels,
+    })
+}
+
+/// A radio station: connect to its address, take the track titles out of the
+/// stream and decode it. Nothing to do with the server.
+fn open_radio(transport: &dyn Transport, open: &PcmOpen) -> Result<OpenedPcm, OpenFailure> {
+    let shared = open.radio.clone();
+    let on_title: Box<dyn FnMut(String) + Send> = {
+        let shared = shared.clone();
+        Box::new(move |title| {
+            if let Some(s) = &shared {
+                s.lock().expect("radio lock").title = Some(title);
+            }
+        })
+    };
+    let station = transport
+        .open_station(&open.track.path, on_title)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "station connection failed");
+            OpenFailure::Stream
+        })?;
+    if let Some(s) = &shared {
+        s.lock().expect("radio lock").bitrate_kbps = station.bitrate;
+    }
+    let decoder = StreamDecoder::new_live(station.reader).map_err(|e| {
+        tracing::warn!(error = %e, "station stream could not be decoded");
+        OpenFailure::Decode
+    })?;
+    Ok(OpenedPcm {
+        info: StreamInfo {
+            reader: Box::new(std::io::empty()),
+            content_type: station.content_type,
+            chain: None,
+            gapless_next: None,
+            gapless_mode: None,
+            progress: None,
+        },
+        decoder,
+        skip: None,
+        feed: None,
+        levels: None,
     })
 }
 
@@ -3588,6 +3819,7 @@ type SnapshotKey = (
     OutputPath,
     Vec<String>,
     Option<String>,
+    Option<(Option<String>, bool)>,
 );
 
 /// UI-visible snapshot identity minus the ever-moving playhead.
@@ -3616,6 +3848,9 @@ fn snapshot_key(s: &PlayerSnapshot) -> SnapshotKey {
         // even while paused or stopped.
         s.exclusive_blockers.clone(),
         s.notice.clone(),
+        // A new song title or a lost connection is news even when nothing
+        // else changed.
+        s.radio.as_ref().map(|r| (r.title.clone(), r.reconnecting)),
     )
 }
 

@@ -32,6 +32,10 @@ fn default_ladder() -> Vec<StreamFormat> {
     vec![StreamFormat::Passthrough, StreamFormat::Flac]
 }
 
+fn default_podcast_refresh_hours() -> u32 {
+    6
+}
+
 /// v1 server configuration. v1 is LAN-only: no auth, no TLS (spec §3.6, §8).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -47,6 +51,14 @@ pub struct ServerConfig {
     /// through the API stays too), and the desktop app edits this list.
     #[serde(default)]
     pub audiobook_dirs: Vec<PathBuf>,
+    /// Where downloaded podcast episodes go. `None` = a `podcasts` folder next
+    /// to the database.
+    #[serde(default)]
+    pub podcast_dir: Option<PathBuf>,
+    /// How often subscribed podcasts are checked for new episodes, in hours.
+    /// 0 turns the background check off (the refresh button still works).
+    #[serde(default = "default_podcast_refresh_hours")]
+    pub podcast_refresh_hours: u32,
     /// Preferred format ladder, first satisfiable entry wins
     /// (see [`crate::format::transcode_ladder`]).
     #[serde(default = "default_ladder")]
@@ -61,6 +73,16 @@ pub struct ServerConfig {
     /// LAN, so it is opt-in.
     #[serde(default)]
     pub enrichment_enabled: bool,
+    /// Use the online station directory (radio-browser.info) and podcast
+    /// directory (Apple's iTunes Search): the search words you type go to
+    /// those services. Default off. Stations and feeds you add by hand, and
+    /// everything already saved, work without it.
+    #[serde(default)]
+    pub online_sources_enabled: bool,
+    /// Test seam and escape hatch: use this radio-browser.info compatible
+    /// server instead of resolving the public mirrors.
+    #[serde(default)]
+    pub radio_browser_url: Option<String>,
     /// How sure a lookup must be before an album takes its result, 0.5-1.0.
     /// Below it the album is left unmatched: a wrong ID is worse than none.
     #[serde(default = "default_min_confidence")]
@@ -160,12 +182,16 @@ impl Default for ServerConfig {
         Self {
             music_dirs: Vec::new(),
             audiobook_dirs: Vec::new(),
+            podcast_dir: None,
+            podcast_refresh_hours: default_podcast_refresh_hours(),
             bind: default_bind(),
             db_path: default_db_path(),
             preferred_ladder: default_ladder(),
             dsd_story: DsdStory::default(),
             scan_on_startup: false,
             enrichment_enabled: false,
+            online_sources_enabled: false,
+            radio_browser_url: None,
             enrichment_min_confidence: default_min_confidence(),
             transcode_cache_mb: default_transcode_cache_mb(),
         }

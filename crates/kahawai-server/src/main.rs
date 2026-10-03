@@ -25,6 +25,13 @@ mod logfile;
 mod menu;
 mod musicbrainz;
 mod normalize;
+mod podcast_api;
+mod podcast_dl;
+mod podcast_feed;
+mod podcast_play;
+mod podcasts;
+mod radio;
+mod radio_api;
 mod resample;
 mod scanner;
 mod stream;
@@ -172,6 +179,81 @@ pub fn app(state: AppState) -> Router {
             "/api/audiobook-listeners/{id}",
             axum::routing::delete(audiobooks_api::delete_listener),
         )
+        .route(
+            "/api/podcasts/feeds",
+            get(podcast_api::list_feeds).post(podcast_api::add_feed),
+        )
+        .route(
+            "/api/podcasts/feeds/import-opml",
+            post(podcast_api::import_opml),
+        )
+        .route(
+            "/api/podcasts/feeds/export-opml",
+            get(podcast_api::export_opml),
+        )
+        .route(
+            "/api/podcasts/feeds/{id}",
+            axum::routing::delete(podcast_api::delete_feed),
+        )
+        .route(
+            "/api/podcasts/feeds/{id}/episodes",
+            get(podcast_api::list_episodes),
+        )
+        .route("/api/podcasts/refresh", post(podcast_api::refresh))
+        .route("/api/podcasts/in-progress", get(podcast_play::in_progress))
+        .route("/api/podcasts/downloads", get(podcast_play::downloads))
+        .route(
+            "/api/podcasts/episodes/{id}",
+            get(podcast_play::get_episode),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/position",
+            put(podcast_play::put_position),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/history",
+            get(podcast_play::history),
+        )
+        .route("/api/podcasts/folder", get(podcast_api::folder))
+        .route(
+            "/api/podcasts/feeds/{id}/settings",
+            put(podcast_api::put_feed_settings),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/download",
+            post(podcast_api::download).delete(podcast_api::delete_download),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/file",
+            get(podcast_api::episode_file),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/played",
+            post(podcast_api::mark_played),
+        )
+        .route("/api/radio/search", get(radio_api::search))
+        .route("/api/radio/facets/{kind}", get(radio_api::facets))
+        .route("/api/radio/probe", post(radio_api::probe))
+        .route(
+            "/api/radio/favorites",
+            get(radio_api::list_favorites).post(radio_api::add_favorite),
+        )
+        .route(
+            "/api/radio/favorites/order",
+            put(radio_api::reorder_favorites),
+        )
+        .route(
+            "/api/radio/favorites/{id}",
+            axum::routing::patch(radio_api::edit_favorite).delete(radio_api::delete_favorite),
+        )
+        .route(
+            "/api/radio/favorites/{id}/play",
+            post(radio_api::play_favorite),
+        )
+        .route(
+            "/api/radio/history",
+            get(radio_api::history).post(radio_api::add_history),
+        )
         .route("/api/audiobooks", get(audiobooks_api::list_books))
         .route("/api/audiobooks/scan", post(audiobooks_api::trigger_scan))
         .route("/api/audiobooks/enrich", post(audiobooks_api::enrich))
@@ -305,6 +387,10 @@ fn main() {
             desktop::setup_live_scan_stats,
             desktop::setup_enrichment_status,
             desktop::setup_set_enrichment,
+            desktop::setup_online_sources,
+            desktop::setup_set_online_sources,
+            desktop::setup_podcast_settings,
+            desktop::setup_set_podcast_settings,
             desktop::setup_enrichment_action,
             desktop::setup_start_server,
             desktop::setup_stop_server,
@@ -437,6 +523,10 @@ pub async fn run_server_with_ready(
             audiobooks_api::spawn_audiobook_scan(state.clone(), job.id, guard);
         }
     }
+
+    // Subscribed podcasts are checked every few hours, new episodes fetched
+    // and old played ones cleared (podcast_refresh_hours; 0 turns it off).
+    podcast_dl::spawn_scheduler(state.clone());
 
     // S9: the startup scan is a real persisted job (visible in /api/jobs),
     // not a bare background task — it survives the same lifecycle, progress,

@@ -115,10 +115,39 @@ pub struct StreamInfo {
     pub progress: Option<StreamProgress>,
 }
 
+/// A connected radio station: audio bytes (track titles already taken out)
+/// and what the station said about itself.
+pub struct StationStream {
+    pub reader: Box<dyn Read + Send>,
+    pub content_type: String,
+    pub name: Option<String>,
+    pub bitrate: Option<u32>,
+}
+
+/// Sent to stations that ask who is listening.
+const RADIO_USER_AGENT: &str = concat!("Kahawai-Player/", env!("CARGO_PKG_VERSION"));
+
 /// Opens `/stream/:id` responses. Object-safe so the engine can hold
 /// `Box<dyn Transport>`.
 pub trait Transport: Send + Sync {
     fn open_stream(&self, track_id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError>;
+
+    /// Connect to an internet radio station directly (it is not on the
+    /// server). `on_title` hears each new track title the stream announces.
+    /// Tests override this with an in-memory station.
+    fn open_station(
+        &self,
+        url: &str,
+        on_title: Box<dyn FnMut(String) + Send>,
+    ) -> Result<StationStream, MusicError> {
+        let o = crate::radio::open_station(url, RADIO_USER_AGENT)?;
+        Ok(StationStream {
+            reader: Box::new(crate::radio::IcyReader::new(o.reader, o.metaint, on_title)),
+            content_type: o.content_type,
+            name: o.name,
+            bitrate: o.bitrate,
+        })
+    }
 
     /// Open the track's untouched file bytes as a *seekable* source, so a
     /// passthrough seek can jump to the right place instead of downloading

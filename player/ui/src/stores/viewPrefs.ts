@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, watch } from "vue";
 import { isSortKey, isTrackSortKey, type SortKey, type TrackSortKey } from "../lib/sorting";
+import { isRadioSort, type RadioSort } from "../lib/radioSort";
 import { uiGet, uiSet } from "../lib/uiState";
 
 export type LayoutMode = "list" | "grid";
@@ -18,10 +19,14 @@ export interface ViewPrefs {
   queueLayout: LayoutMode;
   queueSort: TrackSortKey;
   albumTracksLayout: LayoutMode;
+  playlistTracksLayout: LayoutMode;
   albumTracksSort: TrackSortKey;
   searchLayout: LayoutMode;
   searchSort: TrackSortKey;
   audiobooksLayout: LayoutMode;
+  podcastsLayout: LayoutMode;
+  radioLayout: LayoutMode;
+  radioSort: RadioSort;
 }
 
 const DEFAULTS: ViewPrefs = {
@@ -36,10 +41,14 @@ const DEFAULTS: ViewPrefs = {
   queueLayout: "list",
   queueSort: "default",
   albumTracksLayout: "list",
+  playlistTracksLayout: "list",
   albumTracksSort: "default",
   searchLayout: "list",
   searchSort: "default",
   audiobooksLayout: "grid",
+  podcastsLayout: "grid",
+  radioLayout: "list",
+  radioSort: "listed",
 };
 
 const KEY = "kahawai.viewPrefs";
@@ -57,12 +66,16 @@ function load(): ViewPrefs {
       "genreTracksLayout",
       "queueLayout",
       "albumTracksLayout",
+      "playlistTracksLayout",
       "searchLayout",
       "audiobooksLayout",
+      "podcastsLayout",
+      "radioLayout",
     ] as const) {
       if (layouts.includes(raw[k] as string)) prefs[k] = raw[k] as LayoutMode;
     }
     if (isSortKey(raw.albumsSort)) prefs.albumsSort = raw.albumsSort;
+    if (isRadioSort(raw.radioSort)) prefs.radioSort = raw.radioSort;
     if (isSortKey(raw.genreTracksSort)) prefs.genreTracksSort = raw.genreTracksSort;
     for (const k of ["queueSort", "albumTracksSort", "searchSort"] as const) {
       if (isTrackSortKey(raw[k])) prefs[k] = raw[k] as TrackSortKey;

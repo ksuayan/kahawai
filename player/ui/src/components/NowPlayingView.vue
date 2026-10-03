@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useAudiobooksStore } from "../stores/audiobooks";
+import { usePodcastsStore } from "../stores/podcasts";
 import ViewShell from "../ui/ViewShell.vue";
 import NowPlayingContent from "./NowPlayingContent.vue";
 
 const books = useAudiobooksStore();
-/** The breadcrumb section follows the content: a book reads as Audiobooks. */
-const section = computed(() => (books.isActive ? "audiobooks" : "albums") as "audiobooks" | "albums");
+const podcasts = usePodcastsStore();
+/** The breadcrumb section follows the content: a book reads as Audiobooks, an episode as Podcasts. */
+const section = computed(() => (books.isActive ? "audiobooks" : podcasts.isActive ? "podcasts" : "albums") as "audiobooks" | "podcasts" | "albums");
 </script>
 
 <template>

@@ -35,6 +35,15 @@ runs quietly in the background.
   {Narrator}`, or just `Title by Author`), and an optional lookup at Open Library and
   Google Books fills a missing author, year or cover. It remembers where each listener is
   in every book.
+- **Podcasts:** subscribe by a show's feed address or bring your subscriptions over as
+  OPML. The server checks for new episodes on a schedule (every 6 hours unless you change
+  it), downloads the newest ones into a folder you choose, keeps as many as you ask per
+  show and clears played files after a few days. An episode that isn't downloaded still
+  plays: the server streams it from the podcast. It remembers where you are in every
+  episode, for every player.
+- **Internet radio:** your favorite stations and the songs you heard are kept on the
+  server. With **Online sources** turned on (off by default), players can search a free
+  community station directory, radio-browser.info, by name, genre, country or language.
 - **A good neighbour:** quitting the app stops the server cleanly and tells connected
   players; logs are one click away for bug reports.
 
@@ -63,8 +72,18 @@ play it with sound quality taken seriously.
   buttons, a sleep timer and a voice-tuned EQ preset. Now Playing shows the book, its
   chapter and the time left. Your music queue waits while you listen and comes back
   exactly as it was. Several listeners can share one server.
+- **Podcasts:** your shows as a grid or a list with unplayed counts, Up Next, and the
+  episodes you're part-way through. Each episode shows its download state, its show notes
+  and when you listened; play it, add it to Up Next or mark it played from a right-click.
+  Each show keeps its own speed, skip times and download rules, and can go on to its next
+  episode by itself. Like a book, a podcast puts your music aside and gives it back.
+- **Internet radio:** play your favorite stations, search the station directory, or add a
+  station by its stream address. Stations show as a list or a grid, sorted by name,
+  bandwidth or format, with the song that's on and a reconnect if the stream drops.
 - **Find your way back:** breadcrumbs show how you got to a page (Artists › Miles Davis ›
   Kind of Blue), and Play buttons turn to Pause for whatever is playing.
+- **Rearrange by dragging:** drag tracks to reorder the queue or a playlist; the gap where
+  a track will land opens up as you drag.
 
 ## Important!
 

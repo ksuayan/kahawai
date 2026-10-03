@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BookOpen, Music } from "lucide-vue-next";
+import { BookOpen, Music, Podcast, Radio } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { artworkSrc } from "../api";
 
@@ -11,14 +11,19 @@ const props = withDefaults(
     radius?: number;
     /** Fill the parent's width as a square instead of using `size`. */
     fluid?: boolean;
-    /** What stands in for a missing cover: a note for music, an open book for an audiobook. */
-    placeholder?: "music" | "book";
+    /** What stands in for a missing cover: a note for music, an open book for an audiobook,
+     *  the sidebar's radio for a station. */
+    placeholder?: "music" | "book" | "radio" | "podcast";
+    /** An image address to show instead of a server cover (a podcast's art). */
+    url?: string | null;
   }>(),
-  { size: 48, alt: "Artwork", radius: 6, fluid: false, placeholder: "music" },
+  { size: 48, alt: "Artwork", radius: 6, fluid: false, placeholder: "music", url: null },
 );
 
+const ICONS = { music: Music, book: BookOpen, radio: Radio, podcast: Podcast } as const;
+
 const failed = ref(false);
-const src = computed(() => artworkSrc(props.hash));
+const src = computed(() => props.url || artworkSrc(props.hash));
 const showImg = computed(() => !!src.value && !failed.value);
 // A different cover gets a fresh chance to load.
 watch(src, () => (failed.value = false));
@@ -44,7 +49,7 @@ const boxStyle = computed(() => ({
       @error="failed = true"
     />
     <div v-else class="flex size-full items-center justify-center text-faint" aria-hidden="true" :data-placeholder="placeholder">
-      <component :is="placeholder === 'book' ? BookOpen : Music" :size="fluid ? 72 : size * 0.45" :stroke-width="1.5" />
+      <component :is="ICONS[placeholder]" :size="fluid ? 72 : size * 0.45" :stroke-width="1.5" />
     </div>
   </div>
 </template>

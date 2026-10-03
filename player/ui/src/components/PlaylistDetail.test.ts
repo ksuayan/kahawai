@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTrack, mockFetch } from "../test/fixtures";
 import { $$, bodyOf, dialog, mountApp, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
 import { useNavStore } from "../stores/nav";
 import { usePlaylistsStore } from "../stores/playlists";
 import { useToastsStore } from "../stores/toasts";
+import { useViewPrefsStore } from "../stores/viewPrefs";
 import PlaylistDetail from "./PlaylistDetail.vue";
 
 const t1 = makeTrack({ title: "One" });
@@ -173,6 +174,77 @@ describe("PlaylistDetail", () => {
       await settle();
       expect(calls.some((c) => c.init?.method === "DELETE")).toBe(false);
       expect(useNavStore().view.name).toBe("albums");
+    });
+  });
+
+  describe("list or grid, and dragging to reorder", () => {
+    const ROW = 52;
+    const pointer = (type: string, x: number, y: number) =>
+      new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y, pointerType: "mouse" });
+    const rows = (w: W) => w.findAll('[data-testid="playlist-row"]');
+    // The list and its scroller sit at the window's top-left, 800 × 600.
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+        { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600, x: 0, y: 0, toJSON: () => ({}) } as DOMRect,
+      );
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    async function drag(w: W, from: number, y: number, release = true) {
+      const start = from * ROW + ROW / 2;
+      rows(w)[from].element.dispatchEvent(pointer("pointerdown", 40, start));
+      window.dispatchEvent(pointer("pointermove", 40, start + 8));
+      window.dispatchEvent(pointer("pointermove", 40, y));
+      await settle();
+      if (release) {
+        window.dispatchEvent(pointer("pointerup", 40, y));
+        await settle();
+      }
+    }
+
+    it("shows the tracks as a grid of cards, and remembers it", async () => {
+      const { w } = await mountDetail();
+      expect(w.findAll('[data-testid="track-card"]')).toHaveLength(0);
+      await w.get('button[aria-label="Grid"]').trigger("click");
+      await settle();
+      expect(useViewPrefsStore().prefs.playlistTracksLayout).toBe("grid");
+      expect(w.findAll('[data-testid="track-card"]').length).toBe(3);
+      expect(w.find('[data-testid="playlist-drag-hint"]').exists()).toBe(false);
+    });
+
+    it("while dragging, the row stays dimmed in a dashed outline and the gap it will land in is marked", async () => {
+      const { w } = await mountDetail();
+      await drag(w, 0, 2 * ROW + 4, false);
+      expect(rows(w)[0].classes()).toContain("opacity-40");
+      expect(w.find('[data-testid="drag-outline"]').exists()).toBe(true);
+      expect(w.get('[data-testid="drop-slot"]').attributes("data-slot")).toBe("2");
+      expect(document.body.querySelector('[data-testid="drag-ghost"]')?.textContent).toContain("One");
+      window.dispatchEvent(pointer("pointerup", 40, 2 * ROW + 4));
+      await settle();
+    });
+
+    it("dropping in the gap saves the new order", async () => {
+      const { w, calls } = await mountDetail();
+      await drag(w, 0, 3 * ROW - 2); // below the last row
+      const put = calls.filter((c) => c.url.endsWith("/api/playlists/5/tracks")).at(-1);
+      expect((bodyOf(put?.init) as { track_ids: number[] }).track_ids).toEqual([t2.id, t3.id, t1.id]);
+      expect(w.find('[data-testid="drag-outline"]').exists()).toBe(false);
+      expect(document.body.querySelector('[data-testid="drag-ghost"]')).toBeNull();
+    });
+
+    it("Escape cancels, and the row's buttons never start a drag", async () => {
+      const { w, calls } = await mountDetail();
+      await drag(w, 0, 3 * ROW - 2, false);
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      window.dispatchEvent(pointer("pointerup", 40, 3 * ROW - 2));
+      await settle();
+      rows(w)[1].get('button[aria-label="Remove from playlist"]').element.dispatchEvent(pointer("pointerdown", 700, 70));
+      window.dispatchEvent(pointer("pointermove", 700, 150));
+      await settle();
+      expect(w.find('[data-testid="drag-outline"]').exists()).toBe(false);
+      window.dispatchEvent(pointer("pointerup", 700, 150));
+      await settle();
+      expect(calls.some((c) => c.url.endsWith("/api/playlists/5/tracks"))).toBe(false);
     });
   });
 });

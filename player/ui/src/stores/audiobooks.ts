@@ -50,6 +50,9 @@ import type {
   Track,
 } from "../types";
 import { useJobsStore } from "./jobs";
+import { useMusicStashStore, type MusicStash } from "./musicStash";
+import { usePodcastsStore } from "./podcasts";
+import { isEpisodeTrack } from "../lib/podcast";
 import { usePlayerStore } from "./player";
 import { useQueueStore } from "./queue";
 import { useToastsStore } from "./toasts";
@@ -58,14 +61,6 @@ import { useToastsStore } from "./toasts";
 export const POSITION_SAVE_MS = 10_000;
 
 /** The music that was playing when a book took over, kept so it can come back exactly. */
-interface MusicStash {
-  tracks: Track[];
-  index: number;
-  positionMs: number;
-  repeat: "off" | "all" | "one";
-  shuffle: boolean;
-  wasPlaying: boolean;
-}
 
 export type SleepTimer =
   | { kind: "minutes"; minutes: number; endsAt: number }
@@ -226,7 +221,12 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   /** The book the engine is playing (or has paused), with its parts as tracks. */
   const active = ref<AudiobookDetail | null>(null);
   let partTracks: Track[] = [];
-  const stash = ref<MusicStash | null>(null);
+  // Shared with the podcast context (stores/musicStash).
+  const stashStore = useMusicStashStore();
+  const stash = computed<MusicStash | null>({
+    get: () => stashStore.stash,
+    set: (v) => (stashStore.stash = v),
+  });
 
   const partIds = computed(() => new Set(active.value?.parts.map((p) => p.track_id) ?? []));
   /** A book (not music) is what the engine has loaded. */
@@ -251,7 +251,7 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   function stashMusic(): void {
     // Music already put aside stays put: a second book must not overwrite it
     // with the first book's parts.
-    if (stash.value || isActive.value) return;
+    if (stash.value || isActive.value || isEpisodeTrack(queue.current?.id)) return;
     const tracks = queue.tracks.map((t) => ({ ...t }));
     if (tracks.length === 0) return;
     stash.value = {
@@ -275,6 +275,12 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
       return;
     }
     if (isActive.value && active.value && active.value.id !== id) await reportNow();
+    const podcasts = usePodcastsStore();
+    if (podcasts.active) {
+      // An episode hands over: its place is saved; the music stays put aside.
+      await player.pause();
+      await podcasts.reportNow();
+    }
     stashMusic();
     const tracks = await tracksFor(book);
     partTracks = tracks;
@@ -398,7 +404,9 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
       }
       // Something other than this book took over the engine: the book is
       // done being the context.
-      if (trackId != null && !partIds.value.has(trackId) && status !== "stopped") void leave(false);
+      // A podcast taking over is a hand-over: the music stays put aside and
+      // the podcast sets its own speed.
+      if (trackId != null && !partIds.value.has(trackId) && status !== "stopped") void leave(false, isEpisodeTrack(trackId));
     },
   );
 
@@ -415,13 +423,21 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
   }
 
   // --- leaving, and music coming back ----------------------------------------
-  /** The book is no longer the engine's context: speed back to normal, stop saving. */
-  async function leave(restoreMusic: boolean): Promise<void> {
+  /**
+   * The book is no longer the engine's context: speed back to normal, stop
+   * saving. `handoff`: a podcast took over, which keeps the music put aside
+   * and sets its own speed.
+   */
+  async function leave(restoreMusic: boolean, handoff = false): Promise<void> {
     window.clearInterval(saveTimer);
     cancelSleep(true);
     const had = active.value;
     active.value = null;
     partTracks = [];
+    if (handoff) {
+      if (had) void loadLibrary();
+      return;
+    }
     await setPlaybackRate(1);
     const s = stash.value;
     stash.value = null;
@@ -634,6 +650,7 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
 
   return {
     books,
+    partIds,
     shelf,
     continueShelf,
     query,

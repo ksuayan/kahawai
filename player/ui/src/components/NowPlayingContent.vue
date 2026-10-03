@@ -1,11 +1,14 @@
 <script setup lang="ts">
 withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
-import { BookOpen, BookmarkPlus, Info, Moon, Music } from "lucide-vue-next";
+import { BookOpen, BookmarkPlus, Info, ListEnd, Moon, Music, Podcast } from "lucide-vue-next";
 import { computed } from "vue";
 import { useDspStore } from "../stores/dsp";
 import { useLibraryStore } from "../stores/library";
 import { usePlayerStore } from "../stores/player";
 import { useAudiobooksStore } from "../stores/audiobooks";
+import { useRadioStore } from "../stores/radio";
+import { usePodcastsStore } from "../stores/podcasts";
+import { episodeDate } from "../lib/podcast";
 import { audioFormat, clock, duration, remainingText, speedLabel } from "../lib/audiobook";
 import { useNavStore } from "../stores/nav";
 import { audioPathLabel } from "../signalPath";
@@ -20,6 +23,14 @@ const player = usePlayerStore();
 const lib = useLibraryStore();
 const dsp = useDspStore();
 const books = useAudiobooksStore();
+const radio = useRadioStore();
+const podcasts = usePodcastsStore();
+/** The episode playing, when it is one: the screen shows the episode and its show. */
+const episode = computed(() => (podcasts.isActive ? podcasts.active : null));
+const episodeProgress = computed(() => {
+  const d = episode.value?.episode.duration_ms ?? player.durationMs ?? 0;
+  return d > 0 ? Math.min(1, Math.max(0, player.positionMs / d)) : 0;
+});
 const nav = useNavStore();
 
 /** The book playing, when it is a book: the screen shows the book, not the file. */
@@ -113,9 +124,47 @@ const artworkHash = computed(() => {
     <StateMessage v-if="player.error" kind="error">{{ player.error }}</StateMessage>
   </div>
 </div>
+<div v-else-if="episode" :class="compact ? 'flex flex-col items-start gap-4' : 'flex flex-col items-start gap-8 min-[720px]:flex-row'" data-testid="np-podcast">
+  <div class="shrink-0">
+    <Artwork :url="episode.episode.image_url || episode.feed.image_url" placeholder="podcast" :size="compact ? 160 : 320" :radius="6" :alt="episode.feed.title" />
+  </div>
+  <div class="min-w-0 flex-1">
+    <p class="m-0 mb-2 flex items-center gap-1.5 text-xs uppercase tracking-wide text-faint" data-testid="np-kind">
+      <Podcast class="size-3.5" aria-hidden="true" /> Podcast
+    </p>
+    <h2 class="heading-1 m-0 mb-1" data-testid="np-title">{{ episode.episode.title }}</h2>
+    <p class="m-0 mb-0.5 text-base text-dim" data-testid="np-show">{{ episode.feed.title }}</p>
+    <p v-if="episode.episode.published_at" class="m-0 text-sm text-faint">{{ episodeDate(episode.episode.published_at) }}</p>
+
+    <div class="mt-5 max-w-[420px]" data-testid="np-episode-progress">
+      <div class="h-1.5 overflow-hidden rounded-full bg-active">
+        <div class="h-full bg-accent" :style="{ width: `${Math.round(episodeProgress * 100)}%` }" />
+      </div>
+      <p v-if="episode.episode.duration_ms" class="m-0 mt-1.5 flex justify-between gap-3 text-xs tabular-nums text-dim">
+        <span>{{ clock(player.positionMs) }} of {{ duration(episode.episode.duration_ms) }}</span>
+        <span>{{ remainingText(episode.episode.duration_ms, player.positionMs, podcasts.speed) }}</span>
+      </p>
+    </div>
+
+    <div class="mb-5 mt-5 flex flex-wrap gap-2">
+      <UiBadge title="Playback speed for this show (the pitch is kept)" data-testid="np-speed">{{ speedLabel(podcasts.speed) }}</UiBadge>
+      <UiBadge v-if="audioFormat(track)" title="This file's format" data-testid="np-episode-format">{{ audioFormat(track) }}</UiBadge>
+      <UiBadge :title="episode.episode.downloaded ? 'Playing the file downloaded to the server' : 'Streaming from the podcast'" data-testid="np-episode-source">{{ episode.episode.downloaded ? "Downloaded" : "Streaming" }}</UiBadge>
+      <UiBadge variant="accent" :title="`Audio chain: ${player.chain ?? '—'}`">{{ audioPath }}</UiBadge>
+    </div>
+
+    <div class="mb-4 flex flex-wrap items-center gap-2">
+      <UiButton data-testid="np-episode-details" @click="nav.go('episode', episode.episode.id)"><Info /> Episode details</UiButton>
+      <UiButton data-testid="np-up-next" @click="nav.go('podcasts')"><ListEnd /> Up Next ({{ podcasts.upNext.length }})</UiButton>
+      <UiButton v-if="podcasts.stash" data-testid="np-podcast-back-to-music" @click="podcasts.returnToMusic()"><Music /> Back to music</UiButton>
+    </div>
+
+    <StateMessage v-if="player.error" kind="error">{{ player.error }}</StateMessage>
+  </div>
+</div>
 <div v-else :class="compact ? 'flex flex-col items-start gap-4' : 'flex flex-col items-start gap-8 min-[720px]:flex-row'">
   <div class="shrink-0">
-    <Artwork :hash="artworkHash" :size="compact ? 160 : 320" :radius="6" :alt="trackTitle(track)" />
+    <Artwork :hash="artworkHash" :placeholder="radio.isPlaying ? 'radio' : 'music'" :size="compact ? 160 : 320" :radius="6" :alt="trackTitle(track)" />
   </div>
   <div class="min-w-0 flex-1">
     <h2 class="heading-1 m-0 mb-1" data-testid="np-title">{{ trackTitle(track) }}</h2>

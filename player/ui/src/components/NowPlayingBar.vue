@@ -5,11 +5,14 @@ import { useAudiobooksStore } from "../stores/audiobooks";
 import { useLibraryStore } from "../stores/library";
 import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
+import { useRadioStore } from "../stores/radio";
+import { usePodcastsStore } from "../stores/podcasts";
 import { trackTitle } from "../types";
 import UiBadge from "../ui/UiBadge.vue";
 import UiButton from "../ui/UiButton.vue";
 import Artwork from "./Artwork.vue";
 import AudiobookControls from "./AudiobookControls.vue";
+import PodcastControls from "./PodcastControls.vue";
 import ConnectionGauge from "./ConnectionGauge.vue";
 import SeekBar from "./SeekBar.vue";
 import TrackMenu from "./TrackMenu.vue";
@@ -26,6 +29,10 @@ const player = usePlayerStore();
 const lib = useLibraryStore();
 const nav = useNavStore();
 const books = useAudiobooksStore();
+const radio = useRadioStore();
+const podcasts = usePodcastsStore();
+/** The episode playing, when it is one. */
+const episode = computed(() => (podcasts.isActive ? podcasts.active : null));
 
 const track = computed(() => player.currentTrack);
 const artworkHash = computed(() => {
@@ -101,6 +108,17 @@ function togglePlay(): void {
       <span class="truncate">{{ player.error }}</span>
     </div>
     <div
+      v-else-if="radio.now?.reconnecting"
+      class="flex items-center gap-1.5 bg-accent/10 px-4 py-1.5 text-xs text-dim"
+      role="status"
+      data-testid="radio-reconnecting"
+    >
+      <Info class="size-3.5 shrink-0" />
+      <span class="truncate">
+        Lost the connection to {{ radio.stationName }}. Trying again… (try {{ radio.now.attempt }})
+      </span>
+    </div>
+    <div
       v-else-if="player.notice"
       class="flex items-center gap-1.5 bg-accent/10 px-4 py-1.5 text-xs text-dim"
       role="status"
@@ -119,13 +137,22 @@ function togglePlay(): void {
         data-testid="identity"
         @click="goNowPlaying"
       >
-        <Artwork :hash="artworkHash" :placeholder="books.isActive ? 'book' : 'music'" :size="44" :radius="6" :alt="track ? trackTitle(track) : 'No track'" />
+        <Artwork
+          :hash="artworkHash"
+          :url="episode ? episode.episode.image_url || episode.feed.image_url : null"
+          :placeholder="books.isActive ? 'book' : episode ? 'podcast' : radio.isPlaying ? 'radio' : 'music'"
+          :size="44"
+          :radius="6"
+          :alt="track ? trackTitle(track) : 'No track'"
+        />
         <div class="min-w-0">
           <div class="truncate font-semibold group-hover:text-accent" data-testid="title">
             {{ books.isActive && books.active ? books.active.title : track ? trackTitle(track) : "Nothing playing" }}
           </div>
           <div class="truncate text-xs text-dim" data-testid="artist">
             <template v-if="books.isActive">{{ books.chapter?.title ?? books.active?.title }} · {{ books.active?.author ?? "" }}</template>
+            <template v-else-if="episode">{{ episode.feed.title }}</template>
+            <template v-else-if="radio.isPlaying">{{ radio.now?.title ?? "Live radio" }}</template>
             <template v-else>{{ track?.artist ?? "—" }}</template>
           </div>
         </div>
@@ -154,6 +181,7 @@ function togglePlay(): void {
       <!-- center: transport + seek -->
       <div class="flex flex-col items-stretch gap-0.5">
         <AudiobookControls v-if="books.isActive" />
+        <PodcastControls v-else-if="episode" />
         <TransportControls :disabled="!track" />
         <SeekBar :disabled="!track" />
       </div>

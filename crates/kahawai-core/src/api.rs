@@ -340,6 +340,8 @@ pub enum JobKind {
     /// Look up audiobooks' missing author, year and cover online (Open
     /// Library, then Google Books).
     EnrichBooks,
+    /// Download one podcast episode's audio into the podcast folder.
+    PodcastDownload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -560,5 +562,36 @@ mod tests {
         assert_eq!(t.original_sample_rate, Some(96_000));
         let back = serde_json::to_string(&t).unwrap();
         assert!(back.contains(r#""mqa":true"#) && back.contains(r#""original_sample_rate":96000"#));
+    }
+}
+
+/// Podcast episodes play through the same `/stream/:id` path as tracks, under
+/// ids from here up: track id = `PODCAST_TRACK_ID_BASE + episode id`. Catalog
+/// track ids never get near it, and it stays well inside a JavaScript number.
+pub const PODCAST_TRACK_ID_BASE: i64 = 1 << 40;
+
+/// The track id a podcast episode plays under.
+pub fn podcast_track_id(episode_id: i64) -> i64 {
+    PODCAST_TRACK_ID_BASE + episode_id
+}
+
+/// The podcast episode a track id stands for, if it is one.
+pub fn podcast_episode_of(track_id: i64) -> Option<i64> {
+    (track_id >= PODCAST_TRACK_ID_BASE).then(|| track_id - PODCAST_TRACK_ID_BASE)
+}
+
+#[cfg(test)]
+mod podcast_id_tests {
+    use super::*;
+
+    #[test]
+    fn episode_ids_round_trip_and_tracks_are_not_episodes() {
+        assert_eq!(podcast_episode_of(podcast_track_id(7)), Some(7));
+        assert_eq!(podcast_episode_of(123_456), None);
+        assert_eq!(podcast_episode_of(-4), None, "a radio station");
+        assert!(
+            podcast_track_id(1) < (1_i64 << 53),
+            "safe as a JavaScript number"
+        );
     }
 }

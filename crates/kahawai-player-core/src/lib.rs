@@ -17,6 +17,7 @@ pub mod engine;
 pub mod fader;
 pub mod quality;
 pub mod queue;
+pub mod radio;
 pub mod rangesource;
 pub mod readahead;
 pub mod resample;
@@ -44,7 +45,7 @@ pub use dsp::{
 };
 pub use engine::{
     resolve_format, snapshot_key_differs, valid_formats, AnalogLevel, DsdStory, DspSettings,
-    EngineCommand, EngineController, Player, PlayerEvent, PlayerSnapshot, PlayerStatus,
+    EngineCommand, EngineController, Player, PlayerEvent, PlayerSnapshot, PlayerStatus, RadioNow,
     DEFAULT_SERVER_URL,
 };
 pub use fader::{AmpRamp, Fader};
@@ -55,5 +56,5 @@ pub use readahead::{ReadAhead, ReadAheadStats};
 pub use resample::CubicResampler;
 pub use sink::{AudioSink, NullSink, OutputPath, PcmChunk, SinkRouter, SinkState, VecSink};
 pub use transport::{
-    HttpTransport, StreamInfo, StreamOptions, Transport, DEFAULT_READ_AHEAD_BYTES,
+    HttpTransport, StationStream, StreamInfo, StreamOptions, Transport, DEFAULT_READ_AHEAD_BYTES,
 };

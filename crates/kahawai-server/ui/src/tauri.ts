@@ -15,6 +15,7 @@ import type {
   EnrichAction,
   EnrichmentStatus,
   LiveScanStats,
+  PodcastSettings,
   ScanJob,
   ServerConfigShape,
   ServerIdentity,
@@ -118,6 +119,29 @@ export async function setupEnrichmentStatus(): Promise<EnrichmentStatus | undefi
  *  Throws the backend's error string. */
 export async function setupSetEnrichment(enabled: boolean, minConfidence: number): Promise<void> {
   await invoke("setup_set_enrichment", { enabled, minConfidence });
+}
+
+/** Settings → Online sources. `undefined` when no server is running. */
+export async function setupOnlineSources(): Promise<boolean | undefined> {
+  return cmd<boolean>("setup_online_sources");
+}
+
+/** Turn the online station and podcast directories on/off (live and saved).
+ *  Throws the backend's error string. */
+export async function setupSetOnlineSources(enabled: boolean): Promise<void> {
+  await invoke("setup_set_online_sources", { enabled });
+}
+
+/** Settings → Podcasts. `undefined` when no server is running. */
+export async function setupPodcastSettings(): Promise<PodcastSettings | undefined> {
+  return cmd<PodcastSettings>("setup_podcast_settings");
+}
+
+/** Set the download folder (`null` = the default) and how often feeds are
+ *  checked (hours, 0 = never). Throws the backend's reason, e.g. a folder that
+ *  cannot be written to. */
+export async function setupSetPodcastSettings(dir: string | null, refreshHours: number): Promise<void> {
+  await invoke("setup_set_podcast_settings", { dir, refreshHours });
 }
 
 /** Start, pause, resume or cancel a lookup. Throws the backend's error string. */

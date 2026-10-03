@@ -34,6 +34,9 @@ impl IntoResponse for ApiError {
             MusicError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             MusicError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             MusicError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            // A feed, directory or station that could not be reached: the reason
+            // is the message, not an internal fault.
+            MusicError::Http(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             MusicError::BadRange => (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 "unsatisfiable byte range".to_string(),
@@ -1530,6 +1533,10 @@ pub async fn create_job(
             "start an audiobook lookup with POST /api/audiobooks/enrich".to_string(),
         )
         .into()),
+        JobKind::PodcastDownload => Err(MusicError::BadRequest(
+            "download an episode with POST /api/podcasts/episodes/{id}/download".to_string(),
+        )
+        .into()),
         JobKind::Transcode => {
             let job = s.jobs.create(body.kind, body.label, None).await;
             // Demo worker: ticks progress to Done. Real bulk-transcode
@@ -1677,6 +1684,10 @@ pub async fn stream_track(
     Query(q): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    // A podcast episode: served as it is, never chained or transcoded.
+    if let Some(episode) = kahawai_core::podcast_episode_of(id) {
+        return crate::podcast_play::stream_episode(&s, episode, &headers, false).await;
+    }
     let track = db::get_track(&s.pool, id)
         .await?
         .ok_or_else(|| MusicError::NotFound(format!("track {id}")))?;
@@ -1778,7 +1789,7 @@ async fn cached_chain(plan: transcode::TranscodePlan) -> Result<String, ApiError
 /// Serve an open file honoring the request's `Range`: `200` whole, `206`
 /// for a satisfiable single range, `416` with `Content-Range: bytes
 /// */{total}` otherwise.
-async fn serve_ranged(
+pub(crate) async fn serve_ranged(
     file: tokio::fs::File,
     headers: &HeaderMap,
     content_type: &'static str,
@@ -2066,7 +2077,11 @@ pub async fn stream_head(
     State(s): State<AppState>,
     Path(id): Path<i64>,
     Query(q): Query<StreamQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    if let Some(episode) = kahawai_core::podcast_episode_of(id) {
+        return crate::podcast_play::stream_episode(&s, episode, &headers, true).await;
+    }
     let track = db::get_track(&s.pool, id)
         .await?
         .ok_or_else(|| MusicError::NotFound(format!("track {id}")))?;

@@ -7,7 +7,7 @@
  * view scrolls its container normally. Used by the desktop <main> (App.vue)
  * and the phone shell, so they cannot drift apart.
  */
-export const OWN_SCROLLER = new Set(["albums", "artists", "genre", "album", "search", "queue", "audiobooks"]);
+export const OWN_SCROLLER = new Set(["albums", "artists", "genre", "album", "playlist", "search", "queue", "audiobooks"]);
 
 /** The classes for the box that holds view `name`. */
 export function viewBoxClass(name: string): string {
