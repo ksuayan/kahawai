@@ -9,6 +9,8 @@ defineProps<{
   layout?: LayoutMode;
   sort?: S;
   sortOptions?: { value: S; label: string }[];
+  /** Shown before the sort menu ("Sort by"); without it the menu speaks for itself. */
+  sortLabel?: string;
 }>();
 const emit = defineEmits<{
   (e: "update:layout", v: LayoutMode): void;
@@ -38,6 +40,7 @@ const emit = defineEmits<{
         <LayoutGrid />
       </UiButton>
     </div>
+    <span v-if="sortOptions && sortLabel" class="ml-1 text-xs text-dim" aria-hidden="true">{{ sortLabel }}</span>
     <UiSelect
       v-if="sortOptions"
       aria-label="Sort"

@@ -177,8 +177,68 @@ pub struct Episode {
     pub episode: Option<i64>,
     pub link: Option<String>,
     pub downloaded: bool,
+    /// Size of the downloaded file, when there is one.
+    pub file_bytes: Option<u64>,
     pub played_at: Option<i64>,
     pub dropped_from_feed: bool,
+    /// Where the listener is in it (0 = not started), and when that was saved.
+    pub position_ms: i64,
+    pub position_updated_at: Option<i64>,
+    /// The show, so an episode listed outside its feed still says whose it is.
+    pub feed_title: String,
+    pub feed_image_url: Option<String>,
+}
+
+/// Every episode listing selects these, from `podcast_episodes e`.
+pub(crate) const EPISODE_SELECT: &str =
+    "SELECT e.id, e.feed_id, e.guid, e.title, e.description_html, e.published_at,
+        e.duration_ms, e.enclosure_url, e.enclosure_type, e.enclosure_bytes, e.image_url, e.season,
+        e.episode, e.link, e.file_path, e.played_at, e.dropped_from_feed,
+        COALESCE(p.offset_ms, 0) AS position_ms, p.updated_at AS position_updated_at,
+        f.title AS feed_title, f.image_url AS feed_image_url
+     FROM podcast_episodes e
+     JOIN podcast_feeds f ON f.id = e.feed_id
+     LEFT JOIN podcast_positions p ON p.episode_id = e.id";
+
+/// An episode row as the API shows it; the file size is read from disk.
+pub(crate) async fn episode_from_row(r: &sqlx::sqlite::SqliteRow) -> Episode {
+    let file_path: Option<String> = r.get("file_path");
+    let file_bytes = match &file_path {
+        Some(p) => tokio::fs::metadata(p).await.ok().map(|m| m.len()),
+        None => None,
+    };
+    Episode {
+        id: r.get("id"),
+        feed_id: r.get("feed_id"),
+        guid: r.get("guid"),
+        title: r.get("title"),
+        description_html: r.get("description_html"),
+        published_at: r.get("published_at"),
+        duration_ms: r.get("duration_ms"),
+        enclosure_url: r.get("enclosure_url"),
+        enclosure_type: r.get("enclosure_type"),
+        enclosure_bytes: r.get("enclosure_bytes"),
+        image_url: r.get("image_url"),
+        season: r.get("season"),
+        episode: r.get("episode"),
+        link: r.get("link"),
+        downloaded: file_path.is_some(),
+        file_bytes,
+        played_at: r.get("played_at"),
+        dropped_from_feed: r.get::<i64, _>("dropped_from_feed") != 0,
+        position_ms: r.get("position_ms"),
+        position_updated_at: r.get("position_updated_at"),
+        feed_title: r.get("feed_title"),
+        feed_image_url: r.get("feed_image_url"),
+    }
+}
+
+pub(crate) async fn episodes_from_rows(rows: &[sqlx::sqlite::SqliteRow]) -> Vec<Episode> {
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(episode_from_row(r).await);
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -195,14 +255,11 @@ pub async fn list_episodes(
     Query(q): Query<EpisodeQuery>,
 ) -> ApiResult<Json<Vec<Episode>>> {
     podcasts::get_feed(&s.pool, id).await?;
-    let rows = sqlx::query(
-        "SELECT id, feed_id, guid, title, description_html, published_at, duration_ms, enclosure_url,
-                enclosure_type, enclosure_bytes, image_url, season, episode, link, file_path,
-                played_at, dropped_from_feed
-         FROM podcast_episodes
-         WHERE feed_id = ? AND (? = 0 OR played_at IS NULL)
-         ORDER BY published_at DESC, id DESC LIMIT ? OFFSET ?",
-    )
+    let rows = sqlx::query(&format!(
+        "{EPISODE_SELECT}
+         WHERE e.feed_id = ? AND (? = 0 OR e.played_at IS NULL)
+         ORDER BY e.published_at DESC, e.id DESC LIMIT ? OFFSET ?"
+    ))
     .bind(id)
     .bind(i64::from(q.unplayed.unwrap_or(0) != 0))
     .bind(q.limit.unwrap_or(200).clamp(1, 2000))
@@ -210,29 +267,7 @@ pub async fn list_episodes(
     .fetch_all(&s.pool)
     .await
     .map_err(cvt)?;
-    Ok(Json(
-        rows.iter()
-            .map(|r| Episode {
-                id: r.get("id"),
-                feed_id: r.get("feed_id"),
-                guid: r.get("guid"),
-                title: r.get("title"),
-                description_html: r.get("description_html"),
-                published_at: r.get("published_at"),
-                duration_ms: r.get("duration_ms"),
-                enclosure_url: r.get("enclosure_url"),
-                enclosure_type: r.get("enclosure_type"),
-                enclosure_bytes: r.get("enclosure_bytes"),
-                image_url: r.get("image_url"),
-                season: r.get("season"),
-                episode: r.get("episode"),
-                link: r.get("link"),
-                downloaded: r.get::<Option<String>, _>("file_path").is_some(),
-                played_at: r.get("played_at"),
-                dropped_from_feed: r.get::<i64, _>("dropped_from_feed") != 0,
-            })
-            .collect(),
-    ))
+    Ok(Json(episodes_from_rows(&rows).await))
 }
 
 #[derive(Deserialize)]
@@ -323,6 +358,10 @@ pub struct FeedSettings {
     pub auto_download: Option<bool>,
     pub keep_n: Option<i64>,
     pub delete_played_after_days: Option<i64>,
+    pub speed: Option<f64>,
+    pub skip_back_s: Option<i64>,
+    pub skip_forward_s: Option<i64>,
+    pub auto_advance: Option<bool>,
 }
 
 /// `PUT /api/podcasts/feeds/{id}/settings`: how this feed downloads and tidies.
@@ -344,12 +383,26 @@ pub async fn put_feed_settings(
             MusicError::BadRequest("delete_played_after_days must be 0 to 365".into()).into(),
         );
     }
+    let speed = b.speed.unwrap_or(cur.speed);
+    if !speed.is_finite() || !(0.5..=3.0).contains(&speed) {
+        return Err(MusicError::BadRequest("speed must be 0.5 to 3".into()).into());
+    }
+    let back = b.skip_back_s.unwrap_or(cur.skip_back_s);
+    let forward = b.skip_forward_s.unwrap_or(cur.skip_forward_s);
+    if !(1..=600).contains(&back) || !(1..=600).contains(&forward) {
+        return Err(MusicError::BadRequest("skips must be 1 to 600 seconds".into()).into());
+    }
     sqlx::query(
-        "UPDATE podcast_feeds SET auto_download = ?, keep_n = ?, delete_played_after_days = ? WHERE id = ?",
+        "UPDATE podcast_feeds SET auto_download = ?, keep_n = ?, delete_played_after_days = ?,
+                speed = ?, skip_back_s = ?, skip_forward_s = ?, auto_advance = ? WHERE id = ?",
     )
     .bind(i64::from(b.auto_download.unwrap_or(cur.auto_download)))
     .bind(keep)
     .bind(days)
+    .bind(speed)
+    .bind(back)
+    .bind(forward)
+    .bind(i64::from(b.auto_advance.unwrap_or(cur.auto_advance)))
     .bind(id)
     .execute(&s.pool)
     .await
@@ -1360,5 +1413,215 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    // --- playback (podcast_play) ------------------------------------------------
+
+    /// Subscribe to a feed (on one stand-in host) whose audio is on another;
+    /// returns (feed id, episode ids newest first, the audio host).
+    async fn subscribed(e: &Env, eps: &[(&str, &str)]) -> (i64, Vec<i64>, String) {
+        let (base, _) = site(String::new()).await;
+        let (base2, site2) = site(String::new()).await;
+        *site2.feed.lock().unwrap() = feed_xml_at(&base, "Show", eps);
+        let (st, out) = call(
+            &e.app,
+            Method::POST,
+            "/api/podcasts/feeds",
+            Some(serde_json::json!({"url": format!("{base2}/feed")})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{out}");
+        let id = out["feed"]["id"].as_i64().unwrap();
+        let (_, list) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/feeds/{id}/episodes"),
+            None,
+        )
+        .await;
+        let ids = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_i64().unwrap())
+            .collect();
+        (id, ids, base)
+    }
+
+    async fn stream(
+        e: &Env,
+        episode: i64,
+        range: Option<&str>,
+        method: Method,
+    ) -> axum::response::Response {
+        let mut req = Request::builder().method(method).uri(format!(
+            "/stream/{}",
+            kahawai_core::podcast_track_id(episode)
+        ));
+        if let Some(r) = range {
+            req = req.header(header::RANGE, r);
+        }
+        e.app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn audio() -> Vec<u8> {
+        (0..50_000u32).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[tokio::test]
+    async fn an_episode_streams_from_the_podcasts_host_with_byte_ranges() {
+        let e = env().await;
+        let (_, eps, _) = subscribed(&e, &[("a", D1)]).await;
+        let res = stream(&e, eps[0], None, Method::GET).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["x-transcode-chain"], "podcast->passthrough");
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "audio/mpeg");
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.to_vec(), audio());
+
+        let res = stream(&e, eps[0], Some("bytes=1000-"), Method::GET).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::PARTIAL_CONTENT,
+            "seeks are passed to the host"
+        );
+        assert_eq!(
+            res.headers()[header::CONTENT_RANGE],
+            "bytes 1000-49999/50000"
+        );
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.to_vec(), audio()[1000..].to_vec());
+
+        let res = stream(&e, eps[0], None, Method::HEAD).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::ACCEPT_RANGES], "bytes");
+
+        let res = stream(&e, 999_999, None, Method::GET).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_downloaded_episode_streams_from_the_file() {
+        let e = env().await;
+        let (_, eps, _) = subscribed(&e, &[("a", D1)]).await;
+        let file = e._dir.path().join("a.mp3");
+        std::fs::write(&file, b"0123456789").unwrap();
+        sqlx::query("UPDATE podcast_episodes SET file_path = ?, downloaded_at = 1 WHERE id = ?")
+            .bind(file.to_string_lossy().to_string())
+            .bind(eps[0])
+            .execute(&e.state.pool)
+            .await
+            .unwrap();
+        let res = stream(&e, eps[0], Some("bytes=4-"), Method::GET).await;
+        assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"456789");
+
+        let (_, downloads) = call(&e.app, Method::GET, "/api/podcasts/downloads", None).await;
+        assert_eq!(downloads[0]["id"], eps[0]);
+        assert_eq!(downloads[0]["file_bytes"], 10);
+        assert_eq!(downloads[0]["feed_title"], "Show");
+    }
+
+    #[tokio::test]
+    async fn positions_keep_the_place_make_sessions_and_mark_played_at_97_percent() {
+        let e = env().await;
+        let (feed, eps, _) = subscribed(&e, &[("a", D1), ("b", D2)]).await;
+        let put = |id: i64, ms: i64| {
+            let app = e.app.clone();
+            async move {
+                call(
+                    &app,
+                    Method::PUT,
+                    &format!("/api/podcasts/episodes/{id}/position"),
+                    Some(serde_json::json!({"offset_ms": ms})),
+                )
+                .await
+            }
+        };
+        let (st, out) = put(eps[0], 60_000).await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert_eq!(out["played"], false);
+        let (_, d) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/episodes/{}", eps[0]),
+            None,
+        )
+        .await;
+        assert_eq!(d["position_ms"], 60_000);
+        assert_eq!(d["feed"]["id"], feed);
+        let (_, going) = call(&e.app, Method::GET, "/api/podcasts/in-progress", None).await;
+        assert_eq!(going.as_array().unwrap().len(), 1);
+        assert_eq!(going[0]["id"], eps[0]);
+        let (_, h) = call(
+            &e.app,
+            Method::GET,
+            &format!("/api/podcasts/episodes/{}/history", eps[0]),
+            None,
+        )
+        .await;
+        assert_eq!(h.as_array().unwrap().len(), 1);
+
+        // 97% of 10 minutes: played, and no longer in progress.
+        let (_, out) = put(eps[0], 585_000).await;
+        assert_eq!(out["played"], true);
+        let (_, going) = call(&e.app, Method::GET, "/api/podcasts/in-progress", None).await;
+        assert!(going.as_array().unwrap().is_empty());
+        let (_, f) = call(&e.app, Method::GET, "/api/podcasts/feeds", None).await;
+        assert_eq!(f[0]["unplayed_count"], 1);
+        // Rewinding does not undo it.
+        let (_, out) = put(eps[0], 1_000).await;
+        assert_eq!(out["played"], true);
+
+        let (st, _) = put(999_999, 1).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_shows_speed_skips_and_auto_advance_are_kept_and_checked() {
+        let e = env().await;
+        let (feed, _, _) = subscribed(&e, &[("a", D1)]).await;
+        let set = |body: serde_json::Value| {
+            let app = e.app.clone();
+            async move {
+                call(
+                    &app,
+                    Method::PUT,
+                    &format!("/api/podcasts/feeds/{feed}/settings"),
+                    Some(body),
+                )
+                .await
+            }
+        };
+        let (_, f) = call(&e.app, Method::GET, "/api/podcasts/feeds", None).await;
+        assert_eq!(
+            (
+                f[0]["speed"].as_f64(),
+                f[0]["skip_back_s"].as_i64(),
+                f[0]["auto_advance"].as_bool()
+            ),
+            (Some(1.0), Some(15), Some(false))
+        );
+        let (st, out) =
+            set(serde_json::json!({"speed": 1.5, "skip_forward_s": 45, "auto_advance": true}))
+                .await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert_eq!(out["speed"], 1.5);
+        assert_eq!(out["skip_forward_s"], 45);
+        assert_eq!(out["skip_back_s"], 15, "left as it was");
+        assert_eq!(out["auto_advance"], true);
+        assert_eq!(out["keep_n"], 5, "the download rules are untouched");
+        for bad in [
+            serde_json::json!({"speed": 5.0}),
+            serde_json::json!({"skip_back_s": 0}),
+        ] {
+            let (st, _) = set(bad).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+        }
     }
 }

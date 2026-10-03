@@ -167,6 +167,28 @@ fn reveal_logs() {
     logfile::reveal();
 }
 
+/// Open a web or mail link from the UI (a podcast's show notes, its site) in
+/// the default browser or mail app. Anything that is not http(s) or mailto is
+/// refused, so a feed's HTML cannot make the app open files or other schemes.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")) {
+        return Err("only web and mail links can be opened".into());
+    }
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url.trim()).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// The UI is up (settings loaded, the library showing): swap the splash for
 /// the main window.
 #[tauri::command]
@@ -1351,6 +1373,7 @@ fn main() {
             set_developer_tools,
             app_ready,
             reveal_logs,
+            open_url,
             splash_shown,
             get_ui_state,
             set_ui_state,

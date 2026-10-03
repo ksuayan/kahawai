@@ -1001,3 +1001,86 @@ export interface RadioQuery {
   limit?: number;
   offset?: number;
 }
+
+// --- podcasts -------------------------------------------------------------------
+
+/** A subscription (`GET /api/podcasts/feeds`). */
+export interface PodcastFeed {
+  id: number;
+  feed_url: string;
+  title: string;
+  author: string | null;
+  description: string | null;
+  link: string | null;
+  image_url: string | null;
+  language: string | null;
+  explicit: boolean;
+  last_fetched: number | null;
+  /** Why the last refresh failed; null when it worked. */
+  last_error: string | null;
+  auto_download: boolean;
+  keep_n: number;
+  delete_played_after_days: number;
+  sort_order: number;
+  added_at: number;
+  episode_count: number;
+  unplayed_count: number;
+  speed: number;
+  skip_back_s: number;
+  skip_forward_s: number;
+  /** An episode that ends with nothing in Up Next goes on to the next unplayed one. */
+  auto_advance: boolean;
+}
+
+export interface PodcastEpisode {
+  id: number;
+  feed_id: number;
+  guid: string;
+  title: string;
+  description_html: string | null;
+  published_at: number | null;
+  duration_ms: number | null;
+  enclosure_url: string;
+  enclosure_type: string | null;
+  enclosure_bytes: number | null;
+  image_url: string | null;
+  season: number | null;
+  episode: number | null;
+  link: string | null;
+  downloaded: boolean;
+  file_bytes: number | null;
+  played_at: number | null;
+  dropped_from_feed: boolean;
+  position_ms: number;
+  position_updated_at: number | null;
+  feed_title: string;
+  feed_image_url: string | null;
+}
+
+export interface PodcastEpisodeDetail extends PodcastEpisode {
+  feed: PodcastFeed;
+}
+
+export interface PodcastFolder {
+  path: string;
+  custom: boolean;
+  usable: boolean;
+  episodes_downloaded: number;
+  bytes_downloaded: number;
+}
+
+export type PodcastFeedSettings = Partial<
+  Pick<PodcastFeed, "auto_download" | "keep_n" | "delete_played_after_days" | "speed" | "skip_back_s" | "skip_forward_s" | "auto_advance">
+>;
+
+export interface PodcastSubscribed {
+  feed: PodcastFeed;
+  episodes_added: number;
+  warnings: string[];
+}
+
+export interface PodcastImported {
+  added: number;
+  already_subscribed: number;
+  invalid: string[];
+}

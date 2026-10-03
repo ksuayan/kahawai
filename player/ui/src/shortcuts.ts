@@ -57,6 +57,7 @@ const VIEW_KEYS: Record<string, NavState["name"]> = {
   "5": "queue",
   "6": "settings",
   "7": "audiobooks",
+  "9": "podcasts",
   f: "search",
   g: "genres",
 };

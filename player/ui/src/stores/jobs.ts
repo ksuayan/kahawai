@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { ApiError, createJob, fetchJobs, triggerScan } from "../api";
 import { isJobActive, jobFilesDetail, trackTitle, type JobInfo, type JobStatus, type Track } from "../types";
 import { useAudiobooksStore } from "./audiobooks";
+import { usePodcastsStore } from "./podcasts";
 import { useLibraryStore } from "./library";
 import { useToastsStore } from "./toasts";
 
@@ -95,6 +96,7 @@ export const useJobsStore = defineStore("jobs", () => {
           const books = useAudiobooksStore();
           if (books.loaded) void books.loadLibrary();
         }
+        if (j.kind === "podcast_download") void usePodcastsStore().downloadsChanged();
         if (j.kind === "enrich_books") {
           const books = useAudiobooksStore();
           void books.loadLibrary().then(() => (books.detail ? books.refreshDetail() : undefined));

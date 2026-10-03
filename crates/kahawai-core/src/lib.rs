@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod format;
 
+pub use api::{podcast_episode_of, podcast_track_id, PODCAST_TRACK_ID_BASE};
 pub use api::{
     Album, Artist, BuildInfo, CatalogDelta, CatalogSnapshot, FileProgress, Genre,
     ImportPlaylistJson, ImportPlaylistResult, Job, JobKind, JobStatus, NewPlaylist, Page, Playlist,

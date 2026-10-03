@@ -16,6 +16,13 @@ import type {
   JobKind,
   Page,
   Playlist,
+  PodcastEpisode,
+  PodcastEpisodeDetail,
+  PodcastFeed,
+  PodcastFeedSettings,
+  PodcastFolder,
+  PodcastImported,
+  PodcastSubscribed,
   RadioFacet,
   RadioFavorite,
   RadioPlayInfo,
@@ -675,4 +682,85 @@ export async function enrichAudiobooks(bookId?: number): Promise<JobInfo> {
 
 export async function scanAudiobooks(): Promise<JobInfo> {
   return post<JobInfo>("/api/audiobooks/scan", {});
+}
+
+// --- podcasts --------------------------------------------------------------------
+
+export async function fetchPodcastFeeds(): Promise<PodcastFeed[]> {
+  return get<PodcastFeed[]>("/api/podcasts/feeds");
+}
+
+/** Subscribe by the feed's address; the server reads it first and says why not. */
+export async function subscribePodcast(url: string): Promise<PodcastSubscribed> {
+  return post<PodcastSubscribed>("/api/podcasts/feeds", { url: url.trim() });
+}
+
+export async function unsubscribePodcast(feedId: number): Promise<void> {
+  await del(`/api/podcasts/feeds/${feedId}`);
+}
+
+/** Import another app's OPML export (the file's text is the body). */
+export async function importPodcastOpml(text: string): Promise<PodcastImported> {
+  const path = "/api/podcasts/feeds/import-opml";
+  const res = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { "Content-Type": "text/x-opml" }, body: text });
+  if (!res.ok) await fail("POST", path, res);
+  return (await res.json()) as PodcastImported;
+}
+
+/** Where the subscriptions download as an OPML file (the server sends it as a file to save). */
+export function podcastOpmlExportUrl(): string {
+  return `${baseUrl}/api/podcasts/feeds/export-opml`;
+}
+
+export async function fetchPodcastEpisodes(feedId: number, unplayedOnly = false): Promise<PodcastEpisode[]> {
+  return get<PodcastEpisode[]>(`/api/podcasts/feeds/${feedId}/episodes${unplayedOnly ? "?unplayed=1" : ""}`);
+}
+
+export async function fetchPodcastEpisode(id: number): Promise<PodcastEpisodeDetail> {
+  return get<PodcastEpisodeDetail>(`/api/podcasts/episodes/${id}`);
+}
+
+export async function fetchPodcastEpisodeHistory(id: number): Promise<AudiobookSession[]> {
+  return get<AudiobookSession[]>(`/api/podcasts/episodes/${id}/history`);
+}
+
+export async function fetchPodcastsInProgress(): Promise<PodcastEpisode[]> {
+  return get<PodcastEpisode[]>("/api/podcasts/in-progress");
+}
+
+export async function fetchPodcastDownloads(): Promise<PodcastEpisode[]> {
+  return get<PodcastEpisode[]>("/api/podcasts/downloads");
+}
+
+export async function fetchPodcastFolder(): Promise<PodcastFolder> {
+  return get<PodcastFolder>("/api/podcasts/folder");
+}
+
+/** Read one feed again (or all of them); the answer says what changed or why not. */
+export async function refreshPodcasts(feedId?: number): Promise<{ feed_id: number; episodes_added: number; error: string | null }[]> {
+  return post("/api/podcasts/refresh", feedId == null ? {} : { feed_id: feedId });
+}
+
+export async function savePodcastFeedSettings(feedId: number, s: PodcastFeedSettings): Promise<PodcastFeed> {
+  return put<PodcastFeed>(`/api/podcasts/feeds/${feedId}/settings`, s);
+}
+
+export async function savePodcastPosition(id: number, offsetMs: number): Promise<{ offset_ms: number; updated_at: number; played: boolean }> {
+  return put(`/api/podcasts/episodes/${id}/position`, { offset_ms: Math.max(0, Math.round(offsetMs)) });
+}
+
+export async function markPodcastEpisodePlayed(id: number, played: boolean): Promise<void> {
+  const path = `/api/podcasts/episodes/${id}/played`;
+  const res = await fetch(`${baseUrl}${path}`, { method: "POST", headers: headers(path, true), body: JSON.stringify({ played }) });
+  if (!res.ok) await fail("POST", path, res);
+}
+
+/** Queue the download on the server (a job). */
+export async function downloadPodcastEpisode(id: number): Promise<JobInfo> {
+  return post<JobInfo>(`/api/podcasts/episodes/${id}/download`, {});
+}
+
+/** Cancel a download, or delete the downloaded file (the episode and its place stay). */
+export async function deletePodcastDownload(id: number): Promise<void> {
+  await del(`/api/podcasts/episodes/${id}/download`);
 }

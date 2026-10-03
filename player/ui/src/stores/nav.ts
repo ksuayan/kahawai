@@ -8,6 +8,7 @@ export type ViewName =
   | "genres"
   | "playlists"
   | "audiobooks"
+  | "podcasts"
   | "radio"
   | "search"
   | "queue"
@@ -20,6 +21,7 @@ export const SECTION_LABELS: Record<ViewName, string> = {
   genres: "Genres",
   playlists: "Playlists",
   audiobooks: "Audiobooks",
+  podcasts: "Podcasts",
   radio: "Radio",
   search: "Search",
   queue: "Queue",
@@ -27,7 +29,17 @@ export const SECTION_LABELS: Record<ViewName, string> = {
 };
 
 export interface NavState {
-  name: ViewName | "album" | "artist" | "playlist" | "genre" | "audiobook" | "nowplaying";
+  name:
+    | ViewName
+    | "album"
+    | "artist"
+    | "playlist"
+    | "genre"
+    | "audiobook"
+    | "podcast"
+    | "episode"
+    | "podcastdownloads"
+    | "nowplaying";
   id?: number;
   /** The genre a "genre" view shows (genres are named, not numbered). */
   genre?: string;
@@ -40,7 +52,9 @@ export interface Crumb extends NavState {
 
 const KEY = "kahawai.nav";
 const SECTIONS = Object.keys(SECTION_LABELS) as ViewName[];
-const BY_ID = ["album", "artist", "playlist", "audiobook"];
+const BY_ID = ["album", "artist", "playlist", "audiobook", "podcast", "episode"];
+/** Pages under a section that take no id. */
+const PLAIN_PAGES = ["nowplaying", "podcastdownloads"];
 /** The most steps a trail keeps (its section, then the latest pages). */
 export const MAX_TRAIL = 6;
 
@@ -51,6 +65,9 @@ const HOME: Record<Exclude<NavState["name"], ViewName>, ViewName> = {
   genre: "genres",
   playlist: "playlists",
   audiobook: "audiobooks",
+  podcast: "podcasts",
+  episode: "podcasts",
+  podcastdownloads: "podcasts",
   nowplaying: "albums",
 };
 
@@ -69,6 +86,7 @@ export function crumbLabel(c: Crumb): string {
   if (c.label) return c.label;
   if (c.name === "genre" && c.genre) return c.genre;
   if (c.name === "nowplaying") return "Now Playing";
+  if (c.name === "podcastdownloads") return "Downloads";
   return c.name.charAt(0).toUpperCase() + c.name.slice(1);
 }
 
@@ -78,7 +96,7 @@ function valid(v: unknown): Crumb | null {
   const c = v as Partial<Crumb>;
   if (typeof c.name !== "string") return null;
   const label = typeof c.label === "string" && c.label ? { label: c.label } : {};
-  if (isSection(c.name) || c.name === "nowplaying") return { name: c.name, ...label };
+  if (isSection(c.name) || PLAIN_PAGES.includes(c.name)) return { name: c.name, ...label };
   if (BY_ID.includes(c.name) && Number.isInteger(c.id)) return { name: c.name, id: c.id, ...label };
   if (c.name === "genre" && typeof c.genre === "string" && c.genre) return { name: "genre", genre: c.genre, ...label };
   return null;

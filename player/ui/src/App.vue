@@ -4,6 +4,10 @@ import AlbumsView from "./components/AlbumsView.vue";
 import AudiobookDetail from "./components/AudiobookDetail.vue";
 import AudiobooksView from "./components/AudiobooksView.vue";
 import RadioView from "./components/RadioView.vue";
+import PodcastDownloadsView from "./components/PodcastDownloadsView.vue";
+import PodcastEpisodeView from "./components/PodcastEpisodeView.vue";
+import PodcastFeedView from "./components/PodcastFeedView.vue";
+import PodcastsView from "./components/PodcastsView.vue";
 import AlbumDetail from "./components/AlbumDetail.vue";
 import ArtistsView from "./components/ArtistsView.vue";
 import GenreDetail from "./components/GenreDetail.vue";
@@ -26,6 +30,7 @@ import InfoDialog from "./components/InfoDialog.vue";
 import { useAbxStore } from "./stores/abx";
 import { useAnalogStore } from "./stores/analog";
 import { useAudiobooksStore } from "./stores/audiobooks";
+import { usePodcastsStore } from "./stores/podcasts";
 import { useOverlaysStore } from "./stores/overlays";
 import { useToastsStore } from "./stores/toasts";
 import { describeAnalog } from "./types";
@@ -66,13 +71,14 @@ const playlists = usePlaylistsStore();
 const dsp = useDspStore();
 const analog = useAnalogStore();
 const audiobooks = useAudiobooksStore();
+const podcasts = usePodcastsStore();
 const jobs = useJobsStore();
 const toasts = useToastsStore();
 const abx = useAbxStore();
 const overlays = useOverlaysStore();
 const serverHealth = useServerHealthStore();
 /** Views that scroll inside a virtualized list or grid of their own. */
-const OWN_SCROLLER = new Set(["albums", "artists", "genre", "album", "search", "queue", "audiobooks"]);
+const OWN_SCROLLER = new Set(["albums", "artists", "genre", "album", "playlist", "search", "queue", "audiobooks"]);
 
 // Cleanup must be registered synchronously: inside the async onMounted below
 // there is no active component instance left after the first await.
@@ -118,6 +124,7 @@ onMounted(async () => {
   await analog.init(); // the A/B pair of analog-warmth settings
   jobs.init(); // pick up any active server jobs (scan / ISO extraction)
   void audiobooks.adopt(); // a restored queue may be a book's parts
+  void podcasts.adopt(); // ... or a podcast episode
   // Keep the queue store in sync with core-driven queue changes.
   stopWatch = player.$subscribe((_m, s) => {
     if (s.raw) {
@@ -139,7 +146,7 @@ function onKeydown(e: KeyboardEvent): void {
     volumeBy: (d) => void player.changeVolume(Math.min(1, Math.max(0, player.volume + d))),
     next: () => void (audiobooks.isActive ? audiobooks.nextChapter() : player.nextTrack()),
     prev: () => void (audiobooks.isActive ? audiobooks.previousChapter() : player.prevTrack()),
-    skip: (d) => void (audiobooks.isActive ? audiobooks.skip(d) : undefined),
+    skip: (d) => void (audiobooks.isActive ? audiobooks.skip(d) : podcasts.isActive ? podcasts.skip(d) : undefined),
     go: (v) => nav.go(v),
     ab: (which) => switchAnalog(which),
   });
@@ -199,6 +206,10 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
           <AlbumDetail v-else-if="nav.view.name === 'album'" :id="nav.view.id ?? 0" />
           <AudiobooksView v-else-if="nav.view.name === 'audiobooks'" />
           <RadioView v-else-if="nav.view.name === 'radio'" />
+          <PodcastsView v-else-if="nav.view.name === 'podcasts'" />
+          <PodcastFeedView v-else-if="nav.view.name === 'podcast'" :id="nav.view.id ?? 0" />
+          <PodcastEpisodeView v-else-if="nav.view.name === 'episode'" :id="nav.view.id ?? 0" />
+          <PodcastDownloadsView v-else-if="nav.view.name === 'podcastdownloads'" />
           <AudiobookDetail v-else-if="nav.view.name === 'audiobook'" :id="nav.view.id ?? 0" />
           <ArtistsView v-else-if="nav.view.name === 'artists'" />
           <ArtistDetail v-else-if="nav.view.name === 'artist'" :id="nav.view.id ?? 0" />

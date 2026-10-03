@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { useAudiobooksStore } from "../stores/audiobooks";
 import { usePlayerStore } from "../stores/player";
+import { usePodcastsStore } from "../stores/podcasts";
 import { useRadioStore } from "../stores/radio";
 import { formatDuration } from "../types";
 import UiSlider from "../ui/UiSlider.vue";
@@ -21,6 +22,7 @@ const props = withDefaults(defineProps<{ disabled?: boolean; size?: "sm" | "md" 
 const player = usePlayerStore();
 const books = useAudiobooksStore();
 const radio = useRadioStore();
+const podcasts = usePodcastsStore();
 /** A radio station has no timeline: no seeking, no duration. */
 const live = computed(() => radio.isPlaying);
 /** A book plays as one piece: the bar spans the whole book, not the file. */
@@ -40,7 +42,7 @@ function onUpdate(v: number): void {
 function onCommit(v: number): void {
   scrubValue.value = v;
   scrubbing.value = false;
-  void (book.value ? books.seekToOffset(v) : player.seekTo(v));
+  void (book.value ? books.seekToOffset(v) : podcasts.isActive ? podcasts.seekTo(v) : player.seekTo(v));
 }
 
 const timeClass = computed(() =>

@@ -28,6 +28,7 @@ mod normalize;
 mod podcast_api;
 mod podcast_dl;
 mod podcast_feed;
+mod podcast_play;
 mod podcasts;
 mod radio;
 mod radio_api;
@@ -199,6 +200,20 @@ pub fn app(state: AppState) -> Router {
             get(podcast_api::list_episodes),
         )
         .route("/api/podcasts/refresh", post(podcast_api::refresh))
+        .route("/api/podcasts/in-progress", get(podcast_play::in_progress))
+        .route("/api/podcasts/downloads", get(podcast_play::downloads))
+        .route(
+            "/api/podcasts/episodes/{id}",
+            get(podcast_play::get_episode),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/position",
+            put(podcast_play::put_position),
+        )
+        .route(
+            "/api/podcasts/episodes/{id}/history",
+            get(podcast_play::history),
+        )
         .route("/api/podcasts/folder", get(podcast_api::folder))
         .route(
             "/api/podcasts/feeds/{id}/settings",

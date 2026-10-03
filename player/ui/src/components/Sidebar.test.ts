@@ -10,7 +10,7 @@ const labels = (w: ReturnType<typeof mountApp>["wrapper"]) => w.findAll("button"
 describe("Sidebar", () => {
   it("lists the library sections and Settings", () => {
     const { wrapper } = mountApp(Sidebar);
-    expect(labels(wrapper)).toEqual(["Albums", "Artists", "Genres", "Playlists", "Audiobooks", "Radio", "Search", "Queue", "Settings"]);
+    expect(labels(wrapper)).toEqual(["Albums", "Artists", "Genres", "Playlists", "Audiobooks", "Podcasts", "Radio", "Search", "Queue", "Settings"]);
   });
 
   it("marks the current section and navigates on click", async () => {
@@ -70,6 +70,7 @@ describe("Sidebar", () => {
       { label: "Genres", icon: "lucide-tags" },
       { label: "Playlists", icon: "lucide-list-music" },
       { label: "Audiobooks", icon: "lucide-book-open" },
+      { label: "Podcasts", icon: "lucide-podcast" },
       { label: "Radio", icon: "lucide-radio" },
       { label: "Search", icon: "lucide-search" },
       { label: "Queue", icon: "lucide-list-ordered" },

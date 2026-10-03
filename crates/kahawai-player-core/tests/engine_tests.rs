@@ -594,6 +594,22 @@ fn resolve_format_prefers_override_then_global_then_ladder() {
 }
 
 #[test]
+fn a_podcast_episode_always_passes_through() {
+    use kahawai_player_core::DsdStory;
+    let episode = track(kahawai_core::podcast_track_id(9), AudioFormat::Mp3, 1000);
+    assert_eq!(
+        resolve_format(
+            &episode,
+            Some(StreamFormat::Flac),
+            Some(StreamFormat::Opus),
+            DsdStory::Convert
+        ),
+        StreamFormat::Passthrough,
+        "no forced rendition: the server only passes episodes through"
+    );
+}
+
+#[test]
 fn resolve_format_dsd_story_matrix() {
     use kahawai_player_core::DsdStory;
     let dsf = track(2, AudioFormat::Dsf, 1000);

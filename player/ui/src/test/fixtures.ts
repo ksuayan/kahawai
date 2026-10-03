@@ -1,4 +1,4 @@
-import type { Album, PlayerState, Track } from "../types";
+import type { Album, PlayerState, PodcastEpisode, Track } from "../types";
 
 let n = 0;
 
@@ -79,4 +79,33 @@ export function mockFetch(routes: Record<string, unknown | ((url: string, init?:
   };
   (globalThis as unknown as { fetch: typeof fn }).fetch = fn;
   return calls;
+}
+
+/** A podcast episode, 10 minutes long, not started. */
+export function makeEpisode(over: Partial<PodcastEpisode> = {}): PodcastEpisode {
+  return {
+    id: 1,
+    feed_id: 3,
+    guid: "g1",
+    title: "Episode one",
+    description_html: null,
+    published_at: Date.UTC(2026, 2, 2),
+    duration_ms: 600_000,
+    enclosure_url: "https://cdn.example/one.mp3",
+    enclosure_type: "audio/mpeg",
+    enclosure_bytes: 10_000_000,
+    image_url: null,
+    season: null,
+    episode: null,
+    link: null,
+    downloaded: false,
+    file_bytes: null,
+    played_at: null,
+    dropped_from_feed: false,
+    position_ms: 0,
+    position_updated_at: null,
+    feed_title: "The Show",
+    feed_image_url: null,
+    ...over,
+  };
 }

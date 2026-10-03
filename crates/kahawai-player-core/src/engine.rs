@@ -98,6 +98,11 @@ pub fn resolve_format(
     per_track: Option<StreamFormat>,
     dsd_story: DsdStory,
 ) -> StreamFormat {
+    // A podcast episode is served as it is (often straight from the podcast's
+    // own host): there is no other rendition to ask for.
+    if kahawai_core::podcast_episode_of(track.id).is_some() {
+        return StreamFormat::Passthrough;
+    }
     if let Some(f) = per_track {
         return f;
     }
@@ -1739,7 +1744,10 @@ impl Player {
         // first-play of a track; the gain is cached by (track, format).
         // Cost: double LAN bandwidth + a second server transcode for
         // uncached tracks. DoP never reaches this path.
+        // Not for podcast episodes: the pre-scan reads the whole file first, and
+        // an episode that is not downloaded comes from the podcast's host.
         let scan = track.id >= 0
+            && kahawai_core::podcast_episode_of(track.id).is_none()
             && self.loudness.enabled()
             && !want_bp
             && !self.loudness.has_levels(track.id, fmt);

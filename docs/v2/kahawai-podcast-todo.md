@@ -1,7 +1,7 @@
 # Kahawai Podcasts — TODO
 
 Buildable feature list with estimated sizing and status.
-Sizes: XS < S < M < L. Spec: `kahawai-podcast-spec.md` (2026-10-02).
+Sizes: XS < S < M < L. Spec: `kahawai-podcast-spec.md` (2026-10-02). "Built" means built and tested without real feeds or the Mac.
 
 | # | Feature | Size | Status | Notes |
 |---|---------|------|--------|-------|
@@ -15,14 +15,14 @@ Sizes: XS < S < M < L. Spec: `kahawai-podcast-spec.md` (2026-10-02).
 | 8 | Download manager: queued jobs, resume via Range, file layout `Show/date - title.ext` | M | Built | Downloads are jobs (`podcast_download`), resume with Range into a `.part` file, two at a time, saved as `Show/date - title.ext`; `POST/DELETE /api/podcasts/episodes/{id}/download`, `GET .../file` serves it with byte ranges |
 | 9 | Auto-download rules: keep-N latest unplayed; delete oldest played first | S | Built | Newest `keep_n` unplayed episodes are fetched automatically; over the limit, played files go first, then the oldest |
 | 10 | Played-file janitor (`delete_played_after_days`, 0 = never) | XS | Built | `delete_played_after_days` (default 7, 0 = never); the episode and its place stay |
-| 11 | Stream-undownloaded-episodes direct from enclosure URL | S | Not started | D3; no forced download |
-| 12 | `podcast_positions` + throttled PUT + per-day session history (reuse audiobook pattern) | S | Not started | D4 |
-| 13 | Per-feed settings: speed, skips, auto-download, keep-N, auto-advance | S | Partly built | `PUT /api/podcasts/feeds/{id}/settings` covers auto-download, keep-N and delete-after-days; speed, skips and auto-advance come with playback |
-| 14 | Player: subscriptions view (artwork, unread counts, failing badges) | S | Not started | D5 |
-| 15 | Player: feed/episode views (download states, filters) | M | Not started | D5 |
-| 16 | Player: episode view — sanitized show notes, chapters, mark played | S | Not started | D5 |
-| 17 | "Up Next" episode queue; third now-playing context (music/audiobook/podcast) | S | Not started | D5 |
-| 18 | Downloads management UI (sizes, per-feed rules editor) | S | Not started | D5 |
+| 11 | Stream-undownloaded-episodes direct from enclosure URL | S | Built | `/stream/{2^40 + id}` serves the download, or passes the enclosure through the server with the Player's Range (seeking works where the host supports it) |
+| 12 | `podcast_positions` + throttled PUT + per-day session history (reuse audiobook pattern) | S | Built | migration 021; `PUT /api/podcasts/episodes/{id}/position`, `GET .../history`, `GET /api/podcasts/in-progress`; played at 97% |
+| 13 | Per-feed settings: speed, skips, auto-download, keep-N, auto-advance | S | Built | `PUT /api/podcasts/feeds/{id}/settings` covers all of them; the Player applies speed and skips when an episode starts |
+| 14 | Player: subscriptions view (artwork, unread counts, failing badges) | S | Built | Podcasts section: grid or list, Up Next, Continue listening, add by address, OPML import/export |
+| 15 | Player: feed/episode views (download states, filters) | M | Built | show page: newest first, unplayed filter, downloaded (size) / downloading (%) / streams, download, delete, Up Next, mark played |
+| 16 | Player: episode view — sanitized show notes, chapters, mark played | S | Built | sanitized notes (formatting, lists, web links; links open in the browser), history by day; chapters wait for Podlove storage (item 2) |
+| 17 | "Up Next" episode queue; third now-playing context (music/audiobook/podcast) | S | Built | Up Next rides behind the episode in the engine queue and survives restarts; auto-advance queues the show's next unplayed one; the music stash is shared with audiobooks |
+| 18 | Downloads management UI (sizes, per-feed rules editor) | S | Built | Downloads page: folder and total, running downloads, files with sizes, per-show rules |
 | 19 | Discovery: iTunes Search API proxy + charts + one-tap subscribe | S | Not started | D6 |
 | 20 | Silence trimming / Smart-Speed DSP spike | M | Not started | Backlog; spike before committing |
 

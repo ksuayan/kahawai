@@ -1684,6 +1684,10 @@ pub async fn stream_track(
     Query(q): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    // A podcast episode: served as it is, never chained or transcoded.
+    if let Some(episode) = kahawai_core::podcast_episode_of(id) {
+        return crate::podcast_play::stream_episode(&s, episode, &headers, false).await;
+    }
     let track = db::get_track(&s.pool, id)
         .await?
         .ok_or_else(|| MusicError::NotFound(format!("track {id}")))?;
@@ -2073,7 +2077,11 @@ pub async fn stream_head(
     State(s): State<AppState>,
     Path(id): Path<i64>,
     Query(q): Query<StreamQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    if let Some(episode) = kahawai_core::podcast_episode_of(id) {
+        return crate::podcast_play::stream_episode(&s, episode, &headers, true).await;
+    }
     let track = db::get_track(&s.pool, id)
         .await?
         .ok_or_else(|| MusicError::NotFound(format!("track {id}")))?;

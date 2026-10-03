@@ -3,6 +3,7 @@ import { makeState, makeTrack, mockFetch } from "../test/fixtures";
 import { $$, mountApp, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
 import { useRadioStore } from "../stores/radio";
+import { useViewPrefsStore } from "../stores/viewPrefs";
 import { usePlayerStore } from "../stores/player";
 import NowPlayingBar from "./NowPlayingBar.vue";
 import RadioView from "./RadioView.vue";
@@ -131,6 +132,61 @@ describe("Radio view", () => {
   });
 });
 
+describe("Radio view: layout and order", () => {
+  const three = () => [fav(1, "Zulu Radio", { bitrate: 64, codec: "AAC" }), fav(2, "Alpha FM", { bitrate: 128, codec: "MP3" }), fav(3, "Mike Live", { bitrate: 320, codec: "AAC" })];
+  const names = (w: ReturnType<typeof mountApp>["wrapper"]) => w.findAll('[data-testid="station-row"]').map((r) => r.find(".font-semibold").text());
+
+  it("puts the stream address bar first, under the heading, on both tabs", async () => {
+    mockFetch({ "/api/radio/favorites": () => json(three()), "/api/radio/facets": () => json([]), "/api/radio/search": () => json([]) });
+    const { wrapper } = mountApp(RadioView);
+    await settle();
+    const html = wrapper.html();
+    expect(html.indexOf('data-testid="add-by-address"')).toBeLessThan(html.indexOf('data-testid="favorites"'));
+    await wrapper.get('[data-testid="tab-browse"]').trigger("click");
+    await settle();
+    expect(wrapper.find('[data-testid="station-address"]').exists()).toBe(true);
+  });
+
+  it("shows stations as a grid of tiles, and remembers it", async () => {
+    const calls = mockFetch({
+      "/api/radio/favorites/1/play": () => json({ name: "Zulu Radio", url: "http://s1/live", codec: "AAC", bitrate: 64, needs_relay: false }),
+      "/api/radio/favorites": () => json(three()),
+    });
+    const { wrapper } = mountApp(RadioView);
+    await settle();
+    expect(wrapper.get('[data-testid="station-row"]').attributes("data-layout")).toBeUndefined();
+    await wrapper.get('button[aria-label="Grid"]').trigger("click");
+    await settle();
+    expect(useViewPrefsStore().prefs.radioLayout).toBe("grid");
+    const tiles = wrapper.findAll('[data-testid="station-row"]');
+    expect(tiles.every((t) => t.attributes("data-layout") === "grid")).toBe(true);
+    await tiles[0].get('[data-testid="station-tile-play"]').trigger("click");
+    await settle();
+    expect(calls.some((c) => c.url.endsWith("/favorites/1/play"))).toBe(true);
+    expect((tauri.callsTo("queue_play").at(-1) as { tracks: { id: number }[] }).tracks[0].id).toBe(-1);
+  });
+
+  it("sorts by name, bandwidth or format, and only lets you reorder favorites as listed", async () => {
+    mockFetch({ "/api/radio/favorites": () => json(three()) });
+    const { wrapper } = mountApp(RadioView);
+    await settle();
+    expect(wrapper.text()).toContain("Sort by");
+    expect(names(wrapper)).toEqual(["Zulu Radio", "Alpha FM", "Mike Live"]);
+    expect(wrapper.findAll('[data-testid="move-down"]')[0].attributes("disabled")).toBeUndefined();
+    const prefs = useViewPrefsStore().prefs;
+    prefs.radioSort = "name";
+    await settle();
+    expect(names(wrapper)).toEqual(["Alpha FM", "Mike Live", "Zulu Radio"]);
+    expect(wrapper.findAll('[data-testid="move-down"]').every((b) => b.attributes("disabled") !== undefined)).toBe(true);
+    prefs.radioSort = "bandwidth";
+    await settle();
+    expect(names(wrapper)).toEqual(["Mike Live", "Alpha FM", "Zulu Radio"]);
+    prefs.radioSort = "format";
+    await settle();
+    expect(names(wrapper)).toEqual(["Mike Live", "Zulu Radio", "Alpha FM"]);
+  });
+});
+
 describe("Now playing a station", () => {
   const play = async (radio: Record<string, unknown>) => {
     const track = makeTrack({ id: -4, title: "Island FM", artist: "Live radio", duration_ms: null, album_id: null });
@@ -149,6 +205,20 @@ describe("Now playing a station", () => {
     expect(wrapper.get('[data-testid="duration"]').text()).toBe("");
     expect(wrapper.find('[data-testid="radio-reconnecting"]').exists()).toBe(false);
     expect(useRadioStore(pinia).isPlaying).toBe(true);
+  });
+
+  it("the bar's cover is the sidebar's radio icon, not a music note", async () => {
+    mockFetch({});
+    const { wrapper, pinia } = mountApp(NowPlayingBar);
+    await usePlayerStore(pinia).init();
+    await play({ title: "Artist - Song", reconnecting: false, attempt: 0, bitrate_kbps: 96, reason: null });
+    const cover = wrapper.get('[data-placeholder]');
+    expect(cover.attributes("data-placeholder")).toBe("radio");
+    expect(cover.find("svg").classes().join(" ")).toContain("lucide-radio");
+    // Back to a music track: the note again.
+    tauri.emit("player-state", makeState({ status: "playing", track: makeTrack({ id: 5, album_id: null }) }));
+    await settle();
+    expect(wrapper.get('[data-placeholder]').attributes("data-placeholder")).toBe("music");
   });
 
   it("says Live radio when the station sends no titles, and shows a lost connection", async () => {

@@ -184,11 +184,18 @@ pub struct FeedRow {
     pub added_at: i64,
     pub episode_count: i64,
     pub unplayed_count: i64,
+    /// Playback for this show: speed (0.5 to 3), skip seconds, and whether an
+    /// episode that ends with nothing in Up Next goes on to the next unplayed one.
+    pub speed: f64,
+    pub skip_back_s: i64,
+    pub skip_forward_s: i64,
+    pub auto_advance: bool,
 }
 
 const FEED_SELECT: &str = "SELECT f.id, f.feed_url, f.title, f.author, f.description, f.link, f.image_url,
        f.language, f.explicit, f.last_fetched, f.last_error, f.auto_download, f.keep_n,
        f.delete_played_after_days, f.sort_order, f.added_at,
+       f.speed, f.skip_back_s, f.skip_forward_s, f.auto_advance,
        (SELECT COUNT(*) FROM podcast_episodes e WHERE e.feed_id = f.id) AS episode_count,
        (SELECT COUNT(*) FROM podcast_episodes e WHERE e.feed_id = f.id AND e.played_at IS NULL) AS unplayed_count
      FROM podcast_feeds f";
@@ -213,6 +220,10 @@ fn feed_row(r: &sqlx::sqlite::SqliteRow) -> FeedRow {
         added_at: r.get("added_at"),
         episode_count: r.get("episode_count"),
         unplayed_count: r.get("unplayed_count"),
+        speed: r.get("speed"),
+        skip_back_s: r.get("skip_back_s"),
+        skip_forward_s: r.get("skip_forward_s"),
+        auto_advance: r.get::<i64, _>("auto_advance") != 0,
     }
 }
 
@@ -670,6 +681,10 @@ mod tests {
             added_at: 0,
             episode_count: 0,
             unplayed_count: 0,
+            speed: 1.0,
+            skip_back_s: 15,
+            skip_forward_s: 30,
+            auto_advance: false,
         };
         let feeds = [
             f(1, "Tom & \"Jerry\" <live>", "https://a.example/f?x=1&y=2"),

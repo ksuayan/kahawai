@@ -14,6 +14,7 @@ import {
 import { queuePlay } from "../tauri";
 import type { RadioFacet, RadioFavorite, RadioOrder, RadioStation, Track, TrackFormat } from "../types";
 import { useAudiobooksStore } from "./audiobooks";
+import { usePodcastsStore } from "./podcasts";
 import { usePlayerStore } from "./player";
 
 /** A station is a queue item with a negative id; its `path` is the stream address. */
@@ -177,6 +178,12 @@ export const useRadioStore = defineStore("radio", () => {
       await player.pause();
       await books.reportNow();
       await books.leave(false);
+    }
+    const podcasts = usePodcastsStore();
+    if (podcasts.active) {
+      await player.pause();
+      await podcasts.reportNow();
+      await podcasts.leave(false);
     }
     heard.value = [];
     const track: Track = {

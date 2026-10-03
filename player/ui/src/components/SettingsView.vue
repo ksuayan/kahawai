@@ -315,10 +315,6 @@ const dopRates = computed(() =>
       </p>
     </SettingsSection>
 
-    <SettingsSection title="Audiobooks">
-      <AudiobookSection />
-    </SettingsSection>
-
     <SettingsSection title="Audio output">
       <UiHint>
         Choose the speaker or DAC to play through. Changing it while music is playing moves the track over and
@@ -538,6 +534,10 @@ const dopRates = computed(() =>
         </div>
         <div><UiButton variant="icon" @click="jobs.refresh()"><RefreshCw /> Refresh</UiButton></div>
       </div>
+    </SettingsSection>
+
+    <SettingsSection title="Audiobooks">
+      <AudiobookSection />
     </SettingsSection>
 
     <SettingsSection v-if="inTauri()" title="Album art cache">
