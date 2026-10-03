@@ -13,6 +13,10 @@ use std::time::Duration;
 
 mod logfile;
 mod logging;
+/// iOS background-audio session (AVAudioSession). Android does this natively
+/// in PlaybackService; iOS goes through here, driven by engine state below.
+#[cfg(target_os = "ios")]
+mod ios_audio;
 // Menus are desktop-only: tauri::menu is #[cfg(desktop)]-gated.
 #[cfg(desktop)]
 mod menu;
@@ -1383,10 +1387,25 @@ pub fn run() {
             let handle2 = handle.clone();
             std::thread::Builder::new()
                 .name("player-state-forward".into())
-                .spawn(move || loop {
+                .spawn(move || {
+                    // iOS: keep the AVAudioSession active exactly while
+                    // playing (background audio needs it; holding it while
+                    // paused would steal audio focus from other apps).
+                    #[cfg(target_os = "ios")]
+                    let mut was_playing = false;
+                    loop {
                     for event in engine2.drain_events() {
                         match event {
                             PlayerEvent::State(snap) => {
+                                #[cfg(target_os = "ios")]
+                                {
+                                    let playing =
+                                        snap.status == PlayerStatus::Playing;
+                                    if playing != was_playing {
+                                        ios_audio::set_playing(playing);
+                                        was_playing = playing;
+                                    }
+                                }
                                 let dto = PlayerStateDto::from(snap);
                                 if let Err(e) = handle2.emit("player-state", dto) {
                                     eprintln!("[shell] player-state emit failed: {e}");
@@ -1395,6 +1414,7 @@ pub fn run() {
                         }
                     }
                     std::thread::sleep(Duration::from_millis(50));
+                    }
                 })
                 .expect("spawn player-state-forward thread");
 

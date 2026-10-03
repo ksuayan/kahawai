@@ -65,3 +65,9 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.rustfft]
 opt-level = 2
+
+# iOS only: AVAudioSession for background audio (see src/ios_audio.rs).
+# Not compiled without the iOS SDK; added now so the module has its dep
+# when the first Xcode build runs.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-avf-audio = "0.3"
