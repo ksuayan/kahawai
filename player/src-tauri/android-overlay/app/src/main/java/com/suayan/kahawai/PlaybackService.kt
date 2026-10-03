@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -21,7 +23,11 @@ import androidx.core.app.NotificationCompat
 // result is the breakup and stuttering heard on the HiBy R4 after some
 // minutes of playback. Running as a mediaPlayback foreground service (plus a
 // partial wake lock while playing) tells the OS this process is doing active
-// media playback, which exempts it from that throttling.
+// media playback, which exempts it from that throttling. A Wi-Fi lock keeps
+// the radio in low-latency mode with the screen off: the wake lock protects
+// the CPU, but without the Wi-Fi lock the radio itself can doze and starve
+// the stream (the player is a pure streaming client: server, radio and
+// podcasts all arrive over the network).
 //
 // Driven from the page through window.KahawaiPlayback.setActive(active,
 // title, artist) (player/ui/src/lib/playbackService.ts): the player store
@@ -35,9 +41,11 @@ class PlaybackService : Service() {
     private const val NOTIFICATION_ID = 1
     private const val CHANNEL_ID = "kahawai_playback"
     private const val WAKE_LOCK_TAG = "Kahawai:playback"
+    private const val WIFI_LOCK_TAG = "Kahawai:streaming"
   }
 
   private var wakeLock: PowerManager.WakeLock? = null
+  private var wifiLock: WifiManager.WifiLock? = null
 
   override fun onCreate() {
     super.onCreate()
@@ -71,6 +79,26 @@ class PlaybackService : Service() {
         it.acquire()
       }
     }
+    // Keep the Wi-Fi radio in low-latency mode with the screen off. The wake
+    // lock protects the CPU; without this, the radio itself can doze and the
+    // stream starves even though the audio thread is running. No extra
+    // manifest permission: WifiLock is covered by WAKE_LOCK. Like the wake
+    // lock: one acquire here, one release in onDestroy.
+    if (wifiLock == null) {
+      val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+      // LOW_LATENCY is the API 29+ mode (less power than HIGH_PERF, same
+      // goal); HIGH_PERF auto-maps to it on API 34+, but spell it out.
+      val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+      } else {
+        @Suppress("DEPRECATION")
+        WifiManager.WIFI_MODE_FULL_HIGH_PERF
+      }
+      wifiLock = wifi.createWifiLock(mode, WIFI_LOCK_TAG).also {
+        it.setReferenceCounted(false)
+        it.acquire()
+      }
+    }
     // If the system kills us under memory pressure, restart while the user
     // still has something playing; the page re-syncs state on resume.
     return START_STICKY
@@ -79,6 +107,8 @@ class PlaybackService : Service() {
   override fun onDestroy() {
     wakeLock?.let { if (it.isHeld) it.release() }
     wakeLock = null
+    wifiLock?.let { if (it.isHeld) it.release() }
+    wifiLock = null
     super.onDestroy()
   }
 
