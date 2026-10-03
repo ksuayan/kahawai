@@ -27,6 +27,13 @@ stays on your server; nothing about it is sent anywhere else.
   voice's pitch) and skip times. A sleep timer fades out after a set time or at the end
   of the chapter. Playing a book puts your music queue aside and gives it back exactly
   when you return. Several listeners can share one server, each with their own place.
+- **Podcasts:** follow shows from your Kahawai server, with Up Next, the episodes you're
+  part-way through, show notes, and each show's own speed, skip times and download rules.
+  Episodes pick up where you left off and play whether or not the server has downloaded
+  them. Playing one puts your music aside, as a book does.
+- **Internet radio:** play your favorite stations, search the station directory (when the
+  server's Online sources switch is on), or add a station by its stream address, with the
+  song that's on and a reconnect if the stream drops.
 - **Look:** dark and light themes, IBM Plex type.
 
 ## How audio reaches your ears
@@ -42,8 +49,10 @@ player says so where you would look for them.
 
 ## Your music and your privacy
 
-- **The player only talks to your Kahawai server.** It has no accounts, no analytics and
-  no network connection to anything else.
+- **The player talks to your Kahawai server,** and to nothing else on its own. The
+  exceptions are things you ask for: a radio station you play is streamed straight from
+  that station, station logos and podcast artwork load from where they're published, and
+  links in show notes open in your browser. It has no accounts and no analytics.
 - **The server has no authentication and no encryption.** Run it on a private network you
   trust; the player warns you when it cannot reach it.
 - **Your settings stay on this computer.** The server address, output device, equalizer,
