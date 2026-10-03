@@ -9,6 +9,8 @@ import {
   fetchAudiobook,
   fetchAudiobookHistory,
   fetchAudiobookListeners,
+  addAudiobookListener,
+  deleteAudiobookListener,
   fetchAudiobooks,
   fetchTrack,
   markAudiobookFinished,
@@ -92,6 +94,21 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
 
   async function loadListeners(): Promise<void> {
     listeners.value = await fetchAudiobookListeners();
+  }
+
+  /** A new listener, who this Player then listens as. */
+  async function addListener(name: string): Promise<void> {
+    const made = await addAudiobookListener(name);
+    await loadListeners();
+    await switchListener(made.name);
+  }
+
+  /** Forget a listener and their progress; if it was this Player's, back to Default. */
+  async function removeListener(id: number): Promise<void> {
+    const gone = listeners.value.find((l) => l.id === id);
+    await deleteAudiobookListener(id);
+    if (gone && (gone.name === listener.value || (id === 0 && !listener.value))) await switchListener("");
+    await loadListeners();
   }
 
   /** Listen as someone else: the book in hand is put down (position saved) first. */
@@ -619,6 +636,8 @@ export const useAudiobooksStore = defineStore("audiobooks", () => {
     listener,
     listeners,
     loadListeners,
+    addListener,
+    removeListener,
     switchListener,
     authors,
     seriesNames,

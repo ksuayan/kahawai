@@ -609,6 +609,14 @@ export async function fetchAudiobookListeners(): Promise<AudiobookListener[]> {
   return get<AudiobookListener[]>("/api/audiobook-listeners");
 }
 
+export async function addAudiobookListener(name: string): Promise<AudiobookListener> {
+  return post<AudiobookListener>("/api/audiobook-listeners", { name });
+}
+
+export async function deleteAudiobookListener(id: number): Promise<void> {
+  return del(`/api/audiobook-listeners/${id}`);
+}
+
 // --- internet radio ------------------------------------------------------------
 
 export async function searchRadio(q: RadioQuery): Promise<RadioStation[]> {

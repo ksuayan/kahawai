@@ -13,6 +13,7 @@ import type { Audiobook, AudiobookDetail } from "../types";
 import AudiobookControls from "./AudiobookControls.vue";
 import AudiobookDetailView from "./AudiobookDetail.vue";
 import AudiobooksView from "./AudiobooksView.vue";
+import ListenerSection from "./ListenerSection.vue";
 import NowPlayingView from "./NowPlayingView.vue";
 import SeekBar from "./SeekBar.vue";
 import Sidebar from "./Sidebar.vue";
@@ -411,6 +412,29 @@ describe("Audiobook controls", () => {
 });
 
 describe("Audiobook listeners", () => {
+  it("adds a listener from this Player's Settings and listens as them", async () => {
+    let listeners = [{ id: 0, name: "Default", books_started: 0 }];
+    const calls = mockFetch({
+      "/api/audiobook-listeners": (_u: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body));
+          listeners = [...listeners, { id: 1, name: body.name, books_started: 0 }];
+          return json(listeners[1], 201);
+        }
+        return json(listeners);
+      },
+      "/api/audiobooks": () => json([]),
+    });
+    const { wrapper } = mountApp(ListenerSection);
+    await settle();
+    await typeInto(wrapper.get<HTMLInputElement>('[data-testid="new-listener"]').element, "Ann B");
+    await wrapper.get('[data-testid="add-listener"]').trigger("click");
+    await settle();
+    expect(calls.some((c) => c.url.endsWith("/api/audiobook-listeners") && c.init?.method === "POST")).toBe(true);
+    expect(localStorage.getItem("kahawai.audiobook-listener")).toBe("Ann B");
+    expect(useAudiobooksStore().listener).toBe("Ann B");
+  });
+
   it("sends the chosen listener's name with audiobook calls only, and remembers the choice", async () => {
     const listeners = [
       { id: 0, name: "Default", books_started: 0 },

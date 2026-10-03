@@ -30,6 +30,7 @@ import UiSwitch from "../ui/UiSwitch.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import AnalogSection from "./AnalogSection.vue";
 import EqEditor from "./EqEditor.vue";
+import ListenerSection from "./ListenerSection.vue";
 import CrossfeedSection from "./CrossfeedSection.vue";
 import LimiterSection from "./LimiterSection.vue";
 import SettingsSection from "./SettingsSection.vue";
@@ -569,6 +570,10 @@ const dopRates = computed(() =>
         </div>
         <div><UiButton variant="icon" @click="jobs.refresh()"><RefreshCw /> Refresh</UiButton></div>
       </div>
+    </SettingsSection>
+
+    <SettingsSection title="Audiobook listener">
+      <ListenerSection />
     </SettingsSection>
 
     <SettingsSection v-if="inTauri()" title="Album art cache">
