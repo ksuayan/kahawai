@@ -41,3 +41,27 @@ log = "0.4"
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"
 env_filter = { version = "0.1", default-features = false }
+
+# The audio path optimised in dev builds too, as the root workspace does for
+# kahawai-player-core (this crate is outside that workspace, so its profile
+# does not reach here). Unoptimised, the DSP and decoders run several times
+# slower: on the HiBy R4 the analog stage alone took 183% of real time and
+# the load meter read nothing like a release build. Debug info stays on.
+[profile.dev.package.kahawai-player-core]
+opt-level = 2
+[profile.dev.package.kahawai-player-audio]
+opt-level = 2
+[profile.dev.package.symphonia-core]
+opt-level = 2
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 2
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 2
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 2
+[profile.dev.package.symphonia-codec-alac]
+opt-level = 2
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 2
+[profile.dev.package.rustfft]
+opt-level = 2
