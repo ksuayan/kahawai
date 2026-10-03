@@ -124,7 +124,7 @@ class PlaybackService : Service() {
     return NotificationCompat.Builder(this, CHANNEL_ID)
       .setContentTitle(title)
       .setContentText(artist ?: getString(R.string.app_name))
-      .setSmallIcon(R.mipmap.ic_launcher)
+      .setSmallIcon(R.drawable.ic_stat_kahawai)
       .setContentIntent(launch)
       .setOngoing(true)
       // A media-style notification; transport controls ride on the media

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar icon for the playback notification: the speaker from
+     images/client-v2.png as a silhouette (outer ring, cone, dust cap).
+     Android draws it white, from the alpha alone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Outer ring: a 10-radius disc with a 8-radius hole. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,2a10,10 0,1 1,0 20a10,10 0,1 1,0 -20zM12,4a8,8 0,1 0,0 16a8,8 0,1 0,0 -16z" />
+    <!-- Cone: a 6.5-radius disc with a 4-radius hole. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,5.5a6.5,6.5 0,1 1,0 13a6.5,6.5 0,1 1,0 -13zM12,8a4,4 0,1 0,0 8a4,4 0,1 0,0 -8z" />
+    <!-- Dust cap. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,9.75a2.25,2.25 0,1 1,0 4.5a2.25,2.25 0,1 1,0 -4.5z" />
+</vector>
