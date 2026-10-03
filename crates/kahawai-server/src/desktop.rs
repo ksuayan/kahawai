@@ -428,44 +428,6 @@ pub async fn setup_audiobook_folders(
         .map_err(user_msg)
 }
 
-/// The audiobook listeners: everyone sharing the books keeps their own place,
-/// bookmarks and speed. Picking who you are is the Player's; making and
-/// removing listeners is the server's, here.
-#[tauri::command]
-pub async fn setup_audiobook_listeners(
-    state: tauri::State<'_, DesktopState>,
-) -> Result<Vec<crate::audiobooks_api::ListenerInfo>, String> {
-    let Ok(app_state) = live_state_for_books(&state) else {
-        return Ok(Vec::new());
-    };
-    crate::audiobooks_api::listeners(&app_state.pool)
-        .await
-        .map_err(user_msg)
-}
-
-#[tauri::command]
-pub async fn setup_add_audiobook_listener(
-    name: String,
-    state: tauri::State<'_, DesktopState>,
-) -> Result<crate::audiobooks_api::ListenerInfo, String> {
-    let app_state = live_state_for_books(&state)?;
-    crate::audiobooks_api::create_listener(&app_state.pool, &name)
-        .await
-        .map_err(user_msg)
-}
-
-/// Forget a listener and their progress (the books stay).
-#[tauri::command]
-pub async fn setup_remove_audiobook_listener(
-    id: i64,
-    state: tauri::State<'_, DesktopState>,
-) -> Result<(), String> {
-    let app_state = live_state_for_books(&state)?;
-    crate::audiobooks_api::remove_listener(&app_state.pool, id)
-        .await
-        .map_err(user_msg)
-}
-
 #[derive(Deserialize)]
 pub struct ApplyAudiobooksInput {
     /// Folders to add.
