@@ -25,16 +25,26 @@ describe("EqControl", () => {
     for (const p of BUILTIN_PRESETS) expect(p.bands.length).toBeLessThanOrEqual(8);
   });
 
-  it("applies a built-in preset to the engine and turns EQ on", async () => {
+  it("shows only its switch while EQ is off: no presets, graph or bands to adjust", async () => {
     const { wrapper, dsp } = await boot();
     dsp.eqEnabled = false;
+    await open(wrapper);
+    expect(body().querySelector('[aria-label="EQ preset"]')).toBeNull();
+    expect(body().querySelector('[data-testid="eq-graph"]')).toBeNull();
+    expect(body().querySelector('[data-testid="eq-band-panel"]')).toBeNull();
+    dsp.eqEnabled = true;
+    await settle();
+    expect(body().querySelector('[data-testid="eq-graph"]')).not.toBeNull();
+  });
+
+  it("applies a built-in preset to the engine", async () => {
+    const { wrapper, dsp } = await boot();
     await open(wrapper);
     await openSelect(body().querySelector('[aria-label="EQ preset"]') as HTMLElement);
     pick(options().find((o) => o.textContent?.trim() === "Rock")!);
     await settle();
     const rock = BUILTIN_PRESETS.find((p) => p.name === "Rock")!;
     expect(tauri.callsTo("set_eq_bands").at(-1)).toEqual({ bands: rock.bands });
-    expect(tauri.callsTo("set_eq_enabled").at(-1)).toEqual({ enabled: true });
     expect(dsp.activePreset?.name).toBe("Rock");
   });
 

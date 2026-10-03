@@ -58,13 +58,14 @@ function setParam(patch: { cutoff_hz?: number; feed_db?: number }): void {
     </UiHint>
     <UiSwitch
       :model-value="cf.enabled"
-      label="Crossfeed enabled"
+      :label="cf.enabled ? 'Crossfeed enabled' : 'Crossfeed disabled'"
       data-testid="crossfeed-toggle"
       @update:model-value="(v) => dsp.saveCrossfeed({ ...cf, enabled: v })"
     />
     <p v-if="note" class="m-0 mt-2 text-xs text-dim" role="status" data-testid="crossfeed-note">{{ note }}</p>
 
-    <div class="mt-3 flex flex-col gap-3 text-dim" :class="!cf.enabled && 'opacity-50'">
+    <!-- Only while on: a disabled stage shows its switch and nothing to adjust. -->
+    <div v-if="cf.enabled" class="mt-3 flex flex-col gap-3 text-dim" data-testid="crossfeed-controls">
       <label class="flex flex-col gap-1">
         Preset
         <UiSelect

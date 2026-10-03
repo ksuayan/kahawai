@@ -139,7 +139,7 @@ const dimmed = computed(() => unsupported.value || !analog.masterOn);
       class="mb-3"
       :model-value="analog.masterOn"
       :disabled="unsupported || abx.running"
-      label="Enabled"
+      :label="analog.masterOn ? 'Enabled' : 'Disabled'"
       data-testid="analog-master-toggle"
       :title="abx.running ? 'Finish or cancel the blind test to change this' : undefined"
       @update:model-value="analog.setMasterOn"
@@ -350,7 +350,7 @@ const dimmed = computed(() => unsupported.value || !analog.masterOn);
 
           <UiSwitch
             :model-value="analog[s].enabled"
-            :label="`Warmth on (${s.toUpperCase()})`"
+            :label="`Warmth ${analog[s].enabled ? 'on' : 'off'} (${s.toUpperCase()})`"
             :aria-label="`Warmth on in ${s.toUpperCase()}`"
             @update:model-value="(v) => analog.update(s, { enabled: v })"
           />

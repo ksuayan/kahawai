@@ -46,7 +46,7 @@ const note = computed(() => {
     </UiHint>
     <UiSwitch
       :model-value="dsp.limiterEnabled"
-      label="Limiter enabled"
+      :label="dsp.limiterEnabled ? 'Limiter enabled' : 'Limiter disabled'"
       @update:model-value="(v) => dsp.saveLimiterEnabled(v)"
     />
 

@@ -468,6 +468,9 @@ describe("Settings: EQ and loudness", () => {
     await settle();
     expect(tauri.callsTo("set_eq_enabled")).toEqual([{ enabled: false }]);
     expect(useDspStore().eqEnabled).toBe(false);
+    // The label says what the switch is now, not what it would do.
+    expect(w.findAll("label").some((l) => l.text() === "EQ disabled")).toBe(true);
+    expect(w.findAll("label").some((l) => l.text() === "EQ enabled")).toBe(false);
   });
 
   it("draws a node per band in the shared graph editor and can add and remove", async () => {
@@ -523,6 +526,7 @@ describe("Settings: EQ and loudness", () => {
   it("toggles loudness normalisation and validates the target", async () => {
     const w = await mountSettings();
     const loudness = w.findAll("section").find((x) => x.find("h3").text() === "Loudness normalization")!;
+    expect(loudness.find('[data-testid="loudness-target"]').exists()).toBe(false); // off: nothing to set
     await loudness.get('[role="switch"]').trigger("click");
     await settle();
     expect(tauri.callsTo("set_loudness_enabled")).toEqual([{ enabled: true }]);
@@ -558,20 +562,22 @@ describe("Settings: crossfeed", () => {
     w.findAll("section").find((x) => x.find("h3").text() === "Crossfeed")!;
   const lastSent = () => tauri.callsTo("set_crossfeed").at(-1) as { settings: Record<string, unknown> } | undefined;
 
-  it("is off by default, on Bauer, and turns on through the core", async () => {
+  it("is off by default with nothing to adjust, and turns on through the core, on Bauer", async () => {
     const w = await mountSettings();
     const sw = section(w).get('[role="switch"]');
     expect(sw.attributes("aria-checked")).toBe("false");
-    expect(select(w, "Crossfeed preset").textContent).toContain("Bauer");
-    expect(section(w).get('[data-testid="crossfeed-cutoff"]').text()).toBe("700 Hz");
-    expect(section(w).get('[data-testid="crossfeed-feed"]').text()).toBe("4.5 dB");
+    // Off: the preset menu and sliders are not there to fiddle with.
+    expect(section(w).find('[data-testid="crossfeed-controls"]').exists()).toBe(false);
     await sw.trigger("click");
     await settle();
     expect(lastSent()).toEqual({ settings: { enabled: true, preset: "bauer", cutoff_hz: 700, feed_db: 4.5 } });
+    expect(select(w, "Crossfeed preset").textContent).toContain("Bauer");
+    expect(section(w).get('[data-testid="crossfeed-cutoff"]').text()).toBe("700 Hz");
+    expect(section(w).get('[data-testid="crossfeed-feed"]').text()).toBe("4.5 dB");
   });
 
   it("offers the three classic presets and Custom (no Linkwitz until its values are verified)", async () => {
-    const w = await mountSettings();
+    const w = await mountWithCrossfeed({ enabled: true, preset: "bauer", cutoff_hz: 700, feed_db: 4.5 });
     await openSelect(select(w, "Crossfeed preset"));
     expect(optionLabels()).toEqual(["Bauer", "Chu Moy", "Jan Meier", "Custom"]);
   });

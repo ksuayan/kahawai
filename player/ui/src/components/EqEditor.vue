@@ -219,7 +219,7 @@ function choose(v: string | null): void {
       data-testid="eq-editor"
     >
       <div class="mb-3 flex flex-wrap items-center gap-3">
-        <UiSwitch :model-value="dsp.eqEnabled" label="EQ enabled" @update:model-value="(v) => dsp.saveEqEnabled(v)" />
+        <UiSwitch :model-value="dsp.eqEnabled" :label="dsp.eqEnabled ? 'EQ enabled' : 'EQ disabled'" @update:model-value="(v) => dsp.saveEqEnabled(v)" />
         <span
           v-if="trackRate"
           class="text-xs text-dim tabular-nums"
@@ -228,6 +228,11 @@ function choose(v: string | null): void {
         >
           {{ trackRate.text }}<template v-if="trackRate.eq"> → EQ at {{ trackRate.eq }}</template>
         </span>
+      </div>
+
+      <!-- Only while on: with the EQ off there is nothing to adjust. -->
+      <template v-if="dsp.eqEnabled">
+      <div class="mb-3 flex flex-wrap items-center gap-3">
         <UiSelect
           aria-label="EQ preset"
           trigger-class="w-[200px]"
@@ -261,7 +266,6 @@ function choose(v: string | null): void {
         ref="svg"
         :viewBox="`0 0 ${W} ${H}`"
         class="w-full touch-none select-none rounded-lg border border-line bg-canvas"
-        :class="dsp.eqEnabled ? '' : 'opacity-50'"
         role="group"
         aria-label="EQ frequency response"
         data-testid="eq-graph"
@@ -332,13 +336,14 @@ function choose(v: string | null): void {
           <label class="flex items-center gap-1">Hz <UiInput class="w-[80px]" type="number" :model-value="String(sel.freq)" min="20" :max="maxFreq" @change="onNum('freq', $event)" /></label>
           <label v-if="hasGain(sel.band_type)" class="flex items-center gap-1">dB <UiInput class="w-[70px]" type="number" :model-value="String(sel.gain_db)" min="-18" max="18" step="0.5" @change="onNum('gain_db', $event)" /></label>
           <label class="flex items-center gap-1">{{ sel.band_type.endsWith("shelf") ? "Slope" : "Q" }} <UiInput class="w-[70px]" type="number" :model-value="String(sel.q)" :min="qRange(sel.band_type).min" :max="qRange(sel.band_type).max" step="0.1" @change="onNum('q', $event)" /></label>
-          <UiSwitch :model-value="sel.enabled" label="On" @update:model-value="dsp.toggleRow(selected!)" />
+          <UiSwitch :model-value="sel.enabled" :label="sel.enabled ? 'On' : 'Off'" @update:model-value="dsp.toggleRow(selected!)" />
           <UiButton variant="icon-danger" title="Remove band" aria-label="Remove band" @click="removeSelected"><Trash2 /></UiButton>
         </template>
         <span v-else>Select a point to edit it.</span>
         <UiButton :disabled="!dsp.canAddBand" :title="dsp.canAddBand ? undefined : `At most ${MAX_EQ_BANDS} bands`" data-testid="add-band" @click="dsp.addBand(); selected = dsp.rows.length - 1"><Plus /> Add band</UiButton>
         <span v-if="dsp.rowError" class="text-danger" role="alert">{{ dsp.rowError }}</span>
       </div>
+      </template>
     </div>
     <EqImportDialog v-model:open="importing" />
     <PromptDialog v-model:open="naming" title="Save EQ preset" label="Preset name" placeholder="My tuning" confirm-label="Save" :maxlength="40" @submit="(n) => dsp.saveUserPreset(n)" />

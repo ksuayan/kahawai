@@ -427,14 +427,15 @@ const dopRates = computed(() =>
       <div :class="bypassed ? 'pointer-events-none opacity-40 grayscale' : ''" :inert="bypassed || undefined">
       <UiHint>
         EBU R128-style loudness matching for PCM only (DoP bypasses it). The first play of each track does a fast
-        pre-scan — one extra stream, roughly double the bandwidth — then the measured gain is cached.
+        pre-scan — one extra stream, roughly double the bandwidth — then the measured gain is cached. A track whose
+        scan takes more than a few seconds starts unnormalized and is matched from its next play.
       </UiHint>
       <UiSwitch
         :model-value="dsp.loudnessEnabled"
-        label="Loudness normalization enabled"
+        :label="dsp.loudnessEnabled ? 'Loudness normalization enabled' : 'Loudness normalization disabled'"
         @update:model-value="(v) => dsp.saveLoudnessEnabled(v)"
       />
-      <div class="mt-2.5 flex">
+      <div v-if="dsp.loudnessEnabled" class="mt-2.5 flex" data-testid="loudness-target">
         <label class="flex items-center gap-2 text-dim">
           Target
           <UiInput v-model="loudnessInput" class="w-[76px]" type="number" min="-40" max="-1" step="0.5" @change="onLoudnessTarget" />
