@@ -82,7 +82,7 @@ const artworkHash = computed(() => {
 </StateMessage>
 <div v-else-if="book" :class="compact ? 'flex flex-col items-start gap-4' : 'flex flex-col items-start gap-8 min-[720px]:flex-row'" data-testid="np-book">
   <div class="shrink-0">
-    <Artwork :hash="book.cover_hash" placeholder="book" :size="compact ? 160 : 320" :radius="6" :alt="book.title" />
+    <Artwork :hash="book.cover_hash" placeholder="book" :size="compact ? 160 : 320" :class="compact ? 'np-art' : undefined" :radius="6" :alt="book.title" />
   </div>
   <div class="min-w-0 flex-1">
     <p class="m-0 mb-2 flex items-center gap-1.5 text-xs uppercase tracking-wide text-faint" data-testid="np-kind">
@@ -126,7 +126,7 @@ const artworkHash = computed(() => {
 </div>
 <div v-else-if="episode" :class="compact ? 'flex flex-col items-start gap-4' : 'flex flex-col items-start gap-8 min-[720px]:flex-row'" data-testid="np-podcast">
   <div class="shrink-0">
-    <Artwork :url="episode.episode.image_url || episode.feed.image_url" placeholder="podcast" :size="compact ? 160 : 320" :radius="6" :alt="episode.feed.title" />
+    <Artwork :url="episode.episode.image_url || episode.feed.image_url" placeholder="podcast" :size="compact ? 160 : 320" :class="compact ? 'np-art' : undefined" :radius="6" :alt="episode.feed.title" />
   </div>
   <div class="min-w-0 flex-1">
     <p class="m-0 mb-2 flex items-center gap-1.5 text-xs uppercase tracking-wide text-faint" data-testid="np-kind">
@@ -164,7 +164,7 @@ const artworkHash = computed(() => {
 </div>
 <div v-else :class="compact ? 'flex flex-col items-start gap-4' : 'flex flex-col items-start gap-8 min-[720px]:flex-row'">
   <div class="shrink-0">
-    <Artwork :hash="artworkHash" :placeholder="radio.isPlaying ? 'radio' : 'music'" :size="compact ? 160 : 320" :radius="6" :alt="trackTitle(track)" />
+    <Artwork :hash="artworkHash" :placeholder="radio.isPlaying ? 'radio' : 'music'" :size="compact ? 160 : 320" :class="compact ? 'np-art' : undefined" :radius="6" :alt="trackTitle(track)" />
   </div>
   <div class="min-w-0 flex-1">
     <h2 class="heading-1 m-0 mb-1" data-testid="np-title">{{ trackTitle(track) }}</h2>

@@ -87,6 +87,7 @@
     left: 0 !important;
     right: 0;
     width: 100% !important;
+    max-height: 92vh; /* fallback: dvh needs Chromium 108+ (the R4's WebView is 91) */
     max-height: 92dvh;
     transform: none !important;
     translate: none !important;
@@ -126,6 +127,35 @@
   font-weight: 600;
   letter-spacing: -0.01em;
 }
+/*
+ * Phone type scale: headings step down below 720 px. The desktop sizes are
+ * unchanged; on a 4.7" screen every vertical pixel counts.
+ */
+@media (max-width: 719px) {
+  .heading-1 { font-size: 20px; }
+  .heading-2 { font-size: 16px; }
+  .heading-3 { font-size: 13px; }
+}
+
+/*
+ * Bottom-sheet height with a vh fallback: dvh needs Chromium 108+, the R4's
+ * WebView (91) drops the declaration and the sheet would lose its cap.
+ */
+.sheet-max-h {
+  max-height: 92vh;
+  max-height: 92dvh;
+}
+
+/*
+ * Short screens (phone landscape): the now-playing artwork shrinks so the
+ * transport controls stay visible without scrolling.
+ */
+@media (max-height: 500px) {
+  .np-art { width: 96px !important; height: 96px !important; }
+  /* Landscape phones: trim chrome height; 48 px keeps the touch target. */
+  .phone-tab-btn { min-height: 48px; }
+}
+
 @utility heading-3 {
   font-size: 15px;
   font-weight: 600;

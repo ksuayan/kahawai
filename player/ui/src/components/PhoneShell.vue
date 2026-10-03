@@ -5,6 +5,11 @@ import { useNavStore } from "../stores/nav";
 import { usePlayerStore } from "../stores/player";
 import AudiobookDetail from "./AudiobookDetail.vue";
 import AudiobooksView from "./AudiobooksView.vue";
+import PodcastDownloadsView from "./PodcastDownloadsView.vue";
+import PodcastEpisodeView from "./PodcastEpisodeView.vue";
+import PodcastFeedView from "./PodcastFeedView.vue";
+import PodcastsView from "./PodcastsView.vue";
+import RadioView from "./RadioView.vue";
 import NowPlayingBar from "./NowPlayingBar.vue";
 import NowPlayingSheet from "./NowPlayingSheet.vue";
 import PhoneLibraryView from "./PhoneLibraryView.vue";
@@ -16,7 +21,7 @@ import SettingsView from "./SettingsView.vue";
 const nav = useNavStore();
 const LIBRARY_VIEWS = ["albums", "artists", "genres", "playlists", "album", "artist", "genre", "playlist"];
 /** The library has its own section strip and scroll box inside (PhoneLibraryView). */
-const isLibrary = computed(() => LIBRARY_VIEWS.includes(nav.view.name) || !["audiobooks", "audiobook", "search", "queue", "settings"].includes(nav.view.name));
+const isLibrary = computed(() => LIBRARY_VIEWS.includes(nav.view.name));
 const player = usePlayerStore();
 
 /** The now-playing sheet. Opens from the mini-player; not a nav route on phones. */
@@ -35,6 +40,11 @@ function onMiniExpand(): void {
       <PhoneLibraryView v-if="LIBRARY_VIEWS.includes(nav.view.name)" />
       <AudiobooksView v-else-if="nav.view.name === 'audiobooks'" />
       <AudiobookDetail v-else-if="nav.view.name === 'audiobook'" :id="nav.view.id ?? 0" />
+      <PodcastsView v-else-if="nav.view.name === 'podcasts'" />
+      <PodcastFeedView v-else-if="nav.view.name === 'podcast'" :id="nav.view.id ?? 0" />
+      <PodcastEpisodeView v-else-if="nav.view.name === 'episode'" :id="nav.view.id ?? 0" />
+      <PodcastDownloadsView v-else-if="nav.view.name === 'podcastdownloads'" />
+      <RadioView v-else-if="nav.view.name === 'radio'" />
       <SearchView v-else-if="nav.view.name === 'search'" />
       <QueueView v-else-if="nav.view.name === 'queue'" />
       <SettingsView v-else-if="nav.view.name === 'settings'" />

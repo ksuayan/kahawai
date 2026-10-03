@@ -109,7 +109,7 @@ const stageName = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
 <template>
   <section
-    class="sticky top-0 z-10 mb-5 rounded-lg border border-line bg-raised p-3 shadow-sm"
+    class="mb-5 rounded-lg border border-line bg-raised p-3 shadow-sm min-[720px]:sticky min-[720px]:top-0 min-[720px]:z-10"
     aria-label="Signal path"
     data-testid="signal-path"
   >

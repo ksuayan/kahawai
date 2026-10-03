@@ -55,7 +55,7 @@ function close(): void {
     <DialogPortal>
       <DialogOverlay class="fixed inset-0 z-50 bg-black/55" data-testid="sheet-scrim" />
       <DialogContent
-        class="pt-safe fixed inset-x-0 bottom-0 z-50 max-h-[92dvh] overflow-y-auto rounded-t-xl border-t border-line bg-raised shadow-float outline-none"
+        class="pt-safe sheet-max-h fixed inset-x-0 bottom-0 z-50 overflow-y-auto rounded-t-xl border-t border-line bg-raised shadow-float outline-none"
         :style="dragging ? { transform: `translateY(${dragY}px)` } : undefined"
         :class="{ 'transition-transform duration-200': !dragging }"
         aria-describedby="sheet-desc"
