@@ -41,11 +41,16 @@ Implementation: derive the analog prototype's transfer function from the publish
 
 ### 2.3 Preset table
 
+> **Correction (2026-10-03).** bs2b's "feed" figure is not the level of the crossfed signal: a
+> higher figure crossfeeds *less*. Measured with the shipped stage on real tracks, Bauer cuts the
+> side (L−R) signal by about 5.5 dB, Chu Moy by 5 dB, Jan Meier by 3.5 dB. This table first had
+> the order reversed.
+
 | Preset | Cutoff | Feed | Character |
 |---|---|---|---|
-| Bauer (default) | 700 Hz | 4.5 dB | Closest to virtual speakers at 30°, 3 m. The subtle one. |
-| Chu Moy | 700 Hz | 6.0 dB | Moy's tweak of the Linkwitz circuit. A touch more present. |
-| Jan Meier | 650 Hz | 9.5 dB | From Meier's Corda amps. The strongest of the three classics. |
+| Bauer (default) | 700 Hz | 4.5 dB | Closest to virtual speakers at 30°, 3 m. The strongest of the three classics. |
+| Chu Moy | 700 Hz | 6.0 dB | Moy's tweak of the Linkwitz circuit. A little less crossfeed than Bauer. |
+| Jan Meier | 650 Hz | 9.5 dB | From Meier's Corda amps. The mildest of the three classics. |
 | Linkwitz | (circuit) | (circuit) | The 1971 original, digitized. The ancestor. |
 | Custom | 200–2000 Hz slider | 0–12 dB slider | Manual tuning. |
 
@@ -100,7 +105,7 @@ Cost: ~10 multiply-adds per sample per channel plus a delay line of dozens of sa
 - `types.ts`: `CROSSFEED_PRESET_INFO: Record<CrossfeedPreset, { label, blurb }>` mirroring `FLAVOUR_INFO` (`types.ts:212`). Suggested blurbs (plain, honest, no superlatives):
   - Bauer — "The 1961 original via BS2B. Virtual speakers at 30 degrees."
   - Chu Moy — "A DIY-era tweak of Linkwitz's circuit. A touch more present."
-  - Jan Meier — "From Jan Meier's Corda headphone amps. The strongest classic."
+  - Jan Meier — "From Jan Meier's Corda headphone amps. The mildest classic."
   - Linkwitz — "Linkwitz's 1971 circuit, digitized. The ancestor of the others."
 - New `CrossfeedSection.vue` in the Sound settings, following `AnalogSection.vue`: a `UiSelect` pulldown with the four presets plus Custom, the blurb line under it, cutoff/feed sliders visible in Custom mode, and a single enable toggle. No A/B slot machinery in v1 — a bypass toggle is enough to hear what the stage does (the analog store's A/B pattern is reusable later if listeners ask for it).
 

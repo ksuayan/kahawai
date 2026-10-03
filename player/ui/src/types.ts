@@ -628,9 +628,9 @@ export const CROSSFEED_PRESET_INFO: Record<
   CrossfeedPreset,
   { label: string; params: [cutoffHz: number, feedDb: number] | null; blurb: string }
 > = {
-  bauer: { label: "Bauer", params: [700, 4.5], blurb: "The default, via bs2b. Mild: close to listening to a pair of speakers." },
-  chu_moy: { label: "Chu Moy", params: [700, 6.0], blurb: "A DIY-era favourite. A touch more crossfeed than Bauer." },
-  meier: { label: "Jan Meier", params: [650, 9.5], blurb: "From Jan Meier's Corda headphone amps. The strongest of the three." },
+  bauer: { label: "Bauer", params: [700, 4.5], blurb: "The default, via bs2b, and the strongest of the three: closest to listening to a pair of speakers." },
+  chu_moy: { label: "Chu Moy", params: [700, 6.0], blurb: "A DIY-era favourite. A little less crossfeed than Bauer." },
+  meier: { label: "Jan Meier", params: [650, 9.5], blurb: "From Jan Meier's Corda headphone amps. The mildest of the three." },
   custom: { label: "Custom", params: null, blurb: "Set the cutoff and feed yourself." },
 };
 

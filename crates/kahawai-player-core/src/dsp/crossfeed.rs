@@ -64,11 +64,14 @@ const RAMP_SECONDS: f64 = 0.015;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossfeedPreset {
-    /// 700 Hz / 4.5 dB: bs2b's default, "closest to virtual speakers".
+    /// 700 Hz / 4.5 dB: bs2b's default, "closest to virtual speakers", and
+    /// the strongest of the three. (bs2b's "feed" is not the crossfed level:
+    /// a higher figure crossfeeds less. Measured on real tracks, Bauer cuts
+    /// the side signal by about 5.5 dB, Chu Moy 5, Meier 3.5.)
     Bauer,
     /// 700 Hz / 6.0 dB.
     ChuMoy,
-    /// 650 Hz / 9.5 dB: the strongest of the three.
+    /// 650 Hz / 9.5 dB: the mildest of the three.
     Meier,
     /// The settings' own cutoff and feed.
     Custom,
