@@ -2,6 +2,7 @@ import { defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import cascadeLayers from "@csstools/postcss-cascade-layers";
+import legacyTransforms from "./src/build/legacyTransforms";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -15,15 +16,18 @@ const appVersion = tauriConf.version ?? "dev";
 // leaving the app unstyled. KAHAWAI_LEGACY_WEBVIEW=1 (set by
 // scripts/build-android.sh and start-dev-android.sh) flattens the layers with
 // the PostCSS polyfill, which keeps the same cascade by adjusting specificity.
-// Tailwind already writes plain fallbacks for its color-mix() colors. The
-// desktop build is left as it is.
+// It also lacks the individual translate / rotate / scale properties
+// (Chromium 104+) Tailwind 4 moves things with, so those become one
+// `transform` (src/build/legacyTransforms.ts): switch thumbs slide, dialogs
+// centre. Tailwind already writes plain fallbacks for its color-mix() colors.
+// The desktop build is left as it is.
 const legacyWebView = process.env.KAHAWAI_LEGACY_WEBVIEW === "1";
 
 // Tauri v2 expects the dev server on port 1420.
 export default defineConfig({
   plugins: [vue(), tailwindcss()],
   define: { __APP_VERSION__: JSON.stringify(appVersion) },
-  css: { postcss: { plugins: legacyWebView ? [cascadeLayers()] : [] } },
+  css: { postcss: { plugins: legacyWebView ? [cascadeLayers(), legacyTransforms()] : [] } },
   clearScreen: false,
   server: {
     port: 1420,
