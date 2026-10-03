@@ -62,10 +62,14 @@ pub fn init() {
     let (filter, handle) = reload::Layer::new(
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level(false))),
     );
-    let subscriber = tracing_subscriber::registry().with(filter).with(
+    // On Android the process's stdout already lands in logcat (tag
+    // RustStdoutStderr), so the logcat layer replaces the terminal formatter
+    // there instead of doubling every line.
+    let terminal = (!cfg!(target_os = "android")).then(|| {
         tracing_subscriber::fmt::layer()
-            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout())),
-    );
+            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+    });
+    let subscriber = tracing_subscriber::registry().with(filter).with(terminal);
     #[cfg(target_os = "android")]
     let subscriber = subscriber.with(LogcatLayer);
     tracing::subscriber::set_global_default(subscriber).expect("tracing subscriber already set");
@@ -87,8 +91,12 @@ pub fn init() {
 }
 
 /// Apply the persisted Verbose logging toggle (called from setup, once the
-/// config dir is known).
+/// config dir is known). A `RUST_LOG` filter set at launch is left alone: it
+/// is the more specific request.
 pub fn apply_verbose(verbose: bool) {
+    if std::env::var_os("RUST_LOG").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
     if let Some(handle) = FILTER_HANDLE.get() {
         let _ = handle.modify(|f| *f = EnvFilter::new(level(verbose)));
     }
