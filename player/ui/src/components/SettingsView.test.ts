@@ -783,5 +783,18 @@ describe("Settings: logs", () => {
     await settle();
     expect(tauri.callsTo("reveal_logs")).toHaveLength(1);
   });
+
+  it("toggles verbose logging", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}; // the section is app-only
+    tauri.on("get_verbose_logging", false);
+    const w = await mountSettings();
+    const toggle = w.get('[data-testid="verbose-logging-toggle"] [role="switch"]');
+    expect(toggle.attributes("aria-checked")).toBe("false");
+    await toggle.trigger("click");
+    await settle();
+    const calls = tauri.callsTo("set_verbose_logging");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ verbose: true });
+  });
 });
 

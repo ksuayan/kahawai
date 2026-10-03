@@ -258,6 +258,18 @@ pub struct PlayerSnapshot {
     /// `None` when the limiter is off or the path bypasses it.
     #[serde(default)]
     pub limiter_gr_db: Option<f32>,
+    /// DSP load EWMA: chain processing seconds per audio second. Above 1.0
+    /// the chain is slower than real time.
+    #[serde(default)]
+    pub dsp_load: f32,
+    /// Per-stage load EWMAs in chain order: (stage name, load). Bypassed
+    /// stages are present with 0.0.
+    #[serde(default)]
+    pub dsp_stage_load: Vec<(String, f32)>,
+    /// Audio-callback underruns since the stream opened (0 for sinks
+    /// without a real-time callback).
+    #[serde(default)]
+    pub underruns: u64,
     /// Playback speed (1.0 = as recorded); pitch is kept at any speed.
     #[serde(default = "unit_rate")]
     pub playback_rate: f32,
@@ -309,6 +321,9 @@ impl Default for PlayerSnapshot {
             analog_plan: None,
             analog_level: None,
             limiter_gr_db: None,
+            dsp_load: 0.0,
+            dsp_stage_load: Vec::new(),
+            underruns: 0,
             playback_rate: 1.0,
             radio: None,
             format: None,
@@ -662,6 +677,66 @@ impl ActiveStream {
 
 /// Playback state machine. All methods are synchronous and must be called
 /// from the playback thread; [`EngineController`] enforces that.
+/// Stage names in chain order, matching the timed sections in `pump_pcm`.
+/// `other` is everything else in the chain section (gain ramps, meters,
+/// peak tracking, the headroom guard) — whatever the named stages don't
+/// account for.
+const DSP_METER_STAGES: [&str; 7] = [
+    "resample",
+    "stretch",
+    "crossfeed",
+    "eq",
+    "analog",
+    "limiter",
+    "other",
+];
+
+/// DSP load meter: EWMA of chain processing time vs. chunk audio duration,
+/// plus per-stage EWMAs in chain order so the UI can attribute load.
+/// A load of 1.0 means the chain used the whole real-time budget; sustained
+/// above 1.0 means guaranteed glitches.
+struct DspLoadMeter {
+    /// Overall chain load (processing seconds per audio second).
+    load: f32,
+    /// Per-stage loads in [`DSP_METER_STAGES`] order: (stage name, load).
+    /// Bypassed stages stay at 0.0 so the UI can show them dimmed.
+    stages: Vec<(String, f32)>,
+}
+
+impl DspLoadMeter {
+    fn new() -> Self {
+        Self {
+            load: 0.0,
+            stages: DSP_METER_STAGES
+                .iter()
+                .map(|s| (s.to_string(), 0.0))
+                .collect(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.load = 0.0;
+        for (_, v) in &mut self.stages {
+            *v = 0.0;
+        }
+    }
+
+    /// Record one chunk: per-stage processing seconds in
+    /// [`DSP_METER_STAGES`] order, against the chunk's audio duration.
+    fn record(&mut self, stage_secs: &[f64; 7], audio_secs: f64) {
+        if audio_secs <= 0.0 {
+            return;
+        }
+        const ALPHA: f32 = 0.2;
+        let instant = (stage_secs.iter().sum::<f64>() / audio_secs) as f32;
+        self.load += ALPHA * (instant - self.load);
+        for (i, (_, v)) in self.stages.iter_mut().enumerate() {
+            let inst = (stage_secs[i] / audio_secs) as f32;
+            *v += ALPHA * (inst - *v);
+        }
+    }
+}
+
 pub struct Player {
     sink: Box<dyn AudioSink>,
     /// Shared so the open thread can use it (see [`PendingOpen`]).
@@ -764,6 +839,8 @@ pub struct Player {
     /// like `peak_out` so a brief duck stays visible between snapshots
     /// (which the UI only gets about four times a second).
     limiter_gr_db: f32,
+    /// DSP load meter: chain processing time vs. the real-time budget.
+    dsp_meter: DspLoadMeter,
     output_path: OutputPath,
     /// DoP format established by the last headered response; a seeked
     /// response carries raw frames and continues under this spec.
@@ -818,6 +895,7 @@ impl Player {
             limiter: LookaheadLimiter::new(44100),
             limiter_enabled: false,
             limiter_gr_db: 0.0,
+            dsp_meter: DspLoadMeter::new(),
             output_path: OutputPath::Pcm,
             dop_spec: None,
         }
@@ -1945,6 +2023,7 @@ impl Player {
         self.meter_out.set_sample_rate(sink_rate);
         self.limiter.prepare(sink_rate);
         self.peak_out = 0.0;
+        self.dsp_meter.reset();
         self.stretch.prepare(sink_rate, spec.channels as usize);
         self.stretch.set_rate(self.playback_rate);
 
@@ -2291,6 +2370,14 @@ impl Player {
             return;
         }
 
+        // DSP load meter: per-stage processing seconds in DSP_METER_STAGES
+        // order (resample, stretch, crossfeed, eq, analog, limiter, other).
+        // `other` is derived at the end as the chain total minus the named
+        // stages (ramps, meters, peak, guard).
+        let mut stage_secs = [0.0f64; 7];
+        let mut stage_t0 = Instant::now();
+        let chain_t0 = Instant::now();
+
         // Resample only when the sink demanded another rate.
         let resampled;
         let out: &[f32] = match active.resampler.as_mut() {
@@ -2300,6 +2387,7 @@ impl Player {
             }
             None => frames,
         };
+        stage_secs[0] = stage_t0.elapsed().as_secs_f64();
         // v1 DSP chain, fixed order: crossfeed -> EQ -> analog -> loudness
         // gain (ramped) -> volume -> look-ahead limiter -> headroom guard
         // (belt and suspenders; a no-op once the limiter holds the ceiling).
@@ -2315,11 +2403,16 @@ impl Player {
         } else {
             self.stretch.process(out, &mut chunk);
         }
+        stage_secs[1] = stage_t0.elapsed().as_secs_f64();
         let media_frames = self.stretch.media_frames() - media_before;
         let stretched_frames = chunk.len() / channels;
         active.play_rate = play_rate;
+        stage_t0 = Instant::now();
         self.crossfeed.process(&mut chunk, channels);
+        stage_secs[2] = stage_t0.elapsed().as_secs_f64();
+        stage_t0 = Instant::now();
         self.eq.process(&mut chunk, channels);
+        stage_secs[3] = stage_t0.elapsed().as_secs_f64();
         // The EQ's preamp (headroom for its boosts), ramped so a change, or
         // switching the EQ, never steps the signal. Exact no-op at 0 dB.
         self.preamp_ramp.retarget(preamp_db);
@@ -2329,7 +2422,9 @@ impl Player {
         // "Settled" excludes only the fade transition itself, on either side.
         let settled_before = !self.analog.is_active() || self.analog.is_steady();
         let ms_in = self.meter_in.measure(&chunk, channels);
+        stage_t0 = Instant::now();
         self.analog.process(&mut chunk, channels);
+        stage_secs[4] = stage_t0.elapsed().as_secs_f64();
         let settled_after = !self.analog.is_active() || self.analog.is_steady();
         let ms_out = self.meter_out.measure(&chunk, channels);
         let frames = chunk.len() / channels;
@@ -2359,7 +2454,9 @@ impl Player {
         // docs), so `written_frames` below - not the pre-limiter frame count -
         // is what actually reaches the sink.
         if self.limiter_enabled {
+            stage_t0 = Instant::now();
             self.limiter.process(&mut chunk, channels);
+            stage_secs[5] = stage_t0.elapsed().as_secs_f64();
             // Meter ballistics, same shape as `peak_out`: hold the deepest
             // reduction of this chunk, then fall back about 20 dB/s, so a
             // 5 ms duck is still on screen at the next snapshot.
@@ -2380,6 +2477,14 @@ impl Player {
         }
         headroom_guard(&mut chunk);
         let written_frames = chunk.len() / channels;
+
+        // DSP load: `other` is the chain total minus the named stages (ramps,
+        // meters, peak, guard). Recorded before the possibly-blocking sink
+        // write — backpressure is not DSP load.
+        let named: f64 = stage_secs[..6].iter().sum();
+        stage_secs[6] = (chain_t0.elapsed().as_secs_f64() - named).max(0.0);
+        let audio_secs = written_frames as f64 / active.sink_rate.max(1) as f64;
+        self.dsp_meter.record(&stage_secs, audio_secs);
 
         let sink_rate = active.sink_rate;
         let ch = active.spec.channels;
@@ -2672,6 +2777,9 @@ impl Player {
                 None
             },
             limiter_gr_db: self.limiter_gr(),
+            dsp_load: self.dsp_meter.load,
+            dsp_stage_load: self.dsp_meter.stages.clone(),
+            underruns: self.sink.underrun_count(),
             playback_rate: self.playback_rate,
             radio: self.radio_now(),
             format,
@@ -4168,6 +4276,54 @@ mod ahead_tests {
     fn degenerate_sizes_do_not_divide_by_zero() {
         assert_eq!(estimate_ahead_ms(10, Some(0), Some(0), 0, 0), None);
         assert_eq!(estimate_ahead_ms(0, Some(1000), Some(1000), 0, 0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod dsp_load_tests {
+    use super::*;
+
+    #[test]
+    fn ewma_moves_toward_instant_load() {
+        let mut m = DspLoadMeter::new();
+        // Processing took exactly the chunk's audio duration: instant load 1.0.
+        m.record(&[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.04], 0.1);
+        // ALPHA = 0.2: first record moves 20% of the way.
+        assert!((m.load - 0.2).abs() < 1e-6);
+        // Per-stage: resample did 0.01/0.1 = 0.1 of real time → EWMA 0.02.
+        assert_eq!(m.stages[0].0, "resample");
+        assert!((m.stages[0].1 - 0.02).abs() < 1e-6);
+        // A second identical chunk moves further toward 1.0.
+        m.record(&[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.04], 0.1);
+        assert!((m.load - 0.36).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zero_duration_chunks_are_ignored() {
+        let mut m = DspLoadMeter::new();
+        m.record(&[0.0; 7], 0.0);
+        m.record(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 0.0);
+        assert_eq!(m.load, 0.0);
+        assert!(m.stages.iter().all(|(_, v)| *v == 0.0));
+    }
+
+    #[test]
+    fn reset_clears_load() {
+        let mut m = DspLoadMeter::new();
+        m.record(&[0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.1);
+        assert!(m.load > 0.0);
+        m.reset();
+        assert_eq!(m.load, 0.0);
+        assert!(m.stages.iter().all(|(_, v)| *v == 0.0));
+        assert_eq!(m.stages.len(), DSP_METER_STAGES.len());
+    }
+
+    #[test]
+    fn snapshot_carries_load_fields() {
+        let snap = PlayerSnapshot::default();
+        assert_eq!(snap.dsp_load, 0.0);
+        assert!(snap.dsp_stage_load.is_empty());
+        assert_eq!(snap.underruns, 0);
     }
 }
 

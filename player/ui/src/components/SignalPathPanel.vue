@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
 import { useSignalStore } from "../stores/signal";
@@ -78,6 +78,33 @@ const linkTone: Record<Link["state"], string> = {
   none: "text-faint",
 };
 const linkMark: Record<Link["state"], string> = { match: "=", carried: "→", convert: "≠", none: "·" };
+
+// --- DSP load -----------------------------------------------------------------
+const dspLoad = computed(() => player.raw?.dsp_load ?? 0);
+const dspStages = computed(() => player.raw?.dsp_stage_load ?? []);
+const underruns = computed(() => player.raw?.underruns ?? 0);
+/** The meter is live only while the PCM chain is actually processing. */
+const showLoad = computed(
+  () => player.raw?.status === "playing" && player.raw?.output_path === "pcm-shared",
+);
+const loadPct = computed(() => Math.round(dspLoad.value * 100));
+/** Warn once load sits at/over 80% for ~2 s (8 snapshots at 4 Hz). The EWMA
+ *  underneath already smooths single-chunk spikes, so this is sustained. */
+const hotStreak = ref(0);
+watch(dspLoad, (v) => {
+  hotStreak.value = showLoad.value && v >= 0.8 ? hotStreak.value + 1 : 0;
+});
+watch(showLoad, (v) => {
+  if (!v) hotStreak.value = 0;
+});
+const loadWarning = computed(() => {
+  if (hotStreak.value < 8) return null;
+  if (dspLoad.value >= 1)
+    return `DSP load over 100% (${loadPct.value}%) — glitches are happening. Try turning off a stage.`;
+  return `DSP load high (${loadPct.value}%) — playback may glitch on this device. Try turning off a stage.`;
+});
+const showStages = ref(false);
+const stageName = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 </script>
 
 <template>
@@ -138,6 +165,60 @@ const linkMark: Record<Link["state"], string> = { match: "=", carried: "→", co
       <span aria-hidden="true" />
       <div class="flex flex-col gap-0.5" data-testid="sp-out-mode">
         <span class="text-dim">Mode</span><span class="text-[13px]">{{ outMode }}</span>
+      </div>
+
+      <!-- DSP load -->
+      <div v-if="showLoad" class="col-span-3 mt-1 border-t border-line pt-2" data-testid="sp-dsp-load">
+        <div class="flex items-baseline justify-between gap-2">
+          <span class="text-dim">DSP load</span>
+          <span class="tabular-nums" data-testid="sp-dsp-pct">{{ loadPct }}%<span v-if="underruns > 0" class="text-faint"> · {{ underruns }} underrun{{ underruns === 1 ? "" : "s" }}</span></span>
+        </div>
+        <div
+          class="mt-1 h-1 overflow-hidden rounded-full bg-active"
+          role="meter"
+          aria-label="DSP load"
+          :aria-valuenow="loadPct"
+          aria-valuemin="0"
+          aria-valuemax="100"
+        >
+          <div
+            class="h-full rounded-full transition-[width]"
+            :class="dspLoad >= 1 ? 'bg-danger' : dspLoad >= 0.8 ? 'bg-warn' : 'bg-accent'"
+            :style="{ width: `${Math.min(100, loadPct)}%` }"
+          />
+        </div>
+        <p
+          v-if="loadWarning"
+          class="m-0 mt-1.5 text-xs"
+          :class="dspLoad >= 1 ? 'text-danger-fg' : 'text-warn-fg'"
+          data-testid="sp-dsp-warning"
+        >
+          {{ loadWarning }}
+        </p>
+        <button
+          type="button"
+          class="mt-1 border-0 bg-transparent p-0 text-xs text-accent hover:underline"
+          :aria-expanded="showStages"
+          data-testid="sp-dsp-stages-toggle"
+          @click="showStages = !showStages"
+        >
+          {{ showStages ? "Hide stage load" : "Stage load" }}
+        </button>
+        <ul v-if="showStages" class="m-0 mt-1 list-none p-0" data-testid="sp-dsp-stages">
+          <li
+            v-for="[name, v] in dspStages"
+            :key="name"
+            class="flex items-center gap-2 py-0.5 text-xs"
+            :class="v <= 0 && 'opacity-45'"
+          >
+            <span class="w-20 shrink-0 truncate text-dim">{{ stageName(name) }}</span>
+            <span class="h-1 flex-1 overflow-hidden rounded-full bg-active">
+              <span class="block h-full rounded-full bg-accent" :style="{ width: `${Math.min(100, Math.round(v * 100))}%` }" />
+            </span>
+            <span class="w-10 shrink-0 text-right tabular-nums text-faint">{{ Math.round(v * 100) }}%</span>
+          </li>
+        </ul>
+        <p class="m-0 mt-1 text-[11px] text-faint">Measured on this device right now; heat and other apps move it.</p>
       </div>
     </div>
   </section>

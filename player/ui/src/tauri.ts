@@ -408,6 +408,16 @@ export async function revealLogs(): Promise<void> {
   if (inTauri()) await cmd("reveal_logs");
 }
 
+/** Verbose (debug-level) logging in a production build. Dev builds are always verbose. */
+export async function getVerboseLogging(): Promise<boolean> {
+  if (!inTauri()) return false;
+  return (await cmd<boolean>("get_verbose_logging")) ?? false;
+}
+
+export async function setVerboseLogging(verbose: boolean): Promise<void> {
+  if (inTauri()) await cmd("set_verbose_logging", { verbose });
+}
+
 /** Open a web or mail link in the default browser (outside the app: show notes, a show's site). */
 export async function openUrl(url: string): Promise<void> {
   if (inTauri()) await cmd("open_url", { url });

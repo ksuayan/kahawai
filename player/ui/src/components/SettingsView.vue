@@ -2,7 +2,7 @@
 import { Info, Moon, RefreshCw, Sun } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { checkServer, describeServer, type ServerCheck } from "../api";
-import { artworkCacheStats, clearArtworkCache, dopStatus, inTauri, revealLogs, setArtworkCacheMaxBytes, setDsdDeviceConfirmed, type ArtworkCacheStats } from "../tauri";
+import { artworkCacheStats, clearArtworkCache, dopStatus, getVerboseLogging, inTauri, revealLogs, setArtworkCacheMaxBytes, setDsdDeviceConfirmed, setVerboseLogging as setVerboseLoggingCmd, type ArtworkCacheStats } from "../tauri";
 import { useAnalogStore } from "../stores/analog";
 import { useDspStore } from "../stores/dsp";
 import { usePlayerStore } from "../stores/player";
@@ -222,6 +222,20 @@ async function onClearArt(): Promise<void> {
 }
 
 if (inTauri()) void refreshArtStats();
+
+// --- Verbose logging ----------------------------------------------------------
+
+const verboseLogging = ref(false);
+if (inTauri()) void getVerboseLogging().then((v) => (verboseLogging.value = v));
+
+async function setVerboseLogging(v: boolean): Promise<void> {
+  verboseLogging.value = v;
+  try {
+    await setVerboseLoggingCmd(v);
+  } catch {
+    verboseLogging.value = !v;
+  }
+}
 
 // --- Library scan + jobs -----------------------------------------------------
 
@@ -604,6 +618,16 @@ const dopRates = computed(() =>
         report a problem.
       </UiHint>
       <UiButton data-testid="reveal-logs" @click="revealLogs()">Reveal Logs in Finder</UiButton>
+      <UiSwitch
+        :model-value="verboseLogging"
+        label="Verbose logging"
+        data-testid="verbose-logging-toggle"
+        @update:model-value="(v) => setVerboseLogging(v)"
+      />
+      <UiHint>
+        Debug-level tracing. Development builds always log verbosely; this adds it to production builds.
+        May include file paths.
+      </UiHint>
     </SettingsSection>
 
     <SettingsSection v-if="inTauri()" title="Developer tools">

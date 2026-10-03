@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { nextTick } from "vue";
 import { makeState, makeTrack } from "../test/fixtures";
 import { mountApp, settle } from "../test/helpers";
 import { useDspStore } from "../stores/dsp";
@@ -104,5 +105,99 @@ describe("SignalPathPanel", () => {
     expect(text(w, "sp-out-rate")).toContain("44.1 kHz");
     expect(text(w, "sp-out-mode")).toContain("Idle");
     expect(w.get('[data-testid="sp-rate-link"]').attributes("data-state")).toBe("none");
+  });
+
+  it("shows the DSP load meter while playing PCM, with underruns", async () => {
+    const t = makeTrack({ format: "flac" });
+    const w = await mountPanel(
+      makeState({
+        status: "playing",
+        track: t,
+        output_path: "pcm-shared",
+        dsp_load: 0.42,
+        underruns: 3,
+        dsp_stage_load: [
+          ["crossfeed", 0.2],
+          ["eq", 0.1],
+        ],
+      }),
+      k15(),
+    );
+    expect(w.find('[data-testid="sp-dsp-load"]').exists()).toBe(true);
+    expect(text(w, "sp-dsp-pct")).toContain("42%");
+    expect(text(w, "sp-dsp-pct")).toContain("3 underruns");
+    expect(w.find('[data-testid="sp-dsp-warning"]').exists()).toBe(false);
+  });
+
+  it("hides the DSP load meter when idle or on the bit-perfect path", async () => {
+    const idle = await mountPanel(makeState({ status: "stopped", track: null }), k15());
+    expect(idle.find('[data-testid="sp-dsp-load"]').exists()).toBe(false);
+    const t = makeTrack({ format: "flac" });
+    const bp = await mountPanel(
+      makeState({ status: "playing", track: t, output_path: "pcm-exclusive", dsp_load: 0.5 }),
+      k15({ exclusive: true }),
+    );
+    expect(bp.find('[data-testid="sp-dsp-load"]').exists()).toBe(false);
+  });
+
+  it("warns after sustained high load, and the stage breakdown expands", async () => {
+    const t = makeTrack({ format: "flac" });
+    const w = await mountPanel(
+      makeState({
+        status: "playing",
+        track: t,
+        output_path: "pcm-shared",
+        dsp_load: 0.5,
+        dsp_stage_load: [
+          ["crossfeed", 0.4],
+          ["eq", 0.0],
+        ],
+      }),
+      k15(),
+    );
+    const player = usePlayerStore();
+    // ~2 s of snapshots at/over 80%: the warning appears.
+    for (let i = 1; i <= 8; i++) {
+      player.raw = makeState({
+        status: "playing",
+        track: t,
+        output_path: "pcm-shared",
+        dsp_load: 0.8 + i * 0.01,
+        dsp_stage_load: [
+          ["crossfeed", 0.4],
+          ["eq", 0.0],
+        ],
+      });
+      await nextTick();
+    }
+    await settle();
+    expect(w.find('[data-testid="sp-dsp-warning"]').exists()).toBe(true);
+    expect(text(w, "sp-dsp-warning")).toContain("may glitch");
+    // Per-stage breakdown, bypassed stages dimmed.
+    await w.get('[data-testid="sp-dsp-stages-toggle"]').trigger("click");
+    const rows = w.find('[data-testid="sp-dsp-stages"]').text();
+    expect(rows).toContain("Crossfeed");
+    expect(rows).toContain("40%");
+    expect(rows).toContain("Eq");
+  });
+
+  it("warns more strongly over 100% load", async () => {
+    const t = makeTrack({ format: "flac" });
+    const w = await mountPanel(
+      makeState({ status: "playing", track: t, output_path: "pcm-shared", dsp_load: 1.2 }),
+      k15(),
+    );
+    const player = usePlayerStore();
+    for (let i = 1; i <= 8; i++) {
+      player.raw = makeState({
+        status: "playing",
+        track: t,
+        output_path: "pcm-shared",
+        dsp_load: 1.2 + i * 0.01,
+      });
+      await nextTick();
+    }
+    await settle();
+    expect(text(w, "sp-dsp-warning")).toContain("glitches are happening");
   });
 });

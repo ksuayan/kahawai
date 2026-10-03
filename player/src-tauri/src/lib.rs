@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod logfile;
+mod logging;
 // Menus are desktop-only: tauri::menu is #[cfg(desktop)]-gated.
 #[cfg(desktop)]
 mod menu;
@@ -37,6 +38,8 @@ struct AppState {
     engine: Arc<EngineController>,
     api: Mutex<ApiClient>,
     settings_path: PathBuf,
+    /// Where the Verbose logging toggle (`logging::LoggingConfig`) lives.
+    logging_path: PathBuf,
 }
 
 /// Album-art disk cache + the engine (for the live server URL). Served to
@@ -414,6 +417,24 @@ fn set_artwork_cache_max_bytes(state: State<'_, ArtworkState>, max_bytes: u64) -
     artwork_cache_stats_for(&state.cache)
 }
 
+/// Settings → Verbose logging: read the toggle. Dev builds are always
+/// verbose; the toggle only adds verbosity to production builds.
+#[tauri::command]
+fn get_verbose_logging(state: State<'_, AppState>) -> bool {
+    logging::LoggingConfig::load(&state.logging_path).verbose
+}
+
+/// Settings → Verbose logging: debug-level tracing in a production build.
+/// Applies immediately (no restart).
+#[tauri::command]
+fn set_verbose_logging(state: State<'_, AppState>, verbose: bool) -> Result<(), String> {
+    let config = logging::LoggingConfig { verbose };
+    config.save(&state.logging_path)?;
+    logging::apply_verbose(verbose);
+    tracing::info!(verbose, "verbose logging {}", if verbose { "on" } else { "off" });
+    Ok(())
+}
+
 // --- Catalog cache (docs/v1/kahawai-player-catalog-cache-spec.md) ----------
 
 struct CatalogState {
@@ -514,6 +535,12 @@ struct PlayerStateDto {
     analog_level: Option<AnalogLevelDto>,
     /// Look-ahead limiter gain reduction, dB. None while off or bypassed.
     limiter_gr_db: Option<f32>,
+    /// DSP load EWMA: chain processing seconds per audio second.
+    dsp_load: f32,
+    /// Per-stage load EWMAs in chain order: (stage name, load).
+    dsp_stage_load: Vec<(String, f32)>,
+    /// Audio-callback underruns since the stream opened.
+    underruns: u64,
     /// Playback speed (1.0 = as recorded); the seek bar's clock runs at it.
     playback_rate: f32,
     /// The radio station playing: its song title and connection state.
@@ -592,6 +619,9 @@ impl From<PlayerSnapshot> for PlayerStateDto {
                 seconds: l.seconds,
             }),
             limiter_gr_db: s.limiter_gr_db,
+            dsp_load: s.dsp_load,
+            dsp_stage_load: s.dsp_stage_load,
+            underruns: s.underruns,
             playback_rate: s.playback_rate,
             radio: s.radio,
             format: s.format.map(format_str),
@@ -1207,15 +1237,10 @@ fn set_dsd_device_confirmed(state: State<'_, AppState>, confirmed: bool) -> Resu
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // A log file for when the app is opened from Finder (nothing reads its
-    // output then). Info and up by default; RUST_LOG overrides.
+    // output then). Dev builds log verbosely (logcat on Android); prod is
+    // info-level unless Settings > Verbose logging says otherwise.
     let log_path = logfile::init();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-        .init();
+    logging::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), log = ?log_path, "Kahawai Player starting");
 
     let builder = tauri::Builder::default()
@@ -1290,6 +1315,12 @@ pub fn run() {
             if let Some(parent) = settings_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
+            // Verbose logging (Settings): debug-level tracing in a prod
+            // build. Dev builds are always verbose; this only adds more.
+            let logging_path = logging::LoggingConfig::path_for(
+                settings_path.parent().unwrap_or(std::path::Path::new(".")),
+            );
+            logging::apply_verbose(logging::LoggingConfig::load(&logging_path).verbose);
 
             // Real sinks (C2): shared-mode PCM + exclusive DoP router.
             let sink = SinkRouter::new(Box::new(CpalSink::new()), Some(exclusive_dop_sink()));
@@ -1343,6 +1374,7 @@ pub fn run() {
                 engine,
                 api,
                 settings_path,
+                logging_path,
             });
 
             // Forward engine state events to the UI. The engine already
@@ -1433,6 +1465,8 @@ pub fn run() {
             set_dsd_device_confirmed,
             set_quality_mode,
             output_live_state,
+            get_verbose_logging,
+            set_verbose_logging,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

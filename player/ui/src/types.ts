@@ -128,6 +128,15 @@ export interface PlayerState {
    * when the limiter is off, or the path bypasses it (DoP / bit-perfect).
    */
   limiter_gr_db?: number | null;
+  /**
+   * DSP load EWMA: chain processing seconds per audio second. Above 1 the
+   * chain is slower than real time. 0 when idle.
+   */
+  dsp_load?: number;
+  /** Per-stage load EWMAs in chain order: [stage name, load]. */
+  dsp_stage_load?: [string, number][];
+  /** Audio-callback underruns since the stream opened. */
+  underruns?: number;
   /** Playback speed (1 = as recorded); pitch is kept at any speed. */
   playback_rate?: number;
   /** The radio station playing: its song title and connection state; null otherwise. */
