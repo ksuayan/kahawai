@@ -24,7 +24,8 @@ function onMiniExpand(): void {
 </script>
 
 <template>
-  <div class="flex h-full flex-col" data-testid="phone-shell">
+  <!-- pt-safe: the screens start below the status bar (the app draws edge to edge). -->
+  <div class="pt-safe flex h-full flex-col" data-testid="phone-shell">
     <div class="min-h-0 flex-1">
       <PhoneLibraryView v-if="['albums', 'artists', 'genres', 'playlists', 'album', 'artist', 'genre', 'playlist'].includes(nav.view.name)" />
       <AudiobooksView v-else-if="nav.view.name === 'audiobooks'" />

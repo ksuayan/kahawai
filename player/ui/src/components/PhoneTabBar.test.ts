@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mountApp, settle } from "../test/helpers";
+import { useNavStore } from "../stores/nav";
 import PhoneTabBar from "./PhoneTabBar.vue";
 
 describe("PhoneTabBar", () => {
@@ -25,6 +26,18 @@ describe("PhoneTabBar", () => {
     expect(library.attributes("aria-current")).toBe("page");
     const settings = wrapper.find('[data-testid="tab-settings"]');
     expect(settings.attributes("aria-current")).toBeUndefined();
+  });
+
+  it("colours only the active tab with the accent (not both colour classes at once)", async () => {
+    const { wrapper } = mountApp(PhoneTabBar);
+    useNavStore().go("settings");
+    await settle();
+    const settings = wrapper.get('[data-testid="tab-settings"]').classes();
+    const search = wrapper.get('[data-testid="tab-search"]').classes();
+    expect(settings).toContain("text-accent");
+    expect(settings).not.toContain("text-dim");
+    expect(search).toContain("text-dim");
+    expect(search).not.toContain("text-accent");
   });
 
   it("has a labeled navigation landmark", async () => {

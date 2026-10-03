@@ -127,6 +127,14 @@ if [[ ! -d src-tauri/gen/android ]]; then
   cargo tauri android init --ci
 fi
 
+# Our own Android sources over the generated project (gitignored): see
+# player/src-tauri/android-overlay (the MainActivity that passes the system
+# bars' size to the page).
+cp -R "$ROOT/player/src-tauri/android-overlay/." "$ROOT/player/src-tauri/gen/android/"
+
+# Old device WebViews ignore Tailwind 4's cascade layers; flatten them (vite.config.ts).
+export KAHAWAI_LEGACY_WEBVIEW=1
+
 # 5. Build, install, launch, hot-reload.
 echo "==> cargo tauri android dev (Ctrl+C to stop; the emulator keeps running)"
 exec cargo tauri android dev

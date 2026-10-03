@@ -1,6 +1,7 @@
 import { defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
+import cascadeLayers from "@csstools/postcss-cascade-layers";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -8,10 +9,21 @@ import { fileURLToPath } from "node:url";
 const tauriConf = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8")) as { version?: string };
 const appVersion = tauriConf.version ?? "dev";
 
+// Android: devices such as the HiBy R4 ship an old system WebView (Chromium 91
+// on Android 12) that the device cannot update. Tailwind 4 puts every rule in
+// cascade layers (`@layer`, Chromium 99+), which that WebView throws away,
+// leaving the app unstyled. KAHAWAI_LEGACY_WEBVIEW=1 (set by
+// scripts/build-android.sh and start-dev-android.sh) flattens the layers with
+// the PostCSS polyfill, which keeps the same cascade by adjusting specificity.
+// Tailwind already writes plain fallbacks for its color-mix() colors. The
+// desktop build is left as it is.
+const legacyWebView = process.env.KAHAWAI_LEGACY_WEBVIEW === "1";
+
 // Tauri v2 expects the dev server on port 1420.
 export default defineConfig({
   plugins: [vue(), tailwindcss()],
   define: { __APP_VERSION__: JSON.stringify(appVersion) },
+  css: { postcss: { plugins: legacyWebView ? [cascadeLayers()] : [] } },
   clearScreen: false,
   server: {
     port: 1420,

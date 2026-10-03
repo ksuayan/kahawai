@@ -1,96 +1,114 @@
 #!/usr/bin/env bash
-# Build the Kahawai Player Rust core for Android with plain cargo
-# (libkahawai_player.so, the cdylib the Android app loads through JNI).
+# Build the Kahawai Player as an Android app (.apk) to install on a device:
+# a HiBy R4 or any other arm64 phone or player.
 #
-#   scripts/build-android.sh                  # aarch64 (phones), debug
-#   scripts/build-android.sh x86_64           # emulator on an Intel Mac
+#   scripts/build-android.sh                  # arm64 (devices), debug APK
+#   scripts/build-android.sh x86_64           # the emulator on an Intel Mac
 #   scripts/build-android.sh aarch64 --release
 #
 # Targets: aarch64 (default), armv7, x86_64, i686.
 #
-# `cargo tauri android build` / `dev` point cargo at the NDK compilers
-# themselves; plain `cargo build --target <android>` does not, and C/C++ build
-# scripts (ring, opusic-sys) then fail looking for e.g.
-# `aarch64-linux-android-clang`. This script sets CC/CXX/AR and the linker for
-# the chosen target from the NDK, then builds the lib.
+# Debug (the default) is what you want for a device: it is signed with the
+# debug key, so it installs straight away (scripts/install-apk.sh), and it may
+# talk to the server over plain http:// on your network. A release build is
+# unsigned (sign it with your own key before Android will install it) and, as
+# generated, blocks plain http://, so it cannot reach a LAN server until the
+# Android project allows cleartext traffic.
 #
-# Needs: the Android NDK (located by android-env.sh: NDK_HOME, or
-# ANDROID_HOME/ndk/<NDK_VERSION>) and the Rust target (`rustup target add
-# <triple>`). No JDK or Gradle — that is the APK step, run from
-# player/src-tauri/gen/android after `cargo tauri android init`.
+# `cargo tauri android build` does the whole job: it builds the UI
+# (build.beforeBuildCommand), cross-compiles the Rust core with the NDK's
+# compilers, and packages the APK with Gradle. Unlike `android dev`, the UI is
+# inside the APK, so the app works without this Mac's dev server.
 #
-# Output:
-#   player/src-tauri/target/<triple>/{debug,release}/libkahawai_player.so
+# Needs: a JDK 17+, the Android SDK and NDK (located by android-env.sh), the
+# Rust target (`rustup target add <triple>`), and tauri-cli. The Android
+# project (player/src-tauri/gen/android) is generated on first use; it is
+# gitignored, never commit it.
+#
+# Output (printed at the end):
+#   player/src-tauri/gen/android/app/build/outputs/apk/<abi>/{debug,release}/app-<abi>-*.apk
 set -euo pipefail
 
-# The API level baked into the NDK clang wrappers. Matches
-# bundle.android.minSdkVersion in tauri.conf.json (AAudio floor for CPAL/Oboe).
-API_LEVEL=26
-
 arch="aarch64"
-profile_flag=""
+profile="debug"
 for arg in "$@"; do
   case "$arg" in
-    --release) profile_flag="--release" ;;
+    --release) profile="release" ;;
     aarch64|armv7|x86_64|i686) arch="$arg" ;;
-    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown argument '$arg' (try --help)" >&2; exit 1 ;;
   esac
 done
 
 case "$arch" in
-  aarch64) triple="aarch64-linux-android";   clang_prefix="aarch64-linux-android" ;;
-  armv7)   triple="armv7-linux-androideabi"; clang_prefix="armv7a-linux-androideabi" ;;
-  x86_64)  triple="x86_64-linux-android";    clang_prefix="x86_64-linux-android" ;;
-  i686)    triple="i686-linux-android";      clang_prefix="i686-linux-android" ;;
+  aarch64) triple="aarch64-linux-android";   abi_dir="arm64" ;;
+  armv7)   triple="armv7-linux-androideabi"; abi_dir="arm" ;;
+  x86_64)  triple="x86_64-linux-android";    abi_dir="x86_64" ;;
+  i686)    triple="i686-linux-android";      abi_dir="x86" ;;
 esac
 
-# ANDROID_HOME, NDK_HOME, NDK_VERSION (and JAVA_HOME, unused here).
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ANDROID_HOME, NDK_HOME, NDK_VERSION, JAVA_HOME.
 # shellcheck source=android-env.sh
-source "$(dirname "$0")/android-env.sh"
-if [[ ! -d "$NDK_HOME" ]]; then
+source "$ROOT/scripts/android-env.sh"
+command -v cargo-tauri >/dev/null 2>&1 || { echo "error: tauri-cli missing. Install: cargo install tauri-cli" >&2; exit 1; }
+[[ -d "$NDK_HOME" ]] || {
   echo "error: Android NDK not found at $NDK_HOME" >&2
   echo "Install with: sdkmanager \"ndk;$NDK_VERSION\" (or set NDK_HOME)" >&2
   exit 1
-fi
-
-# The NDK ships one host toolchain per OS; on macOS it is named darwin-x86_64
-# but is universal (runs natively on Apple Silicon too).
-case "$(uname -s)" in
-  Darwin) host_tag="darwin-x86_64" ;;
-  Linux)  host_tag="linux-x86_64" ;;
-  *) echo "error: unsupported host $(uname -s)" >&2; exit 1 ;;
-esac
-NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/$host_tag/bin"
-clang="$NDK_BIN/${clang_prefix}${API_LEVEL}-clang"
-if [[ ! -x "$clang" ]]; then
-  echo "error: NDK compiler not found: $clang" >&2
-  exit 1
-fi
-
+}
+[[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]] || { echo "error: no JDK 17+ found; Gradle needs one." >&2; exit 1; }
 if ! rustup target list --installed | grep -q "^${triple}$"; then
   echo "error: Rust target '${triple}' is not installed." >&2
   echo "Install with: rustup target add ${triple}" >&2
   exit 1
 fi
 
-# cc-rs reads CC_<triple> etc. with the triple's dashes as underscores; cargo
-# reads CARGO_TARGET_<TRIPLE>_LINKER uppercased.
-triple_us="${triple//-/_}"
-triple_uc="$(echo "$triple_us" | tr '[:lower:]' '[:upper:]')"
-export "CC_${triple_us}=$clang"
-export "CXX_${triple_us}=${clang}++"
-export "AR_${triple_us}=$NDK_BIN/llvm-ar"
-export "CARGO_TARGET_${triple_uc}_LINKER=$clang"
+# The UI's npm dependencies, installed when missing or out of date.
+stamp="$ROOT/player/ui/node_modules/.package-lock.json"
+if [[ ! -f "$stamp" || "$ROOT/player/ui/package.json" -nt "$stamp" || "$ROOT/player/ui/package-lock.json" -nt "$stamp" ]]; then
+  echo "==> npm install in player/ui (dependencies missing or changed)…"
+  (cd "$ROOT/player/ui" && npm install --no-audit --no-fund)
+  touch "$stamp"
+fi
 
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$repo_root/player/src-tauri"
+cd "$ROOT/player"
+if [[ ! -d src-tauri/gen/android ]]; then
+  echo "==> Generating the Android project (cargo tauri android init)…"
+  cargo tauri android init --ci
+fi
 
-echo "==> cargo build --target $triple --lib ${profile_flag} (NDK $(basename "$NDK_HOME"), API $API_LEVEL)"
-cargo build --target "$triple" --lib ${profile_flag}
+# Our own Android sources over the generated project (gitignored): see
+# player/src-tauri/android-overlay (the MainActivity that passes the system
+# bars' size to the page).
+cp -R "$ROOT/player/src-tauri/android-overlay/." "$ROOT/player/src-tauri/gen/android/"
 
-profile_dir="debug"
-[[ -n "$profile_flag" ]] && profile_dir="release"
-so="$PWD/target/$triple/$profile_dir/libkahawai_player.so"
+# Android devices can ship an old system WebView (the HiBy R4: Chromium 91)
+# that ignores Tailwind 4's cascade layers; this flattens them (vite.config.ts).
+export KAHAWAI_LEGACY_WEBVIEW=1
+
+debug_flag=()
+[[ "$profile" == "debug" ]] && debug_flag=(--debug)
+echo "==> cargo tauri android build ${debug_flag[*]} --target $arch --apk --split-per-abi (JDK $JAVA_HOME, NDK $(basename "$NDK_HOME"))"
+started="$(date +%s)"
+# Run from src-tauri itself (where tauri.conf.json lives), as the desktop build
+# does: from player/, the CLI runs beforeBuildCommand from player/ui and looks
+# for player/ui/ui/package.json.
+cd "$ROOT/player/src-tauri"
+cargo tauri android build "${debug_flag[@]}" --target "$arch" --apk --split-per-abi --ci
+
+# The APK this run produced (the newest under this ABI and profile).
+out="$ROOT/player/src-tauri/gen/android/app/build/outputs/apk/$abi_dir/$profile"
+apk="$(ls -t "$out"/*.apk 2>/dev/null | head -n 1 || true)"
+if [[ -z "$apk" || "$(stat -f %m "$apk" 2>/dev/null || stat -c %Y "$apk")" -lt "$started" ]]; then
+  echo "error: no new APK found in $out" >&2
+  exit 1
+fi
 echo
-echo "Built: $so ($(du -h "$so" | cut -f1))"
+echo "Built: $apk ($(du -h "$apk" | cut -f1))"
+if [[ "$profile" == "release" ]]; then
+  echo "note: a release APK is unsigned and blocks plain http:// as generated; sign it before installing." >&2
+else
+  echo "Install it with: scripts/install-apk.sh"
+fi
