@@ -91,6 +91,10 @@ export KAHAWAI_LEGACY_WEBVIEW=1
 debug_flag=()
 [[ "$profile" == "debug" ]] && debug_flag=(--debug)
 echo "==> cargo tauri android build ${debug_flag[*]} --target $arch --apk --split-per-abi (JDK $JAVA_HOME, NDK $(basename "$NDK_HOME"))"
+# A fresh APK each time: Gradle's incremental packaging updates the old file in
+# place and leaves the space the large native library used to take, so the APK
+# grows (here from about 250 MB to nearly 500 MB) without holding more.
+rm -f "$ROOT/player/src-tauri/gen/android/app/build/outputs/apk/$abi_dir/$profile/"*.apk
 started="$(date +%s)"
 # Run from src-tauri itself (where tauri.conf.json lives), as the desktop build
 # does: from player/, the CLI runs beforeBuildCommand from player/ui and looks
