@@ -748,6 +748,12 @@ pub struct Player {
     starved_since: Option<Instant>,
     /// How long a starved stream is waited for before giving up.
     stall_timeout: Duration,
+    /// How long an open waits for the loudness pre-scan before playing
+    /// unnormalized (the scan carries on and serves the next play).
+    prescan_wait: Duration,
+    /// Finished pre-scans, sent by their threads: (track, format, levels).
+    scans_tx: mpsc::Sender<ScanDone>,
+    scans_rx: mpsc::Receiver<ScanDone>,
     /// The network part of an open that is still running off the playback
     /// thread (the player is `Loading`).
     pending_open: Option<PendingOpen>,
@@ -849,6 +855,7 @@ pub struct Player {
 
 impl Player {
     pub fn new(sink: Box<dyn AudioSink>, transport: Box<dyn Transport>) -> Self {
+        let (scans_tx, scans_rx) = mpsc::channel();
         Self {
             sink,
             transport: Arc::from(transport),
@@ -856,6 +863,9 @@ impl Player {
             status: PlayerStatus::Stopped,
             starved_since: None,
             stall_timeout: STALL_TIMEOUT,
+            prescan_wait: PRESCAN_WAIT,
+            scans_tx,
+            scans_rx,
             pending_open: None,
             radio: None,
             radio_wait_ms_per_s: 1000,
@@ -1824,11 +1834,19 @@ impl Player {
         // uncached tracks. DoP never reaches this path.
         // Not for podcast episodes: the pre-scan reads the whole file first, and
         // an episode that is not downloaded comes from the podcast's host.
+        self.collect_scans();
         let scan = track.id >= 0
             && kahawai_core::podcast_episode_of(track.id).is_none()
             && self.loudness.enabled()
             && !want_bp
-            && !self.loudness.has_levels(track.id, fmt);
+            && !self.loudness.has_levels(track.id, fmt)
+            && !self.loudness.is_scanning(track.id, fmt);
+        // The pre-scan reads the whole file, which over a slow link (a
+        // portable on Wi-Fi, a long hi-res track) can take minutes. It runs on
+        // its own thread; the open waits for it only `prescan_wait`, then
+        // plays unnormalized while it finishes for the next play.
+        let scan = scan.then(|| self.start_scan(track.id, fmt));
+        let prescan_wait = self.prescan_wait;
         let open = PcmOpen {
             track: track.clone(),
             seek,
@@ -1843,7 +1861,7 @@ impl Player {
         // cannot hold up pause, seek, stop or quitting.
         let job = open.clone();
         self.start_open(OpenKind::Pcm(open), seek, move |transport| {
-            OpenResult::Pcm(run_pcm_open(transport, &job, scan))
+            OpenResult::Pcm(run_pcm_open(transport, &job, scan, prescan_wait))
         });
     }
 
@@ -2225,6 +2243,42 @@ impl Player {
         self.radio_wait_ms_per_s = ms;
     }
 
+    /// How long an open waits for the loudness pre-scan before playing
+    /// unnormalized (5 s by default). Exposed for tests.
+    pub fn set_prescan_wait(&mut self, d: Duration) {
+        self.prescan_wait = d;
+    }
+
+    /// Start a loudness pre-scan on its own thread. Its result goes both to
+    /// the open waiting on it (the returned receiver; nobody listening once
+    /// the open has given up) and, always, to the engine's level cache.
+    fn start_scan(&mut self, track_id: i64, fmt: StreamFormat) -> mpsc::Receiver<ScanResult> {
+        self.loudness.scan_started(track_id, fmt);
+        let transport = self.transport.clone();
+        let done = self.scans_tx.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("loudness-scan".into())
+            .spawn(move || {
+                let result = scan_track_levels(&*transport, track_id, fmt);
+                let levels = result.as_ref().ok().copied().flatten();
+                if let Err(e) = &result {
+                    tracing::warn!(track_id, "loudness pre-scan failed ({e})");
+                }
+                let _ = done.send((track_id, fmt, levels));
+                let _ = tx.send(result);
+            })
+            .expect("spawn loudness-scan thread");
+        rx
+    }
+
+    /// Keep the levels of pre-scans that have finished since the last look.
+    fn collect_scans(&mut self) {
+        while let Ok((track_id, fmt, levels)) = self.scans_rx.try_recv() {
+            self.loudness.scan_finished(track_id, fmt, levels);
+        }
+    }
+
     /// How long a starved stream is waited for before playback stops with an
     /// error (30 s by default). Exposed for tests.
     pub fn set_stall_timeout(&mut self, d: Duration) {
@@ -2235,6 +2289,7 @@ impl Player {
     /// [`wants_pump`](Self::wants_pump). Never blocks on the network: the
     /// decoder runs on a worker thread and this only polls it.
     pub fn pump(&mut self) {
+        self.collect_scans();
         if self.pending_open.is_some() {
             self.poll_open(POLL_WAIT);
             return;
@@ -3612,6 +3667,16 @@ fn estimate_ahead_ms(
 /// How long a starved stream is waited for before giving up.
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long an open waits for the loudness pre-scan (see `prescan_wait`).
+/// Well inside `STALL_TIMEOUT`, so a slow scan can never fail the open.
+const PRESCAN_WAIT: Duration = Duration::from_secs(5);
+
+/// A pre-scan's result, as [`scan_track_levels`] gives it.
+type ScanResult = Result<Option<(f32, f32)>, MusicError>;
+
+/// A finished pre-scan, for the level cache: (track, format, levels).
+type ScanDone = (i64, StreamFormat, Option<(f32, f32)>);
+
 /// How long a pump waits for the decode worker's next chunk. Short, because
 /// the same thread serves commands: while the network is stalled a pause, seek
 /// or stop is answered within about this long.
@@ -3744,12 +3809,24 @@ struct OpenFollowUp {
 fn run_pcm_open(
     transport: &dyn Transport,
     open: &PcmOpen,
-    scan: bool,
+    scan: Option<mpsc::Receiver<ScanResult>>,
+    prescan_wait: Duration,
 ) -> Result<OpenedPcm, OpenFailure> {
     if open.track.id < 0 {
         return open_radio(transport, open);
     }
-    let levels = scan.then(|| scan_track_levels(transport, open.track.id, open.fmt));
+    // The pre-scan's levels if it finishes in time; otherwise play now,
+    // unnormalized, and the scan's levels serve the next play.
+    let levels = scan.and_then(|rx| match rx.recv_timeout(prescan_wait) {
+        Ok(result) => Some(result),
+        Err(_) => {
+            tracing::info!(
+                track_id = open.track.id,
+                "loudness pre-scan still running; playing unnormalized this time"
+            );
+            None
+        }
+    });
     let opts = StreamOptions {
         format: Some(open.fmt),
         seek_ms: if open.passthrough_seek {

@@ -1829,6 +1829,76 @@ fn loudness_prescan_applies_gain_and_caches_it() {
     );
 }
 
+#[test]
+fn a_slow_loudness_prescan_does_not_hold_up_playback_and_serves_the_next_play() {
+    // The first request (the pre-scan) takes 400 ms; the open waits only
+    // 30 ms for it. A whole hi-res file over Wi-Fi can take minutes, and the
+    // open used to wait for all of it, then give up ("Couldn't reach the
+    // server").
+    struct SlowFirst {
+        stub: Arc<StubTransport>,
+        opens: AtomicUsize,
+    }
+    impl Transport for SlowFirst {
+        fn open_stream(&self, id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+            if self.opens.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            self.stub.open_stream(id, opts)
+        }
+    }
+    struct Wrap(Arc<SlowFirst>);
+    impl Transport for Wrap {
+        fn open_stream(&self, id: i64, opts: &StreamOptions) -> Result<StreamInfo, MusicError> {
+            self.0.open_stream(id, opts)
+        }
+    }
+    let stub = Arc::new(StubTransport::new(None));
+    stub.add(1, &[(440.0, 44100)]);
+    let slow = Arc::new(SlowFirst {
+        stub: stub.clone(),
+        opens: AtomicUsize::new(0),
+    });
+    let sink = SharedSink(Arc::new(Mutex::new(VecSink::new())));
+    let mut player = Player::new(Box::new(sink.clone()), Box::new(Wrap(slow.clone())));
+    player.set_prescan_wait(Duration::from_millis(30));
+    player.set_loudness_enabled(true);
+    let play = |player: &mut Player| {
+        sink.0.lock().unwrap().samples.clear();
+        player.play_queue(vec![track(1, AudioFormat::Wav, 1000)], 0);
+        let mut n = 0;
+        while matches!(
+            player.status(),
+            PlayerStatus::Playing | PlayerStatus::Loading
+        ) && n < 400
+        {
+            player.pump();
+            n += 1;
+        }
+        assert_eq!(player.status(), PlayerStatus::Stopped, "played to the end");
+        rms(&sink.0.lock().unwrap().samples)
+    };
+
+    // First play: starts without the scan's levels, at full level.
+    let first = play(&mut player);
+    assert!(first > 0.4, "first play unnormalized: rms {first}");
+
+    // The scan finishes behind it; the next play uses its levels and does not
+    // scan again.
+    std::thread::sleep(Duration::from_millis(500));
+    let opens_before = slow.opens.load(Ordering::SeqCst);
+    let second = play(&mut player);
+    assert!(
+        second < first * 0.9,
+        "second play normalized: {second} vs {first}"
+    );
+    assert_eq!(
+        slow.opens.load(Ordering::SeqCst),
+        opens_before + 1,
+        "no second pre-scan: the late one was kept"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // DSP settings persistence (C2)
 // ---------------------------------------------------------------------------

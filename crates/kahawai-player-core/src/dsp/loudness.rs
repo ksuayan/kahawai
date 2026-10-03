@@ -1,7 +1,7 @@
 //! Loudness normalization (EBU R128-style): the K-weighted meter,
 //! integrated loudness, gain planning, and the per-track pre-scan.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use kahawai_core::{api::StreamFormat, MusicError};
 
@@ -260,6 +260,9 @@ pub struct LoudnessNorm {
     /// (integrated LUFS, sample peak) per track, so the gain can be re-planned
     /// when the EQ changes without another pre-scan.
     levels: HashMap<(i64, StreamFormat), (f32, f32)>,
+    /// Pre-scans still running (possibly behind a track already playing
+    /// unnormalized), so the same track is not scanned twice at once.
+    scanning: HashSet<(i64, StreamFormat)>,
 }
 
 /// Headroom kept below full scale when planning gain (dB).
@@ -283,6 +286,7 @@ impl LoudnessNorm {
             target_lufs,
             cache: HashMap::new(),
             levels: HashMap::new(),
+            scanning: HashSet::new(),
         }
     }
 
@@ -314,6 +318,25 @@ impl LoudnessNorm {
     /// pre-scan is needed.
     pub fn has_levels(&self, track_id: i64, fmt: StreamFormat) -> bool {
         self.levels.contains_key(&(track_id, fmt))
+    }
+
+    /// Whether a pre-scan of this (track, format) is still running.
+    pub fn is_scanning(&self, track_id: i64, fmt: StreamFormat) -> bool {
+        self.scanning.contains(&(track_id, fmt))
+    }
+
+    /// A pre-scan of this (track, format) has started.
+    pub fn scan_started(&mut self, track_id: i64, fmt: StreamFormat) {
+        self.scanning.insert((track_id, fmt));
+    }
+
+    /// A pre-scan finished: keep its levels (`None`: silent or failed, so the
+    /// next play may try again).
+    pub fn scan_finished(&mut self, track_id: i64, fmt: StreamFormat, levels: Option<(f32, f32)>) {
+        self.scanning.remove(&(track_id, fmt));
+        if let Some(l) = levels {
+            self.levels.insert((track_id, fmt), l);
+        }
     }
 
     /// The gain for a track, planned against its real peak and the EQ's
