@@ -284,3 +284,10 @@ export interface AudiobookRoot {
   path: string;
   name: string;
 }
+
+/** Someone sharing the audiobooks, with their own place in each (id 0: Default). */
+export interface AudiobookListener {
+  id: number;
+  name: string;
+  books_started: number;
+}

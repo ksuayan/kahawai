@@ -114,23 +114,27 @@ pub struct ListenerInfo {
 }
 
 pub async fn list_listeners(State(s): State<AppState>) -> ApiResult<Json<Vec<ListenerInfo>>> {
-    Ok(Json(
-        sqlx::query(
-            "SELECT l.id, l.name,
-                    (SELECT COUNT(*) FROM audiobook_positions p WHERE p.user_id = l.id) AS started
-             FROM audiobook_listeners l ORDER BY l.id = 0 DESC, l.name COLLATE NOCASE",
-        )
-        .fetch_all(&s.pool)
-        .await
-        .map_err(cvt)?
-        .iter()
-        .map(|r| ListenerInfo {
-            id: r.get("id"),
-            name: r.get("name"),
-            books_started: r.get("started"),
-        })
-        .collect(),
-    ))
+    Ok(Json(listeners(&s.pool).await?))
+}
+
+/// Every listener, the default one first, with how many books each has started.
+/// Shared by the HTTP API and the desktop app's Settings.
+pub async fn listeners(pool: &SqlitePool) -> Result<Vec<ListenerInfo>, MusicError> {
+    Ok(sqlx::query(
+        "SELECT l.id, l.name,
+                (SELECT COUNT(*) FROM audiobook_positions p WHERE p.user_id = l.id) AS started
+         FROM audiobook_listeners l ORDER BY l.id = 0 DESC, l.name COLLATE NOCASE",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(cvt)?
+    .iter()
+    .map(|r| ListenerInfo {
+        id: r.get("id"),
+        name: r.get("name"),
+        books_started: r.get("started"),
+    })
+    .collect())
 }
 
 #[derive(Deserialize)]
@@ -143,17 +147,21 @@ pub async fn add_listener(
     State(s): State<AppState>,
     Json(b): Json<NewListener>,
 ) -> ApiResult<Response> {
-    let id = listener_id(&s.pool, &b.name).await?;
-    let name = clean_listener_name(&b.name)?;
     Ok((
         StatusCode::CREATED,
-        Json(ListenerInfo {
-            id,
-            name,
-            books_started: 0,
-        }),
+        Json(create_listener(&s.pool, &b.name).await?),
     )
         .into_response())
+}
+
+/// Make a listener, or find the one with that name.
+pub async fn create_listener(pool: &SqlitePool, name: &str) -> Result<ListenerInfo, MusicError> {
+    let id = listener_id(pool, name).await?;
+    Ok(ListenerInfo {
+        id,
+        name: clean_listener_name(name)?,
+        books_started: 0,
+    })
 }
 
 /// `DELETE /api/audiobook-listeners/{id}`: forget a listener and everything
@@ -162,17 +170,25 @@ pub async fn delete_listener(
     State(s): State<AppState>,
     Path(id): Path<i64>,
 ) -> ApiResult<StatusCode> {
+    remove_listener(&s.pool, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Forget a listener and everything that is theirs. The default one stays.
+pub async fn remove_listener(pool: &SqlitePool, id: i64) -> Result<(), MusicError> {
     if id == 0 {
-        return Err(MusicError::BadRequest("the default listener cannot be removed".into()).into());
+        return Err(MusicError::BadRequest(
+            "the default listener cannot be removed".into(),
+        ));
     }
-    let mut tx = s.pool.begin().await.map_err(cvt)?;
+    let mut tx = pool.begin().await.map_err(cvt)?;
     let found = sqlx::query("SELECT 1 FROM audiobook_listeners WHERE id = ?")
         .bind(id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(cvt)?;
     if found.is_none() {
-        return Err(MusicError::NotFound(format!("listener {id}")).into());
+        return Err(MusicError::NotFound(format!("listener {id}")));
     }
     for table in [
         "audiobook_bookmarks",
@@ -192,8 +208,7 @@ pub async fn delete_listener(
         .execute(&mut *tx)
         .await
         .map_err(cvt)?;
-    tx.commit().await.map_err(cvt)?;
-    Ok(StatusCode::NO_CONTENT)
+    tx.commit().await.map_err(cvt)
 }
 
 // --- roots ------------------------------------------------------------------

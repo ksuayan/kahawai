@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  AudiobookListener,
   AudiobookRoot,
   ApplyAudiobooksInput,
   ApplyConfigInput,
@@ -204,6 +205,21 @@ export async function setupAudiobookFolders(): Promise<AudiobookRoot[]> {
  *  remember them in the config file, and scan. Throws the backend's reason on a problem. */
 export async function setupApplyAudiobooks(input: ApplyAudiobooksInput): Promise<void> {
   await invoke("setup_apply_audiobooks", { input });
+}
+
+/** The audiobook listeners, Default first (empty when no server is running). */
+export async function setupAudiobookListeners(): Promise<AudiobookListener[]> {
+  return (await cmd<AudiobookListener[]>("setup_audiobook_listeners")) ?? [];
+}
+
+/** Make a listener. Throws the backend's reason (an empty or too-long name). */
+export async function setupAddAudiobookListener(name: string): Promise<AudiobookListener> {
+  return invoke<AudiobookListener>("setup_add_audiobook_listener", { name });
+}
+
+/** Forget a listener and their progress. Throws the backend's reason. */
+export async function setupRemoveAudiobookListener(id: number): Promise<void> {
+  await invoke("setup_remove_audiobook_listener", { id });
 }
 
 /** Like `setupValidateDir`, but counts the audiobooks under the folder. */

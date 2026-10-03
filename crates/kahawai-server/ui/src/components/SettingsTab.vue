@@ -9,6 +9,7 @@ import { useOnlineSourcesStore } from "../stores/onlineSources";
 import { usePodcastsStore } from "../stores/podcasts";
 import { setupRevealLogs } from "../tauri";
 import { useSetupStore } from "../stores/setup";
+import ListenersSection from "./ListenersSection.vue";
 import { bookDirChipClass, bookDirChipText, CONFIDENCE_LEVELS, dirChipClass, dirChipText } from "../types";
 
 const setup = useSetupStore();
@@ -188,6 +189,8 @@ const jobLine = computed(() => {
       until you click Apply. Removing a folder forgets its books and your progress; the files stay.
     </UiHint>
     <UiHint v-if="setup.audiobookError" tone="warn">{{ setup.audiobookError }}</UiHint>
+
+    <ListenersSection />
 
     <h3 class="heading-3 mb-2 mt-4">Album info</h3>
     <label class="mb-1 flex items-center gap-2 text-[13px]">
