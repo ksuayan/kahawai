@@ -25,4 +25,31 @@ describe("PhoneLibraryView", () => {
     expect(useNavStore().section).toBe("artists");
     expect(wrapper.find('[data-testid="lib-tab-artists"]').attributes("aria-selected")).toBe("true");
   });
+
+  it("gives a virtualized section a bounded box (so it renders only what is on screen) and lets the others scroll", async () => {
+    const { wrapper } = mountApp(PhoneLibraryView, {}, {}, () => useNavStore().go("albums"));
+    await settle();
+    const box = () => wrapper.get('[data-testid="phone-library-box"]').classes();
+    expect(box()).toEqual(expect.arrayContaining(["flex", "flex-col", "overflow-hidden", "min-h-0", "flex-1"]));
+    useNavStore().go("playlists");
+    await settle();
+    expect(box()).toContain("overflow-y-auto");
+    expect(box()).not.toContain("overflow-hidden");
+  });
+});
+
+describe("PhoneShell", () => {
+  it("bounds the library and other virtualized screens, and scrolls the rest", async () => {
+    const { default: PhoneShell } = await import("./PhoneShell.vue");
+    const { wrapper } = mountApp(PhoneShell, {}, {}, () => useNavStore().go("queue"));
+    await settle();
+    const box = () => wrapper.get('[data-testid="phone-view-box"]').classes();
+    expect(box()).toEqual(expect.arrayContaining(["flex", "flex-col", "overflow-hidden"]));
+    useNavStore().go("albums");
+    await settle();
+    expect(box()).toEqual(expect.arrayContaining(["flex", "flex-col", "overflow-hidden"]));
+    useNavStore().go("settings");
+    await settle();
+    expect(box()).toContain("overflow-y-auto");
+  });
 });

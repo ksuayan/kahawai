@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { viewBoxClass } from "../lib/scrollers";
 import { SECTION_LABELS, useNavStore, type ViewName } from "../stores/nav";
 import AlbumDetail from "./AlbumDetail.vue";
 import AlbumsView from "./AlbumsView.vue";
@@ -47,7 +48,8 @@ const view = computed(() => nav.view);
         </button>
       </div>
     </div>
-    <div class="min-h-0 flex-1">
+    <!-- A virtualized view needs a bounded flex column; the rest scroll here (lib/scrollers). -->
+    <div class="min-h-0 flex-1" :class="viewBoxClass(view.name)" data-testid="phone-library-box">
       <AlbumsView v-if="view.name === 'albums'" />
       <AlbumDetail v-else-if="view.name === 'album'" :id="view.id ?? 0" />
       <ArtistsView v-else-if="view.name === 'artists'" />

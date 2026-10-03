@@ -40,6 +40,7 @@ import { useServerHealthStore } from "./stores/serverHealth";
 import { handleShortcut } from "./shortcuts";
 import { appReady, onMenuAction } from "./tauri";
 import { onCatalogUpdated, onServerConnected } from "./api";
+import { viewBoxClass } from "./lib/scrollers";
 
 const nav = useNavStore();
 const { isPhone } = useBreakpoint();
@@ -73,8 +74,6 @@ const toasts = useToastsStore();
 const abx = useAbxStore();
 const overlays = useOverlaysStore();
 const serverHealth = useServerHealthStore();
-/** Views that scroll inside a virtualized list or grid of their own. */
-const OWN_SCROLLER = new Set(["albums", "artists", "genre", "album", "search", "queue", "audiobooks"]);
 
 // Cleanup must be registered synchronously: inside the async onMounted below
 // there is no active component instance left after the first await.
@@ -196,7 +195,7 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
         <main
           ref="mainEl"
           class="min-w-0 flex-1"
-          :class="OWN_SCROLLER.has(nav.view.name) ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'"
+          :class="viewBoxClass(nav.view.name)"
         >
           <AlbumsView v-if="nav.view.name === 'albums'" />
           <AlbumDetail v-else-if="nav.view.name === 'album'" :id="nav.view.id ?? 0" />

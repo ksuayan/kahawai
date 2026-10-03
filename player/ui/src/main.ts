@@ -16,13 +16,13 @@ import "@fontsource/ibm-plex-serif/latin-600.css";
 import "@fontsource/ibm-plex-serif/latin-ext-400.css";
 import "@fontsource/ibm-plex-serif/latin-ext-600.css";
 import "./style.css";
-
-// Android: the system bars' real size, where the WebView reports none (lib/insets).
-watchNativeInsets();
 import { installNativeMenuGuard } from "./lib/nativeMenu";
 import { loadUiState } from "./lib/uiState";
 import { useDeveloperStore } from "./stores/developer";
 import { useThemeStore } from "./stores/theme";
+
+// Android: the system bars' real size, where the WebView reports none (lib/insets).
+watchNativeInsets();
 
 async function start(): Promise<void> {
   // Saved preferences first: the stores read them as they're created.
