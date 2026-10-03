@@ -145,3 +145,26 @@ describe("NowPlayingBar icons", () => {
     expect(w.get('[role="alert"] svg').classes().join(" ")).toContain("lucide-triangle-alert");
   });
 });
+
+describe("NowPlayingBar mini variant", () => {
+  async function bootMini(state = makeState({ status: "playing", position_ms: 83_000 })) {
+    tauri.on("get_state", state);
+    const { wrapper } = mountApp(NowPlayingBar, { variant: "mini" });
+    await usePlayerStore().init();
+    await settle();
+    return wrapper;
+  }
+
+  it("renders the single-row mini-player, not the desktop bar", async () => {
+    const w = await bootMini();
+    expect(w.find('[data-testid="mini-player"]').exists()).toBe(true);
+    expect(w.find('[data-testid="now-playing-bar"]').exists()).toBe(false);
+    expect(w.find('[data-testid="mini-toggle"]').exists()).toBe(true);
+  });
+
+  it("emits expand when the row is clicked", async () => {
+    const w = await bootMini();
+    await w.find('[data-testid="mini-player-expand"]').trigger("click");
+    expect(w.emitted("expand")).toHaveLength(1);
+  });
+});

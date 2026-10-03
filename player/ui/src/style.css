@@ -61,6 +61,47 @@
   color-scheme: dark;
 }
 
+/*
+ * Safe-area insets (notch, gesture bar). Consumed structurally by the phone
+ * chrome (tab bar, mini-player, sheets), never sprinkled per-screen.
+ */
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
+@utility pb-safe {
+  padding-bottom: var(--sab);
+}
+
+/*
+ * Phone bottom sheets: every UiDialog becomes a bottom-anchored sheet below
+ * 720 px. Desktop keeps the centered dialog untouched.
+ */
+@media (max-width: 719px) {
+  .phone-sheet {
+    top: auto !important;
+    bottom: 0;
+    left: 0 !important;
+    right: 0;
+    width: 100% !important;
+    max-height: 92dvh;
+    transform: none !important;
+    translate: none !important;
+    border-radius: 12px 12px 0 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    padding-bottom: calc(1.25rem + var(--sab));
+  }
+}
+
+@utility pt-safe {
+  padding-top: var(--sat);
+}
+
 /* Type scale (guide): micro label 11/600 caps, prose serif 16/1.6, headings
  * 24 / 18 / 15 at 600 with -0.01em tracking. */
 @utility micro-label {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ChevronDown, ChevronUp, GripVertical, Repeat, Repeat1, Shuffle, X } from "lucide-vue-next";
 import { computed, onBeforeUnmount, ref } from "vue";
+import { useBreakpoint } from "../lib/breakpoint";
 import { isNoopSlot, partingFor, slotFromY, targetIndex } from "../lib/listdrop";
 import { sortTracks, trackSortOptions } from "../lib/sorting";
 import { useLibraryStore } from "../stores/library";
@@ -60,6 +61,7 @@ const saveError = ref<string | null>(null);
 // opens up and is highlighted. Esc cancels; near the edges the list scrolls.
 
 /** Row height in list mode; the drop geometry is computed from it. */
+const { isPhone } = useBreakpoint();
 const ROW_HEIGHT = 52;
 /** Pixels the pointer must travel before a press becomes a drag (so clicks still click). */
 const DRAG_THRESHOLD = 5;
@@ -78,8 +80,11 @@ let rowsEl: HTMLElement | null = null;
 let scrollEl: HTMLElement | null = null;
 
 function onRowPointerDown(e: PointerEvent, i: number): void {
-  if (sorted.value || e.button !== 0 || e.pointerType === "touch") return;
+  if (sorted.value || e.button !== 0) return;
   if ((e.target as HTMLElement | null)?.closest("button")) return; // move / remove buttons
+  // Touch: only the grip handle starts a drag, so vertical scrolling still works.
+  const fromHandle = !!(e.target as HTMLElement | null)?.closest("[data-drag-handle]");
+  if (e.pointerType === "touch" && !fromHandle) return;
   armed = { i, x: e.clientX, y: e.clientY, row: e.currentTarget as HTMLElement };
   pointer = { x: e.clientX, y: e.clientY };
   window.addEventListener("pointermove", onPointerMove, true);
@@ -333,6 +338,7 @@ async function saveAsPlaylist(name: string): Promise<void> {
             i === queue.index ? 'bg-accent/15' : dragFrom === null && 'hover:bg-hover',
             !isPlayable(t) && 'opacity-45',
             dragFrom === i && 'opacity-40',
+            isPhone && 'min-h-[52px] py-3',
           ]"
           :style="{ transform: rowShift(i) }"
           :data-dragging="dragFrom === i || undefined"
@@ -346,11 +352,18 @@ async function saveAsPlaylist(name: string): Promise<void> {
           @dblclick="playRow(i)"
           @keydown.enter.self="playRow(i)"
         >
-          <GripVertical
-            class="size-4 shrink-0 text-faint"
-            :class="sorted ? 'opacity-30' : 'cursor-grab'"
+          <span
+            data-drag-handle
+            class="flex shrink-0 items-center justify-center rounded"
+            :class="isPhone ? '-m-2 size-11' : 'size-4'"
+            :style="isPhone ? { touchAction: 'none' } : undefined"
             aria-hidden="true"
-          />
+          >
+            <GripVertical
+              class="size-4 text-faint"
+              :class="sorted ? 'opacity-30' : 'cursor-grab'"
+            />
+          </span>
           <span class="w-7 shrink-0 text-right tabular-nums text-faint">{{ i + 1 }}</span>
           <Artwork :hash="coverOf(t)" :size="36" :radius="4" />
           <div class="min-w-0 flex-1">

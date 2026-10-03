@@ -19,7 +19,7 @@ const emit = defineEmits<{ (e: "update:open", v: boolean): void }>();
     <DialogPortal>
       <DialogOverlay class="fixed inset-0 z-50 bg-black/55" data-kw-fade />
       <DialogContent
-        class="fixed left-1/2 top-1/2 z-50 max-h-[calc(100vh-32px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-line bg-surface p-5 shadow-float outline-none"
+        class="phone-sheet fixed left-1/2 top-1/2 z-50 max-h-[calc(100vh-32px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-line bg-surface p-5 shadow-float outline-none"
         data-kw-fade
         :class="wide ? 'w-[min(820px,calc(100vw-32px))]' : 'w-[min(440px,calc(100vw-32px))]'"
       >

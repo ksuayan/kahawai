@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Check } from "lucide-vue-next";
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import { fireContextMenu, useLongPress } from "../lib/longpress";
 import { duration } from "../lib/audiobook";
 import type { Audiobook } from "../types";
 import Artwork from "./Artwork.vue";
@@ -8,6 +9,9 @@ import Artwork from "./Artwork.vue";
 /** One book tile: cover, title, author, and how far along you are. */
 const props = defineProps<{ book: Audiobook }>();
 defineEmits<{ (e: "open", id: number): void }>();
+
+const cardEl = ref<HTMLElement | null>(null);
+useLongPress(cardEl, (e) => fireContextMenu(e));
 
 const percent = computed(() => Math.round(props.book.progress * 100));
 const started = computed(() => props.book.last_played_at !== null && props.book.progress > 0 && !props.book.finished_at);
@@ -22,6 +26,7 @@ const subtitle = computed(() => {
 
 <template>
   <button
+    ref="cardEl"
     type="button"
     class="group block w-full rounded-lg p-0 text-left outline-none focus-visible:outline-2 focus-visible:outline-accent"
     data-testid="book-card"

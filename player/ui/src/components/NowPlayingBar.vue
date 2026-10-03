@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Info, ListOrdered, TriangleAlert } from "lucide-vue-next";
+import { Info, ListOrdered, Play, Pause, TriangleAlert } from "lucide-vue-next";
 import { computed } from "vue";
 import { useAudiobooksStore } from "../stores/audiobooks";
 import { useLibraryStore } from "../stores/library";
@@ -16,6 +16,12 @@ import TrackMenu from "./TrackMenu.vue";
 import TransportControls from "./TransportControls.vue";
 import VolumeSlider from "./VolumeSlider.vue";
 
+const props = withDefaults(defineProps<{ variant?: "full" | "mini" }>(), {
+  variant: "full",
+});
+
+const emit = defineEmits<{ expand: [] }>();
+
 const player = usePlayerStore();
 const lib = useLibraryStore();
 const nav = useNavStore();
@@ -29,13 +35,62 @@ const artworkHash = computed(() => {
   return lib.albums.find((a) => a.id === t.album_id)?.artwork_hash ?? null;
 });
 
+const title = computed(() =>
+  books.isActive && books.active ? books.active.title : track.value ? trackTitle(track.value) : "Nothing playing",
+);
+const subtitle = computed(() => {
+  if (books.isActive) return `${books.chapter?.title ?? books.active?.title ?? ""} · ${books.active?.author ?? ""}`;
+  return track.value?.artist ?? "—";
+});
+
 function goNowPlaying(): void {
+  if (props.variant === "mini") {
+    emit("expand");
+    return;
+  }
   if (track.value) nav.go("nowplaying");
+}
+
+function togglePlay(): void {
+  void player.toggle();
 }
 </script>
 
 <template>
-  <footer class="relative z-20 border-t border-line bg-raised" data-testid="now-playing-bar">
+  <!-- Mini variant: single-row phone mini-player. Desktop ("full") below is untouched. -->
+  <footer
+    v-if="variant === 'mini'"
+    class="relative z-20 border-t border-line bg-raised"
+    data-testid="mini-player"
+  >
+    <div
+      class="flex min-h-[64px] w-full items-center gap-3 px-3 py-2"
+      data-testid="mini-player-expand"
+      role="button"
+      tabindex="0"
+      :aria-label="`Open now playing: ${title}`"
+      @click="goNowPlaying()"
+      @keydown.enter="goNowPlaying()"
+      @keydown.space.prevent="goNowPlaying()"
+    >
+      <Artwork :hash="artworkHash" :placeholder="books.isActive ? 'book' : 'music'" :size="44" :radius="6" :alt="title" />
+      <span class="min-w-0 flex-1">
+        <span class="block truncate text-sm font-semibold" data-testid="mini-title">{{ title }}</span>
+        <span class="block truncate text-xs text-dim" data-testid="mini-artist">{{ subtitle }}</span>
+      </span>
+      <button
+        type="button"
+        aria-label="Play or pause"
+        data-testid="mini-toggle"
+        class="flex size-11 shrink-0 items-center justify-center rounded-full border-0 bg-active text-fg"
+        @click.stop="togglePlay()"
+      >
+        <Pause v-if="player.isPlaying" class="size-5" />
+        <Play v-else class="size-5" />
+      </button>
+    </div>
+  </footer>
+  <footer v-else class="relative z-20 border-t border-line bg-raised" data-testid="now-playing-bar">
     <div
       v-if="player.error"
       class="flex items-center gap-1.5 bg-danger/15 px-4 py-1.5 text-xs text-danger-fg"

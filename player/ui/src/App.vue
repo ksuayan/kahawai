@@ -16,6 +16,8 @@ import QueueView from "./components/QueueView.vue";
 import SearchView from "./components/SearchView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import Sidebar from "./components/Sidebar.vue";
+import PhoneShell from "./components/PhoneShell.vue";
+import { useBreakpoint } from "./lib/breakpoint";
 import ToastHost from "./components/ToastHost.vue";
 import { useJobsStore } from "./stores/jobs";
 import { useLibraryStore } from "./stores/library";
@@ -40,6 +42,7 @@ import { appReady, onMenuAction } from "./tauri";
 import { onCatalogUpdated, onServerConnected } from "./api";
 
 const nav = useNavStore();
+const { isPhone } = useBreakpoint();
 
 // The shared scroller most views live in; views remember their place in it.
 const mainEl = ref<HTMLElement | null>(null);
@@ -181,7 +184,8 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
         </template>
         <template v-else>Server unreachable at {{ settings.serverUrl }} — check Settings.</template>
       </div>
-      <div class="flex min-h-0 flex-1">
+      <PhoneShell v-if="isPhone" />
+      <div v-else class="flex min-h-0 flex-1">
         <Sidebar />
         <!--
           Virtualized views (Albums, Artists, an album, a genre, Search, Queue) have their own scroller,
@@ -210,7 +214,7 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
           <SettingsView v-else-if="nav.view.name === 'settings'" />
         </main>
       </div>
-      <NowPlayingBar />
+      <NowPlayingBar v-if="!isPhone" />
       <ToastHost />
       <AboutDialog />
       <InfoDialog />

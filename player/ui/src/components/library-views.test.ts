@@ -125,7 +125,7 @@ describe("AlbumsView", () => {
   // grid capping out regardless of window size.
   it("takes the full panel width instead of capping out like other views", () => {
     const { wrapper } = mountApp(AlbumsView, {}, {}, seed([makeAlbum()]));
-    expect(wrapper.get(".px-6.pb-10.pt-5").classes()).toContain("max-w-none");
+    expect(wrapper.get(".px-4.pb-10.pt-4").classes()).toContain("max-w-none");
   });
 });
 

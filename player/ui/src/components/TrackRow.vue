@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import { fireContextMenu, useLongPress } from "../lib/longpress";
+import { useBreakpoint } from "../lib/breakpoint";
 import {
   formatBadge,
   formatDuration,
@@ -40,17 +42,36 @@ const reason = computed(() => unplayableReason(props.track));
 function onDblClick(): void {
   if (playable.value) emit("play", props.track);
 }
+
+const { isPhone } = useBreakpoint();
+const rowEl = ref<HTMLElement | null>(null);
+// Long-press opens the same context menu as right-click.
+useLongPress(rowEl, (e) => fireContextMenu(e));
+
+/** Phones have no double-click affordance: a single tap plays. Taps on inner
+ *  controls (the ⋯ menu, badges) are left alone. */
+function onTap(e: MouseEvent): void {
+  if (!isPhone.value || !playable.value) return;
+  if ((e.target as HTMLElement).closest("button, a, [role='button']")) return;
+  emit("play", props.track);
+}
 </script>
 
 <template>
   <ItemContextMenu :track="track" @play="emit('play', track)">
   <div
+    ref="rowEl"
     class="flex cursor-default items-center gap-3 rounded-md px-2.5 py-[7px]"
-    :class="[current ? 'bg-accent/15' : 'hover:bg-hover', !playable && 'opacity-45']"
+    :class="[
+      current ? 'bg-accent/15' : 'hover:bg-hover',
+      !playable && 'opacity-45',
+      isPhone && 'min-h-[52px] py-3',
+    ]"
     :data-current="current || undefined"
     :data-playable="playable"
     :title="playable ? title : `${title} — ${reason}`"
     @dblclick="onDblClick"
+    @click="onTap($event)"
   >
     <span class="w-7 shrink-0 text-right tabular-nums text-faint">{{ number ?? track.track_no ?? "–" }}</span>
     <Artwork v-if="showArtwork" :hash="artworkHash" :size="36" :radius="4" />

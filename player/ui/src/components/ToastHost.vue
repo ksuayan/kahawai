@@ -60,7 +60,7 @@ const accent: Record<ToastKind, string> = {
       </ToastClose>
     </ToastRoot>
     <ToastViewport
-      class="fixed bottom-24 right-4 z-[100] m-0 flex max-w-[360px] list-none flex-col gap-2 p-0 outline-none"
+      class="fixed bottom-[calc(128px+var(--sab))] right-4 z-[100] m-0 flex max-w-[360px] list-none flex-col gap-2 p-0 outline-none min-[720px]:bottom-24"
     />
   </ToastProvider>
 </template>

@@ -40,7 +40,7 @@ const widths = {
 
 <template>
   <div
-    class="px-6 pb-10 pt-5"
+    class="px-4 pb-10 pt-4 min-[720px]:px-6 min-[720px]:pt-5"
     :class="[widths[width], width === 'full' && 'flex min-h-0 flex-1 flex-col']"
   >
     <Breadcrumbs v-if="section" :section="section" :current="crumb" />

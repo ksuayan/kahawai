@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { RefreshCw } from "lucide-vue-next";
+import { Info, Moon, RefreshCw, Sun } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { checkServer, describeServer, type ServerCheck } from "../api";
 import { artworkCacheStats, clearArtworkCache, dopStatus, inTauri, revealLogs, setArtworkCacheMaxBytes, setDsdDeviceConfirmed, type ArtworkCacheStats } from "../tauri";
@@ -34,8 +34,14 @@ import CrossfeedSection from "./CrossfeedSection.vue";
 import LimiterSection from "./LimiterSection.vue";
 import AudiobookSection from "./AudiobookSection.vue";
 import SettingsSection from "./SettingsSection.vue";
+import { useBreakpoint } from "../lib/breakpoint";
+import { useThemeStore } from "../stores/theme";
+import { useOverlaysStore } from "../stores/overlays";
 
 const settings = useSettingsStore();
+const { isPhone } = useBreakpoint();
+const theme = useThemeStore();
+const overlays = useOverlaysStore();
 const developer = useDeveloperStore();
 const lib = useLibraryStore();
 const playlists = usePlaylistsStore();
@@ -271,6 +277,17 @@ const dopRates = computed(() =>
 <template>
   <ViewShell title="Settings" width="narrow">
     <SignalPathPanel />
+
+    <SettingsSection v-if="isPhone" title="Appearance">
+      <UiHint>Theme and about. On desktop these live in the sidebar.</UiHint>
+      <div class="flex flex-col gap-2">
+        <UiButton data-testid="phone-theme-toggle" @click="theme.toggle()">
+          <Sun v-if="theme.theme === 'dark'" /> <Moon v-else />
+          {{ theme.theme === "dark" ? "Switch to light theme" : "Switch to dark theme" }}
+        </UiButton>
+        <UiButton data-testid="phone-about" @click="overlays.openAbout()"><Info /> About Kahawai Player</UiButton>
+      </div>
+    </SettingsSection>
 
     <SettingsSection title="Server">
       <template #aside>

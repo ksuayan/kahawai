@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useBreakpoint } from "../lib/breakpoint";
 import { SliderRange, SliderRoot, SliderThumb, SliderTrack } from "reka-ui";
 
 /**
@@ -30,6 +31,8 @@ const emit = defineEmits<{
 
 // Reka needs max > min; a track with no known duration gets a 1-wide range.
 const safeMax = computed(() => Math.max(props.max, props.min + 1));
+const { isPhone } = useBreakpoint();
+
 const bufferedPct = computed(() =>
   props.buffered == null ? null : Math.min(100, Math.max(0, ((props.buffered - props.min) / (safeMax.value - props.min)) * 100)),
 );
@@ -43,7 +46,7 @@ const value = computed(() => [Math.min(Math.max(props.modelValue, props.min), sa
     :max="safeMax"
     :step="step"
     :disabled="disabled"
-    class="group relative flex h-5 touch-none select-none items-center data-[disabled]:opacity-45"
+    :class="['group relative flex touch-none select-none items-center data-[disabled]:opacity-45', isPhone ? 'h-11' : 'h-5']"
     @update:model-value="(v) => v && emit('update:modelValue', v[0])"
     @value-commit="(v) => v && emit('commit', v[0])"
   >
