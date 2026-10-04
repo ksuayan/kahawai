@@ -385,6 +385,8 @@ fn main() {
             desktop::setup_active_hash_job,
             desktop::setup_active_book_lookup,
             desktop::setup_live_scan_stats,
+            desktop::setup_rescan_library,
+            desktop::setup_rescan_audiobooks,
             desktop::setup_enrichment_status,
             desktop::setup_set_enrichment,
             desktop::setup_online_sources,

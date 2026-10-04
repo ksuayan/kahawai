@@ -5,6 +5,8 @@ import {
   setupGetRunningConfig,
   setupGetState,
   setupLiveScanStats,
+  setupRescanAudiobooks,
+  setupRescanLibrary,
   setupPickDirectory,
   setupQuit,
   setupActiveBookLookup,
@@ -270,6 +272,20 @@ export const useSetupStore = defineStore("setup", () => {
     liveScanStats.value = await setupLiveScanStats();
   }
 
+  /** The Status tab's Rescan buttons. A refusal (a scan already running) is
+   *  the reason shown under them. */
+  const rescanError = ref<string | null>(null);
+  async function rescan(what: "library" | "audiobooks"): Promise<void> {
+    rescanError.value = null;
+    try {
+      await (what === "library" ? setupRescanLibrary() : setupRescanAudiobooks());
+      await loadRecentScans();
+      ensureScanPolling();
+    } catch (e) {
+      rescanError.value = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   /** Poll while a scan is active, for the Status tab's live tally and the
    *  Settings tab's Apply button — regardless of who started the scan.
    *  Safe to call repeatedly; a second call while already polling is a
@@ -515,6 +531,8 @@ export const useSetupStore = defineStore("setup", () => {
     removeRunningDir,
     loadRecentScans,
     refreshLiveScanStats,
+    rescan,
+    rescanError,
     applyAndRescan,
     stopServer,
     restartServer,

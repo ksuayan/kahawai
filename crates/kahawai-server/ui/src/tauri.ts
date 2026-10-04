@@ -104,6 +104,16 @@ export async function setupActiveBookLookup(): Promise<ScanJob | null> {
 }
 
 /** Live catalog counts, for the Status tab's tally while a scan runs. */
+/** Rescan the music folders (audiobook folders ride along). Throws when a scan is already running. */
+export async function setupRescanLibrary(): Promise<void> {
+  await invoke("setup_rescan_library");
+}
+
+/** Rescan the audiobook folders only. Throws when a scan is already running. */
+export async function setupRescanAudiobooks(): Promise<void> {
+  await invoke("setup_rescan_audiobooks");
+}
+
 export async function setupLiveScanStats(): Promise<LiveScanStats> {
   return (
     (await cmd<LiveScanStats>("setup_live_scan_stats")) ?? { albums: 0, artists: 0, tracks: 0 }

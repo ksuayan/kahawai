@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
+import { BookOpen, Disc3 } from "lucide-vue-next";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import { useSetupStore } from "../stores/setup";
@@ -7,9 +8,18 @@ import { describeServer, formatElapsed, formatWhen, isJobActive, scanFiles, scan
 
 const setup = useSetupStore();
 
-/** Ticks every second, so a running scan's elapsed time counts up. */
+/** Ticks every second, so a running scan's elapsed time counts up. The
+ *  library counts and connected Players are read every few seconds (a scan
+ *  polls faster on its own). */
 const now = ref(Date.now());
-const clock = window.setInterval(() => (now.value = Date.now()), 1000);
+let ticks = 0;
+const clock = window.setInterval(() => {
+  now.value = Date.now();
+  if (++ticks % 5 === 0 && setup.serverStatus?.running) void setup.refreshLiveScanStats();
+}, 1000);
+onMounted(() => {
+  if (setup.serverStatus?.running && !setup.liveScanStats) void setup.refreshLiveScanStats();
+});
 onUnmounted(() => window.clearInterval(clock));
 
 /** The other Kahawai Server's panel: stop asks for a confirmation first. */
@@ -29,6 +39,19 @@ const runningFiles = computed(() => {
 const runningScan = computed(() => setup.recentScans.find(isJobActive));
 const scanningBooks = computed(() => runningScan.value?.label.toLowerCase().includes("audiobook") ?? false);
 const lookup = computed(() => setup.bookLookupJob);
+
+/** How far the running scan is, 0–100: from the file counts when the previous
+ *  scan's total is known, else the job's own progress; null before either. */
+const scanPercent = computed(() => {
+  const j = runningScan.value;
+  if (!j) return null;
+  const f = j.files;
+  if (f?.total) return Math.min(100, Math.round((f.done / f.total) * 100));
+  return j.progress > 0 ? Math.round(j.progress * 100) : null;
+});
+
+const stats = computed(() => setup.liveScanStats);
+const players = computed(() => stats.value?.players ?? 0);
 
 /** The content-hashing job's counts: the scan queues it when it finishes. */
 const hashing = computed(() => {
@@ -130,40 +153,69 @@ function scanClass(j: ScanJob): string {
       {{ setup.serverStatus.error }}
     </UiHint>
 
-    <div v-if="setup.isScanning" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3">
-      <h3 class="heading-3 mb-2" data-testid="scan-heading">{{ scanningBooks ? "Scanning audiobooks…" : "Scanning…" }}</h3>
-      <div class="flex gap-6 text-[13px]">
-        <template v-if="!scanningBooks">
-          <div><span class="text-dim">Albums</span> <span class="font-semibold">{{ setup.liveScanStats?.albums ?? 0 }}</span></div>
-          <div><span class="text-dim">Artists</span> <span class="font-semibold">{{ setup.liveScanStats?.artists ?? 0 }}</span></div>
-          <div><span class="text-dim">Tracks</span> <span class="font-semibold">{{ setup.liveScanStats?.tracks ?? 0 }}</span></div>
-        </template>
-        <div v-if="scanningBooks || (setup.liveScanStats?.audiobooks ?? 0) > 0" data-testid="books-count">
-          <span class="text-dim">Audiobooks</span> <span class="font-semibold">{{ setup.liveScanStats?.audiobooks ?? 0 }}</span>
+    <div v-if="setup.serverStatus?.running" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3" data-testid="library-panel">
+      <h3 class="heading-3 mb-2" data-testid="scan-heading">
+        {{ setup.isScanning ? (scanningBooks ? "Scanning audiobooks…" : "Scanning…") : "Library" }}
+      </h3>
+      <div class="flex flex-wrap gap-x-6 gap-y-1 text-[13px]">
+        <div><span class="text-dim">Albums</span> <span class="font-semibold tabular-nums">{{ stats?.albums ?? 0 }}</span></div>
+        <div><span class="text-dim">Artists</span> <span class="font-semibold tabular-nums">{{ stats?.artists ?? 0 }}</span></div>
+        <div><span class="text-dim">Tracks</span> <span class="font-semibold tabular-nums">{{ stats?.tracks ?? 0 }}</span></div>
+        <div data-testid="books-count">
+          <span class="text-dim">Audiobooks</span> <span class="font-semibold tabular-nums">{{ stats?.audiobooks ?? 0 }}</span>
+        </div>
+        <div data-testid="players-count">
+          <span class="text-dim">{{ players === 1 ? "Player connected" : "Players connected" }}</span> <span class="font-semibold tabular-nums">{{ players }}</span>
         </div>
       </div>
-      <dl v-if="runningFiles" class="m-0 mt-2 flex flex-wrap gap-x-6 gap-y-1 text-[13px]" data-testid="scan-files">
-        <div>
-          <dt class="inline text-dim">Files processed</dt>
-          <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-processed">{{ runningFiles.processed }}</dd>
+
+      <template v-if="setup.isScanning">
+        <div v-if="scanPercent !== null" class="mt-3 flex items-center gap-3" data-testid="scan-progress">
+          <div
+            class="h-1.5 flex-1 overflow-hidden rounded-full bg-active"
+            role="progressbar"
+            :aria-valuenow="scanPercent"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-label="Scan progress"
+          >
+            <div class="h-full rounded-full bg-accent transition-[width] duration-500" :style="{ width: `${scanPercent}%` }" />
+          </div>
+          <span class="w-10 text-right text-[13px] font-semibold tabular-nums" data-testid="scan-percent">{{ scanPercent }}%</span>
         </div>
-        <div v-if="runningFiles.remaining !== null">
-          <dt class="inline text-dim">Files remaining to process</dt>
-          <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-remaining">{{ runningFiles.remaining }}</dd>
-        </div>
-        <div v-if="runningFiles.rate">
-          <dt class="inline text-dim">Rate</dt>
-          <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-rate">{{ runningFiles.rate }}</dd>
-        </div>
-        <div v-if="runningFiles.eta">
-          <dt class="inline text-dim">ETA</dt>
-          <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-eta">{{ runningFiles.eta }}</dd>
-        </div>
-      </dl>
-      <p v-if="!scanningBooks && setup.liveScanStats?.last_album" class="mt-2 truncate text-xs text-faint">
-        Last added: {{ setup.liveScanStats.last_album
-        }}<span v-if="setup.liveScanStats.last_album_artist"> — {{ setup.liveScanStats.last_album_artist }}</span>
-      </p>
+        <dl v-if="runningFiles" class="m-0 mt-2 flex flex-wrap gap-x-6 gap-y-1 text-[13px]" data-testid="scan-files">
+          <div>
+            <dt class="inline text-dim">Files processed</dt>
+            <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-processed">{{ runningFiles.processed }}</dd>
+          </div>
+          <div v-if="runningFiles.remaining !== null">
+            <dt class="inline text-dim">Files remaining to process</dt>
+            <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-remaining">{{ runningFiles.remaining }}</dd>
+          </div>
+          <div v-if="runningFiles.rate">
+            <dt class="inline text-dim">Rate</dt>
+            <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-rate">{{ runningFiles.rate }}</dd>
+          </div>
+          <div v-if="runningFiles.eta">
+            <dt class="inline text-dim">ETA</dt>
+            <dd class="m-0 ml-1 inline font-semibold tabular-nums" data-testid="files-eta">{{ runningFiles.eta }}</dd>
+          </div>
+        </dl>
+        <p v-if="!scanningBooks && stats?.last_album" class="mt-2 truncate text-xs text-faint">
+          Last added: {{ stats.last_album }}<span v-if="stats.last_album_artist"> — {{ stats.last_album_artist }}</span>
+        </p>
+      </template>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3">
+        <span class="text-[13px] text-dim">Rescan</span>
+        <UiButton :disabled="setup.isScanning" title="Scan the music folders again (audiobook folders too)" data-testid="rescan-library" @click="setup.rescan('library')">
+          <Disc3 class="size-4" /> Library
+        </UiButton>
+        <UiButton :disabled="setup.isScanning" title="Scan the audiobook folders again" data-testid="rescan-audiobooks" @click="setup.rescan('audiobooks')">
+          <BookOpen class="size-4" /> Audiobooks
+        </UiButton>
+      </div>
+      <p v-if="setup.rescanError" class="m-0 mt-2 text-xs text-danger-fg" role="alert">{{ setup.rescanError }}</p>
     </div>
 
     <div v-if="lookup" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3" data-testid="book-lookup">

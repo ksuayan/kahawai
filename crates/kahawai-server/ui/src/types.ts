@@ -139,6 +139,8 @@ export interface LiveScanStats {
   tracks: number;
   last_album?: string | null;
   last_album_artist?: string | null;
+  /** Players connected right now. */
+  players?: number;
 }
 
 /** Server job (`setup_recent_scans`, mirrors `kahawai_core::Job`).

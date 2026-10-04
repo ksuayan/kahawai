@@ -282,6 +282,53 @@ describe("StatusTab: heading while the server starts", () => {
   });
 });
 
+describe("StatusTab: library panel", () => {
+  it("is there when nothing is scanning: the library, the connected Players and Rescan", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    setup.liveScanStats = { albums: 5754, artists: 900, tracks: 80000, audiobooks: 199, players: 2 } as never;
+    await settle();
+    expect(wrapper.get('[data-testid="scan-heading"]').text()).toBe("Library");
+    expect(wrapper.get('[data-testid="books-count"]').text()).toContain("199");
+    expect(wrapper.get('[data-testid="players-count"]').text()).toBe("Players connected 2");
+    expect(wrapper.find('[data-testid="scan-progress"]').exists()).toBe(false);
+    setup.liveScanStats = { albums: 1, artists: 1, tracks: 1, players: 1 } as never;
+    await settle();
+    expect(wrapper.get('[data-testid="players-count"]').text()).toBe("Player connected 1");
+  });
+
+  it("rescans the library or the audiobooks, and says why when it can't", async () => {
+    tauri
+      .on("setup_rescan_library", undefined)
+      .on("setup_recent_scans", [])
+      .on("setup_rescan_audiobooks", () => {
+        throw new Error("a scan is already running");
+      });
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    setup.liveScanStats = { albums: 0, artists: 0, tracks: 0 } as never;
+    await settle();
+    await wrapper.get('[data-testid="rescan-library"]').trigger("click");
+    await settle();
+    expect(tauri.callsTo("setup_rescan_library")).toHaveLength(1);
+    await wrapper.get('[data-testid="rescan-audiobooks"]').trigger("click");
+    await settle();
+    expect(wrapper.text()).toContain("a scan is already running");
+  });
+
+  it("disables Rescan while a scan runs", async () => {
+    const { wrapper } = boot();
+    const setup = useSetupStore();
+    setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
+    setup.recentScans = [{ id: "job-1", kind: "scan", label: "Library scan", progress: 0.5, status: "running" }] as never;
+    await settle();
+    expect((wrapper.get('[data-testid="rescan-library"]').element as HTMLButtonElement).disabled).toBe(true);
+    expect(wrapper.get('[data-testid="scan-percent"]').text()).toBe("50%");
+  });
+});
+
 describe("StatusTab: audiobook scanning", () => {
   it("says it is scanning audiobooks, counts books, and shows the files read", async () => {
     const { wrapper } = boot();
@@ -294,11 +341,13 @@ describe("StatusTab: audiobook scanning", () => {
     await settle();
     expect(wrapper.get('[data-testid="scan-heading"]').text()).toBe("Scanning audiobooks…");
     expect(wrapper.get('[data-testid="books-count"]').text()).toContain("12");
-    expect(wrapper.text()).not.toContain("Albums");
     expect(wrapper.get('[data-testid="files-remaining"]').text()).toBe("60");
+    // Progress from the file counts (40 of the previous scan's 100), with its ETA.
+    expect(wrapper.get('[data-testid="scan-percent"]').text()).toBe("40%");
+    expect(wrapper.find('[data-testid="files-eta"]').exists()).toBe(true);
   });
 
-  it("a music scan keeps its tally, and shows the book count only once there are books", async () => {
+  it("a music scan keeps its tally; no progress bar until there is something to measure", async () => {
     const { wrapper } = boot();
     const setup = useSetupStore();
     setup.serverStatus = { running: true, bind: "0.0.0.0:8080" };
@@ -307,7 +356,7 @@ describe("StatusTab: audiobook scanning", () => {
     await settle();
     expect(wrapper.get('[data-testid="scan-heading"]').text()).toBe("Scanning…");
     expect(wrapper.text()).toContain("Albums");
-    expect(wrapper.find('[data-testid="books-count"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="scan-progress"]').exists()).toBe(false);
   });
 
   it("shows the online details lookup while it runs", async () => {

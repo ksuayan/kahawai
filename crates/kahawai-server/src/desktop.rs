@@ -526,9 +526,12 @@ pub struct LiveScanStats {
     /// sense of progress without the scanner needing its own event stream.
     last_album: Option<String>,
     last_album_artist: Option<String>,
+    /// Players connected right now: each keeps one live-update stream
+    /// (`GET /api/events`) open while it runs.
+    players: usize,
 }
 
-/// Live catalog counts, polled by the Status view while a scan is running.
+/// Live catalog counts and connected Players, polled by the Status view.
 /// Reads straight from the DB rather than the scanner's own file-level
 /// progress, so it reflects exactly what's actually been committed so far.
 #[tauri::command]
@@ -567,7 +570,51 @@ pub async fn setup_live_scan_stats(
         audiobooks,
         last_album: last.as_ref().map(|(t, _)| t.clone()),
         last_album_artist: last.and_then(|(_, a)| a),
+        players: app_state.catalog_events.receiver_count(),
     })
+}
+
+/// Status tab's Rescan › Library: the music folders (audiobook folders ride
+/// along), the same scan `POST /api/scan` starts.
+#[tauri::command]
+pub async fn setup_rescan_library(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    let app_state = live_state(&state)?;
+    let guard = app_state
+        .scan_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| "a scan is already running".to_string())?;
+    let job = app_state
+        .jobs
+        .create(
+            kahawai_core::JobKind::Scan,
+            "Library scan".to_string(),
+            None,
+        )
+        .await;
+    crate::api::spawn_scan_job(app_state, job, guard);
+    Ok(())
+}
+
+/// Status tab's Rescan › Audiobooks: the audiobook folders only.
+#[tauri::command]
+pub async fn setup_rescan_audiobooks(state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    let app_state = live_state(&state)?;
+    let guard = app_state
+        .scan_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| "a scan is already running".to_string())?;
+    let job = app_state
+        .jobs
+        .create(
+            kahawai_core::JobKind::Scan,
+            "Audiobook scan".to_string(),
+            None,
+        )
+        .await;
+    crate::audiobooks_api::spawn_audiobook_scan(app_state, job.id, guard);
+    Ok(())
 }
 
 /// The most recent scan jobs (successes and failures alike), for the Status
