@@ -5,8 +5,38 @@ import UiButton from "../ui/UiButton.vue";
 import UiHint from "../ui/UiHint.vue";
 import { useSetupStore } from "../stores/setup";
 import { describeServer, formatElapsed, formatWhen, isJobActive, scanFiles, scanTiming, type ScanJob } from "../types";
+import { setupGetPairingToken, setupRegenerateToken, setupTailscaleStatus, setupUsersExist } from "../tauri";
 
 const setup = useSetupStore();
+
+/** Pairing section (spec §1.3 + Phase 3 §3.1). `null` = still loading. */
+const usersExist = ref<boolean | null>(null);
+const pairingToken = ref<string | null>(null);
+const pairingError = ref<string | null>(null);
+const regenerating = ref(false);
+const confirmRegen = ref(false);
+
+async function loadPairing(): Promise<void> {
+  try {
+    usersExist.value = await setupUsersExist();
+    if (!usersExist.value) pairingToken.value = await setupGetPairingToken();
+  } catch (err) {
+    pairingError.value = String(err);
+  }
+}
+
+async function regenerateToken(): Promise<void> {
+  regenerating.value = true;
+  pairingError.value = null;
+  try {
+    pairingToken.value = await setupRegenerateToken();
+    confirmRegen.value = false;
+  } catch (err) {
+    pairingError.value = String(err);
+  } finally {
+    regenerating.value = false;
+  }
+}
 
 /** Ticks every second, so a running scan's elapsed time counts up. The
  *  library counts and connected Players are read every few seconds (a scan
@@ -18,6 +48,8 @@ const clock = window.setInterval(() => {
   if (++ticks % 5 === 0 && setup.serverStatus?.running) void setup.refreshLiveScanStats();
 }, 1000);
 onMounted(() => {
+  void loadPairing();
+  if (!setup.tailscaleStatus) void setupTailscaleStatus().then((t) => (setup.tailscaleStatus = t));
   if (setup.serverStatus?.running && !setup.liveScanStats) void setup.refreshLiveScanStats();
 });
 onUnmounted(() => window.clearInterval(clock));
@@ -216,6 +248,41 @@ function scanClass(j: ScanJob): string {
         </UiButton>
       </div>
       <p v-if="setup.rescanError" class="m-0 mt-2 text-xs text-danger-fg" role="alert">{{ setup.rescanError }}</p>
+    </div>
+
+    <div v-if="setup.serverStatus?.running && usersExist !== null" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3" data-testid="pairing-panel">
+      <h3 class="heading-3 mb-2">Pairing</h3>
+      <template v-if="usersExist">
+        <p class="m-0 text-[13px] text-dim">
+          User accounts are active — players sign in with a username and password.
+          The original pairing token is retired.
+        </p>
+      </template>
+      <template v-else>
+        <p class="m-0 mb-2 text-[13px] text-dim">
+          Pair a player once: enter this token in the player's Server settings.
+          Shown here and once in the server log; creating the first admin account retires it.
+        </p>
+        <div class="flex flex-wrap items-center gap-2">
+          <code v-if="pairingToken" class="select-all rounded bg-active px-2 py-1 font-mono text-sm" data-testid="pairing-token">{{ pairingToken }}</code>
+          <span v-else class="text-[13px] text-faint">Hidden</span>
+          <template v-if="!confirmRegen">
+            <UiButton :disabled="regenerating" @click="confirmRegen = true" data-testid="regen-token">
+              Regenerate token
+            </UiButton>
+          </template>
+          <template v-else>
+            <span class="text-xs text-dim">The old token stops working immediately.</span>
+            <UiButton variant="danger" :disabled="regenerating" @click="regenerateToken()">Confirm</UiButton>
+            <UiButton @click="confirmRegen = false">Cancel</UiButton>
+          </template>
+        </div>
+        <p v-if="pairingError" class="m-0 mt-2 text-xs text-danger-fg" role="alert">{{ pairingError }}</p>
+      </template>
+      <p v-if="setup.tailscaleStatus" class="m-0 mt-2 text-xs text-faint" data-testid="tailscale-line">
+        Tailscale: {{ setup.tailscaleStatus.ipv4 }}<template v-if="setup.tailscaleStatus.magic_dns"> ({{ setup.tailscaleStatus.magic_dns }})</template>
+      </p>
+      <p v-else class="m-0 mt-2 text-xs text-faint">Tailscale: not detected — remote access unavailable.</p>
     </div>
 
     <div v-if="lookup" class="mb-4 mt-2 rounded-md border border-line bg-raised p-3" data-testid="book-lookup">

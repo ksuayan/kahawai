@@ -79,6 +79,24 @@ export async function setServerUrl(url: string): Promise<void> {
   await cmd("set_server_url", { url });
 }
 
+/**
+ * The server credential (pairing or session token) from the OS keychain.
+ * `undefined` outside Tauri, `null` when no server is paired yet.
+ */
+export async function getServerToken(): Promise<string | null | undefined> {
+  return cmd<string | null>("get_server_token");
+}
+
+/** Persist the server credential in the OS keychain (P0 §1.3). */
+export async function setServerToken(token: string): Promise<void> {
+  await invoke("set_server_token", { token });
+}
+
+/** Forget the server credential (delete it from the keychain). */
+export async function clearServerToken(): Promise<void> {
+  await invoke("clear_server_token");
+}
+
 function plain(tracks: Track[]): Track[] {
   // Strip Vue reactivity proxies before crossing the bridge.
   return tracks.map((t) => ({ ...t }));

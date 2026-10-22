@@ -250,7 +250,14 @@ impl ArtworkCache {
 }
 
 /// Fetch one image from the server (`GET {base}/api/artwork/{hash}`).
-pub fn fetch_from_server(base_url: &str, hash: &str) -> Result<Vec<u8>, MusicError> {
+/// `token` is sent as `Authorization: Bearer` when set (P0 §1.3) — the
+/// `artwork://` protocol handler holds the shell's credential, since the
+/// content-addressed URL itself can't carry one.
+pub fn fetch_from_server(
+    base_url: &str,
+    hash: &str,
+    token: Option<&str>,
+) -> Result<Vec<u8>, MusicError> {
     if !is_valid_hash(hash) {
         return Err(MusicError::BadRequest(
             "artwork hash must be hexadecimal".into(),
@@ -261,7 +268,11 @@ pub fn fetch_from_server(base_url: &str, hash: &str) -> Result<Vec<u8>, MusicErr
         .timeout_global(Some(Duration::from_secs(15)))
         .build()
         .into();
-    let resp = agent.get(&url).call().map_err(|e| match e {
+    let mut req = agent.get(&url);
+    if let Some(t) = token {
+        req = req.header("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = req.call().map_err(|e| match e {
         ureq::Error::StatusCode(404) => MusicError::NotFound(format!("artwork {hash}")),
         other => MusicError::Http(other.to_string()),
     })?;
@@ -432,6 +443,6 @@ mod tests {
         assert!(c.get("../x").is_none());
         assert!(c.put("../x", JPEG).is_err());
         assert!(c.get_or_fetch("../x", || Ok(JPEG.to_vec())).is_err());
-        assert!(fetch_from_server("http://localhost:1", "../x").is_err());
+        assert!(fetch_from_server("http://localhost:1", "../x", None).is_err());
     }
 }

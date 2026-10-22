@@ -21,5 +21,15 @@ export const useOverlaysStore = defineStore("overlays", () => {
     info.value = subject;
   }
 
-  return { aboutOpen, openAbout, info, showInfo };
+  /** Server sign-in dialog (P0 §1.3 + Phase 3 §3.3). */
+  const authOpen = ref(false);
+  /** Why it opened: an expired session, a dead pairing token, or manual. */
+  const authReason = ref<"expired" | "token-changed" | "manual">("manual");
+
+  function openAuth(reason: "expired" | "token-changed" | "manual"): void {
+    authReason.value = reason;
+    authOpen.value = true;
+  }
+
+  return { aboutOpen, openAbout, info, showInfo, authOpen, authReason, openAuth };
 });

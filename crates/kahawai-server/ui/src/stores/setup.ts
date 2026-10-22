@@ -23,9 +23,10 @@ import {
   setupStartServer,
   setupStopOtherServer,
   setupStopServer,
+  setupTailscaleStatus,
   setupValidateDir,
 } from "../tauri";
-import type { AudiobookRoot, LiveScanStats, MusicDirEntry, ScanJob, ServerIdentity, ServerStatus } from "../types";
+import type { AudiobookRoot, LiveScanStats, MusicDirEntry, ScanJob, ServerIdentity, ServerStatus, TailscaleInfo } from "../types";
 import { dirStatus, isJobActive } from "../types";
 
 /** A `host:port` shape good enough to gate the Continue button; the backend
@@ -47,7 +48,12 @@ export const useSetupStore = defineStore("setup", () => {
   /** The wizard's audiobook folders: optional, and kept apart from the music. */
   const audiobookDirs = ref<MusicDirEntry[]>([]);
   const dbDir = ref("");
-  const bind = ref("0.0.0.0:8080");
+  const bind = ref("127.0.0.1:8080");
+  /** Listen scope (SEC-1 + Phase 2): the wizard's three-way selector.
+   *  Maps to `bind`/`tailscale_only` in `save()`. */
+  const listenScope = ref<"thisMac" | "localNetwork" | "tailscaleOnly">("thisMac");
+  /** Tailscale presence, loaded for the selector. `null` = not detected. */
+  const tailscaleStatus = ref<TailscaleInfo | null>(null);
 
   const saveError = ref<string | null>(null);
   const startError = ref<string | null>(null);
@@ -127,6 +133,7 @@ export const useSetupStore = defineStore("setup", () => {
       view.value = "wizard";
       step.value = 0;
     }
+    tailscaleStatus.value = await setupTailscaleStatus();
     loading.value = false;
   }
 
@@ -417,6 +424,14 @@ export const useSetupStore = defineStore("setup", () => {
   async function save(): Promise<boolean> {
     saveError.value = null;
     try {
+      // SEC-1: the scope selector — not a raw address — decides the
+      // listen behavior. Tailscale-only binds the detected tailnet IP at
+      // server startup (never 0.0.0.0); the port comes from the bind field.
+      const port = bind.value.trim().split(":").pop() || "8080";
+      const scope = listenScope.value;
+      const tailscaleOnly = scope === "tailscaleOnly";
+      const effectiveBind =
+        scope === "localNetwork" ? `0.0.0.0:${port}` : `127.0.0.1:${port}`;
       await setupSaveConfig({
         music_dirs: dirs.value
           .filter((d) => d.validation && dirStatus(d.validation) === "ok")
@@ -425,7 +440,8 @@ export const useSetupStore = defineStore("setup", () => {
           .filter((d) => !d.validation || d.validation.is_dir)
           .map((d) => d.path),
         db_dir: dbDir.value,
-        bind: bind.value.trim(),
+        bind: effectiveBind,
+        tailscale_only: tailscaleOnly,
       });
       return true;
     } catch (err) {
@@ -487,6 +503,8 @@ export const useSetupStore = defineStore("setup", () => {
     audiobookError,
     dbDir,
     bind,
+    listenScope,
+    tailscaleStatus,
     saveError,
     startError,
     serverStatus,

@@ -147,13 +147,38 @@ describe("setup store: save", () => {
     const setup = useSetupStore();
     setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
     setup.dbDir = "/data";
-    setup.bind = "0.0.0.0:8080";
+    // Default scope: this Mac only.
     const ok = await setup.save();
     expect(ok).toBe(true);
     expect(setup.saveError).toBeNull();
     expect(tauri.callsTo("setup_save_config")).toEqual([
-      { input: { music_dirs: ["/music/a"], audiobook_dirs: [], db_dir: "/data", bind: "0.0.0.0:8080" } },
+      {
+        input: {
+          music_dirs: ["/music/a"],
+          audiobook_dirs: [],
+          db_dir: "/data",
+          bind: "127.0.0.1:8080",
+          tailscale_only: false,
+        },
+      },
     ]);
+  });
+
+  it("maps the listen scope to bind/tailscale_only (SEC-1 + Phase 2)", async () => {
+    tauri.on("setup_save_config", undefined);
+    const setup = useSetupStore();
+    setup.dirs = [{ path: "/music/a", validating: false, validation: okValidation }];
+    setup.dbDir = "/data";
+
+    setup.listenScope = "localNetwork";
+    await setup.save();
+    setup.listenScope = "tailscaleOnly";
+    await setup.save();
+
+    const calls = tauri.callsTo("setup_save_config") as { input: { bind: string; tailscale_only: boolean } }[];
+    expect(calls[0].input.bind).toBe("0.0.0.0:8080");
+    expect(calls[0].input.tailscale_only).toBe(false);
+    expect(calls[1].input.tailscale_only).toBe(true);
   });
 
   it("surfaces the backend's error string on failure", async () => {

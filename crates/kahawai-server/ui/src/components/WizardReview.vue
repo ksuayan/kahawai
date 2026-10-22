@@ -1,11 +1,24 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import UiHint from "../ui/UiHint.vue";
-import UiInput from "../ui/UiInput.vue";
+import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import { useSetupStore } from "../stores/setup";
 
 const setup = useSetupStore();
 const advancedOpen = ref(false);
+
+// SEC-1 + Phase 2: who may reach the server, not a raw address.
+const scopeOptions: UiSelectOption[] = [
+  { value: "thisMac", label: "This Mac only" },
+  { value: "localNetwork", label: "Local network" },
+  { value: "tailscaleOnly", label: "Tailscale only" },
+];
+const scopeValue = computed({
+  get: () => setup.listenScope,
+  set: (v: string | null) => {
+    setup.listenScope = v === "tailscaleOnly" ? "tailscaleOnly" : v === "localNetwork" ? "localNetwork" : "thisMac";
+  },
+});
 </script>
 
 <template>
@@ -40,9 +53,22 @@ const advancedOpen = ref(false);
       {{ advancedOpen ? "Hide" : "Show" }} advanced options
     </button>
     <div v-if="advancedOpen" class="mb-2">
-      <label class="micro-label mb-1 block text-faint" for="bind-address">Bind address</label>
-      <UiInput id="bind-address" v-model="setup.bind" placeholder="0.0.0.0:8080" />
-      <UiHint v-if="!setup.bindLooksValid" tone="warn">Enter a host:port address, e.g. 0.0.0.0:8080.</UiHint>
+      <label class="micro-label mb-1 block text-faint" for="listen-scope">Who can reach this server</label>
+      <UiSelect id="listen-scope" v-model="scopeValue" :options="scopeOptions" />
+      <UiHint v-if="setup.listenScope === 'localNetwork'" tone="warn" data-testid="trusted-network-warning">
+        This exposes the server to every device on your network — only do this on a
+        network you fully trust (your home LAN, not a coffee shop or office guest Wi-Fi).
+        API access still requires the pairing token.
+      </UiHint>
+      <UiHint v-if="setup.listenScope === 'tailscaleOnly' && setup.tailscaleStatus" tone="dim">
+        Binds {{ setup.tailscaleStatus.ipv4
+        }}<template v-if="setup.tailscaleStatus.magic_dns"> ({{ setup.tailscaleStatus.magic_dns }})</template>
+        — reachable from your tailnet only.
+      </UiHint>
+      <UiHint v-if="setup.listenScope === 'tailscaleOnly' && !setup.tailscaleStatus" tone="warn">
+        Tailscale isn't running on this Mac — the server will refuse to start
+        until it is. Start Tailscale and reopen this step.
+      </UiHint>
     </div>
 
     <UiHint v-if="setup.saveError" tone="warn">{{ setup.saveError }}</UiHint>

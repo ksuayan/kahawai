@@ -90,6 +90,14 @@ export interface SetupInput {
   audiobook_dirs?: string[];
   db_dir: string;
   bind: string;
+  /** "Tailscale only" listen scope (Phase 2): bind the detected tailnet IP. */
+  tailscale_only?: boolean;
+}
+
+/** `crate::tailscale::TailscaleInfo` (Phase 2). */
+export interface TailscaleInfo {
+  ipv4: string;
+  magic_dns: string | null;
 }
 
 /** `GET /api/identity` (mirrors kahawai_core::ServerIdentity). */

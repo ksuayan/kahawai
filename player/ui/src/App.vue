@@ -28,6 +28,7 @@ import { useJobsStore } from "./stores/jobs";
 import { useLibraryStore } from "./stores/library";
 import { useNavStore } from "./stores/nav";
 import AboutDialog from "./components/AboutDialog.vue";
+import AuthDialog from "./components/AuthDialog.vue";
 import InfoDialog from "./components/InfoDialog.vue";
 import { useAbxStore } from "./stores/abx";
 import { useAnalogStore } from "./stores/analog";
@@ -45,7 +46,7 @@ import { useSettingsStore } from "./stores/settings";
 import { useServerHealthStore } from "./stores/serverHealth";
 import { handleShortcut } from "./shortcuts";
 import { appReady, onMenuAction } from "./tauri";
-import { onCatalogUpdated, onServerConnected } from "./api";
+import { onCatalogUpdated, onServerConnected, onUnauthorized } from "./api";
 import { viewBoxClass } from "./lib/scrollers";
 
 const nav = useNavStore();
@@ -99,6 +100,13 @@ const stopCatalogEvents = onCatalogUpdated(() => {
 // reconnect doesn't refetch the whole catalog. "Failed" includes showing the
 // cached library because the server was offline: that isn't an error, but
 // it needs the sync (and the offline banner cleared) all the same.
+// P0 §1.3 / Phase 3 §3.3: any 401 outside the sign-in form means the
+// stored credential is dead — forget it and prompt to sign in again.
+const stopUnauthorized = onUnauthorized(() => {
+  const reason = settings.tokenKind === "session" ? "expired" : "token-changed";
+  void settings.forgetCredential();
+  overlays.openAuth(reason);
+});
 const stopReloadOnConnect = onServerConnected(() => {
   if (lib.error || lib.serverOnline === false) void lib.loadAll();
   if (playlists.error) void playlists.reload();
@@ -109,6 +117,7 @@ onUnmounted(() => {
   stopMenu?.();
   stopCatalogEvents();
   stopReloadOnConnect();
+  stopUnauthorized();
   stopServerHealth();
   player.dispose();
   window.removeEventListener("keydown", onKeydown);
@@ -229,6 +238,7 @@ function switchAnalog(which: "a" | "b" | "toggle"): void {
       <NowPlayingBar v-if="!isPhone" />
       <ToastHost />
       <AboutDialog />
+      <AuthDialog />
       <InfoDialog />
     </template>
   </div>

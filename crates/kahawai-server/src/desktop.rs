@@ -98,6 +98,10 @@ pub struct SetupInput {
     audiobook_dirs: Vec<String>,
     db_dir: String,
     bind: String,
+    /// "Tailscale only" listen scope (SEC-1 + Phase 2): bind the detected
+    /// tailnet IPv4. Defaults to false; older frontends omit the field.
+    #[serde(default)]
+    tailscale_only: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -290,6 +294,7 @@ pub fn setup_save_config(input: SetupInput) -> Result<(), String> {
             .map(PathBuf::from)
             .collect(),
         bind: bind.to_string(),
+        tailscale_only: input.tailscale_only,
         db_path: db_dir.join("music.db"),
         // `ServerConfig::default()` leaves this off (a sane default for a
         // headless install someone hand-configures), but the wizard's whole
@@ -1061,6 +1066,73 @@ pub fn setup_server_status(state: tauri::State<'_, DesktopState>) -> ServerStatu
         error,
         occupant,
     }
+}
+
+/// Tailscale presence for the listen-scope selector (Phase 2 §2.2):
+/// the detected tailnet IPv4 + MagicDNS name, or `None` when Tailscale is
+/// not detected on this Mac.
+#[tauri::command]
+pub fn setup_tailscale_status() -> Option<crate::tailscale::TailscaleInfo> {
+    crate::tailscale::detect()
+}
+
+/// Whether any user accounts exist (Phase 3 §3.1). Drives the Status tab's
+/// pairing-token section: once admins exist the single token is retired.
+#[tauri::command]
+pub async fn setup_users_exist(state: tauri::State<'_, DesktopState>) -> Result<bool, String> {
+    let app_state = live_state(&state)?;
+    Ok(crate::users::users_exist(&app_state.pool)
+        .await
+        .unwrap_or(false))
+}
+
+/// The current pairing token for the Status tab's "Pairing" section
+/// (spec §1.3). `None` once user accounts exist (token retired), or when
+/// no server is running.
+#[tauri::command]
+pub async fn setup_get_pairing_token(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Option<String>, String> {
+    let app_state = live_state(&state)?;
+    if crate::users::users_exist(&app_state.pool)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    app_state
+        .token_store
+        .get()
+        .map(Some)
+        .map_err(|e| format!("could not read the pairing token: {e}"))
+}
+
+/// "Regenerate token" (spec §1.3): mint a fresh pairing token, persist it,
+/// and point the middleware at its hash. Pairing mode only — errors once
+/// user accounts exist.
+#[tauri::command]
+pub async fn setup_regenerate_token(
+    state: tauri::State<'_, DesktopState>,
+) -> Result<String, String> {
+    let app_state = live_state(&state)?;
+    if crate::users::users_exist(&app_state.pool)
+        .await
+        .unwrap_or(false)
+    {
+        return Err("the pairing token is retired: user accounts exist".to_string());
+    }
+    let token = crate::auth::generate_token();
+    app_state
+        .token_store
+        .set(&token)
+        .map_err(|e| format!("could not store the new token: {e}"))?;
+    app_state.auth.rotate_pairing_token(&token);
+    // The web UI's show-once flag resets so the new token is displayed
+    // once there as well (spec §1.3).
+    app_state
+        .token_shown
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    Ok(token)
 }
 
 #[tauri::command]

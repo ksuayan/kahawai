@@ -19,7 +19,8 @@ pub enum DsdStory {
 }
 
 fn default_bind() -> String {
-    "0.0.0.0:8080".to_string()
+    // P0 Phase 1 (SEC-1): a fresh install exposes nothing to the network.
+    "127.0.0.1:8080".to_string()
 }
 
 fn default_db_path() -> PathBuf {
@@ -36,7 +37,11 @@ fn default_podcast_refresh_hours() -> u32 {
     6
 }
 
-/// v1 server configuration. v1 is LAN-only: no auth, no TLS (spec §3.6, §8).
+/// Server configuration.
+///
+/// P0 Phase 1 changed the posture: bearer-token auth on `/api/*`
+/// (spec §1.3), loopback-only default bind (SEC-1). TLS on the LAN is
+/// still deferred (spec §6).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// Directories the scanner walks. Empty = scanning disabled.
@@ -44,6 +49,13 @@ pub struct ServerConfig {
     pub music_dirs: Vec<PathBuf>,
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// "Tailscale only" listen scope (P0 Phase 2, spec §2.2): bind the
+    /// detected tailnet IP instead of `bind`. When true and no tailnet
+    /// address is detected, the server refuses to start rather than
+    /// falling back to `0.0.0.0`. Written by the desktop UI's
+    /// listen-scope selector; hand-edited configs leave it false.
+    #[serde(default)]
+    pub tailscale_only: bool,
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
     /// Audiobook folders, kept apart from the music. They are added to the
@@ -105,6 +117,37 @@ fn default_min_confidence() -> f32 {
 }
 
 impl ServerConfig {
+    /// The address to listen on.
+    ///
+    /// `tailscale_only` (the desktop UI's "Tailscale only" scope)
+    /// resolves the tailnet IP at startup; without a detected address
+    /// this fails loudly instead of silently binding `0.0.0.0`
+    /// (spec §2.2). Otherwise `bind` is honored verbatim — including
+    /// an explicit `0.0.0.0` from an existing config, which keeps
+    /// working (SEC-1 migration).
+    pub fn listen_addr(
+        &self,
+        tailnet_ip: Option<std::net::IpAddr>,
+    ) -> Result<std::net::SocketAddr, String> {
+        let port: u16 = self
+            .bind
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(8080);
+        if self.tailscale_only {
+            let ip = tailnet_ip.ok_or_else(|| {
+                "listen scope is \"Tailscale only\" but no Tailscale address was \
+                 detected — start Tailscale and try again (not falling back to 0.0.0.0)"
+                    .to_string()
+            })?;
+            return Ok(std::net::SocketAddr::new(ip, port));
+        }
+        self.bind
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| format!("invalid bind address {:?}: {e}", self.bind))
+    }
+
     /// Load from a TOML file. Missing file / parse error → caller decides
     /// (the server falls back to [`ServerConfig::default`] with a warning).
     pub fn load(path: impl AsRef<Path>) -> Result<Self, MusicError> {
@@ -185,6 +228,7 @@ impl Default for ServerConfig {
             podcast_dir: None,
             podcast_refresh_hours: default_podcast_refresh_hours(),
             bind: default_bind(),
+            tailscale_only: false,
             db_path: default_db_path(),
             preferred_ladder: default_ladder(),
             dsd_story: DsdStory::default(),
@@ -201,6 +245,52 @@ impl Default for ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_bind_is_loopback() {
+        assert_eq!(default_bind(), "127.0.0.1:8080");
+        assert!(!ServerConfig::default().tailscale_only);
+    }
+
+    #[test]
+    fn listen_addr_honors_bind_verbatim() {
+        let cfg = ServerConfig {
+            bind: "0.0.0.0:9000".to_string(),
+            ..ServerConfig::default()
+        };
+        // An existing 0.0.0.0 config keeps working (SEC-1 migration).
+        assert_eq!(
+            cfg.listen_addr(None).unwrap(),
+            "0.0.0.0:9000".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn tailscale_only_refuses_without_tailnet_ip() {
+        let cfg = ServerConfig {
+            tailscale_only: true,
+            ..ServerConfig::default()
+        };
+        // Fails loudly — never silently falls back to 0.0.0.0 (spec §2.2).
+        let err = cfg.listen_addr(None).unwrap_err();
+        assert!(err.contains("Tailscale"), "{err}");
+        // …and it names the refusal, not a fallback address to bind.
+        assert!(err.contains("not falling back"), "{err}");
+    }
+
+    #[test]
+    fn tailscale_only_binds_the_tailnet_ip() {
+        let cfg = ServerConfig {
+            bind: "127.0.0.1:8080".to_string(),
+            tailscale_only: true,
+            ..ServerConfig::default()
+        };
+        let ip: std::net::IpAddr = "100.96.12.34".parse().unwrap();
+        assert_eq!(
+            cfg.listen_addr(Some(ip)).unwrap(),
+            "100.96.12.34:8080".parse().unwrap()
+        );
+    }
 
     #[test]
     fn toml_round_trip_with_all_fields() {
@@ -249,7 +339,7 @@ mod tests {
     fn empty_toml_yields_sane_defaults() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
         assert!(cfg.music_dirs.is_empty());
-        assert_eq!(cfg.bind, "0.0.0.0:8080");
+        assert_eq!(cfg.bind, "127.0.0.1:8080");
         assert_eq!(cfg.db_path, PathBuf::from("data/music.db"));
         assert_eq!(
             cfg.preferred_ladder,

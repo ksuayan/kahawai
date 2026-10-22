@@ -3,6 +3,7 @@ import { EQ_LIMITS } from "../eqResponse";
 import { makeAlbum, makeState, makeTrack, mockFetch } from "../test/fixtures";
 import { $$, mountApp, openSelect, options, pick, settle, typeInto } from "../test/helpers";
 import { tauri } from "../test/tauri-mock";
+import { setBaseUrl } from "../api";
 import { useAnalogStore } from "../stores/analog";
 import { useDspStore } from "../stores/dsp";
 import { useJobsStore } from "../stores/jobs";
@@ -371,7 +372,21 @@ describe("Settings: server URL", () => {
     const w = await mountSettings();
     await button(w, "Save").trigger("click");
     await settle();
-    expect(w.get('[data-testid="connection-status"]').text()).toContain("Server unreachable");
+    // Phase 2 §2.4: the offline state names the likely cause.
+    expect(w.get('[data-testid="connection-status"]').text()).toContain("Nothing answers at that address");
+  });
+
+  it("names Tailscale when a MagicDNS name doesn't resolve", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("offline");
+    });
+    const w = await mountSettings();
+    await w.get('input[aria-label="Server URL"]').setValue("http://kahawai-mac.tail12345.ts.net:8080");
+    await button(w, "Save").trigger("click");
+    await settle();
+    expect(w.get('[data-testid="connection-status"]').text()).toContain("Tailscale");
+    // api.ts's baseUrl is module-level: restore it so later tests start clean.
+    setBaseUrl("http://localhost:8080");
   });
 
   it("names the Kahawai server it reaches: version and build", async () => {
@@ -431,7 +446,7 @@ describe("Settings: server URL", () => {
 
   it("checks the connection on demand", async () => {
     const w = await mountSettings(); // fetch is offline in tests, so the on-open check fails
-    expect(w.get('[data-testid="connection-status"]').text()).toContain("Server unreachable");
+    expect(w.get('[data-testid="connection-status"]').text()).toContain("Nothing answers at that address");
     mockFetch({ "/api/health": { status: "ok" } });
     await w.get('button[aria-label="Check connection"]').trigger("click");
     await settle();

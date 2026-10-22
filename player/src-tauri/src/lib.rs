@@ -32,6 +32,16 @@ use kahawai_core::{Album, Artist, Genre};
 use kahawai_player_core::catalog::{CatalogCache, SyncReport};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// OS keychain identity for the server credential (P0 §1.3): the
+/// pairing token, then the session token, is stored here — never in
+/// settings files, the catalog DB, or logs.
+const KEYCHAIN_SERVICE: &str = "com.suayan.kahawai-player";
+const KEYCHAIN_ACCOUNT: &str = "server-token";
+
+fn keychain_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| format!("keychain: {e}"))
+}
+
 /// Shared shell state. The engine is `Arc` so the event-forwarding thread
 /// can drain events while commands borrow it.
 struct AppState {
@@ -40,6 +50,10 @@ struct AppState {
     settings_path: PathBuf,
     /// Where the Verbose logging toggle (`logging::LoggingConfig`) lives.
     logging_path: PathBuf,
+    /// The server credential (pairing or session token), mirrored from the
+    /// OS keychain. Shared with `ArtworkState` so the `artwork://` protocol
+    /// handler sends it too.
+    server_token: Arc<Mutex<Option<String>>>,
 }
 
 /// Album-art disk cache + the engine (for the live server URL). Served to
@@ -49,6 +63,8 @@ struct ArtworkState {
     engine: Arc<EngineController>,
     /// Where the chosen cap (`ArtworkCacheConfig`) is persisted.
     config_path: PathBuf,
+    /// Shared with `AppState` (see above).
+    server_token: Arc<Mutex<Option<String>>>,
 }
 
 /// Default upper bound for the on-disk cover cache (least recently used go
@@ -350,9 +366,10 @@ fn serve_artwork(
             return responder.respond(reply(503, Vec::new(), "text/plain", "no-store"));
         };
         let server = st.engine.server_url();
+        let token = st.server_token.lock().unwrap().clone();
         match st
             .cache
-            .get_or_fetch(&hash, || fetch_artwork(&server, &hash))
+            .get_or_fetch(&hash, || fetch_artwork(&server, &hash, token.as_deref()))
         {
             // Content-addressed: the webview may keep it forever too.
             Ok(art) => responder.respond(reply(
@@ -676,7 +693,56 @@ fn set_server_url(app: AppHandle, state: State<'_, AppState>, url: String) -> Re
         .lock()
         .map_err(|_| "api lock poisoned".to_string())? = ApiClient::new(url.clone());
     state.engine.set_server_url(&url);
+    // Re-apply the stored credential to the rebuilt client.
+    if let Some(t) = state.server_token.lock().unwrap().clone() {
+        if let Ok(mut api) = state.api.lock() {
+            api.set_token(t);
+        }
+    }
     emit_state(&app, &state.engine);
+    Ok(())
+}
+
+/// The server credential from the OS keychain (P0 §1.3). `None` when no
+/// server has been paired yet.
+#[tauri::command]
+fn get_server_token(state: State<'_, AppState>) -> Option<String> {
+    state.server_token.lock().unwrap().clone()
+}
+
+/// Pair with a server: persist the pairing/session token in the OS
+/// keychain and use it for every server request from now on.
+#[tauri::command]
+fn set_server_token(state: State<'_, AppState>, token: String) -> Result<(), String> {
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err("token must not be empty".to_string());
+    }
+    keychain_entry()?.set_password(&token).map_err(|e| format!("keychain: {e}"))?;
+    *state.server_token.lock().map_err(|_| "token lock poisoned".to_string())? = Some(token.clone());
+    state
+        .api
+        .lock()
+        .map_err(|_| "api lock poisoned".to_string())?
+        .set_token(token);
+    Ok(())
+}
+
+/// Forget the server credential: delete it from the keychain and stop
+/// sending it. (Logout also revokes the session server-side; the UI calls
+/// that first.)
+#[tauri::command]
+fn clear_server_token(state: State<'_, AppState>) -> Result<(), String> {
+    match keychain_entry()?.delete_password() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {}
+        Err(e) => return Err(format!("keychain: {e}")),
+    }
+    *state.server_token.lock().map_err(|_| "token lock poisoned".to_string())? = None;
+    state
+        .api
+        .lock()
+        .map_err(|_| "api lock poisoned".to_string())?
+        .clear_token();
     Ok(())
 }
 
@@ -1326,7 +1392,21 @@ pub fn run() {
             let sink = SinkRouter::new(Box::new(CpalSink::new()), Some(exclusive_dop_sink()));
             let engine = Arc::new(EngineController::new(Box::new(sink), settings_path.clone()));
             let server_url = engine.server_url();
-            let api = Mutex::new(ApiClient::new(server_url));
+            // P0 §1.3: the server credential lives in the OS keychain.
+            // A missing entry (or an unreachable Secret Service) just means
+            // "not paired yet" — the UI handles that state.
+            let server_token: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(
+                keychain_entry()
+                    .and_then(|e| e.get_password().map_err(|e| format!("keychain: {e}")))
+                    .ok(),
+            ));
+            let api = {
+                let mut client = ApiClient::new(server_url);
+                if let Some(t) = server_token.lock().unwrap().clone() {
+                    client.set_token(t);
+                }
+                Mutex::new(client)
+            };
 
             // Album-art cache: the OS cache dir (safe for the OS to purge).
             // The cap itself is a shell-only setting, kept in its own small
@@ -1366,6 +1446,7 @@ pub fn run() {
                 cache,
                 engine: engine.clone(),
                 config_path: artwork_config_path,
+                server_token: server_token.clone(),
             });
 
             let handle = app.handle();
@@ -1375,6 +1456,7 @@ pub fn run() {
                 api,
                 settings_path,
                 logging_path,
+                server_token,
             });
 
             // Forward engine state events to the UI. The engine already
@@ -1424,6 +1506,9 @@ pub fn run() {
             clear_artwork_cache,
             set_artwork_cache_max_bytes,
             set_server_url,
+            get_server_token,
+            set_server_token,
+            clear_server_token,
             play_track,
             queue_play,
             queue_play_at,

@@ -24,11 +24,51 @@ pub struct StreamUrlOptions {
     pub next: Option<i64>,
 }
 
+/// Error from [`Client::login`]: distinguishes bad credentials (and
+/// throttling) from transport failures so the UI can say the right thing.
+#[derive(Debug)]
+pub enum LoginError {
+    /// 401: wrong username/password (or wrong/retired pairing token).
+    Unauthorized,
+    /// 429: too many attempts; retry after the given seconds.
+    Throttled(u64),
+    /// Anything else (network, server error, bad response shape).
+    Other(MusicError),
+}
+
+impl std::fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoginError::Unauthorized => write!(f, "invalid credentials"),
+            LoginError::Throttled(secs) => {
+                write!(f, "too many login attempts — try again in {secs}s")
+            }
+            LoginError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for LoginError {}
+
+/// True when `err` is a `MusicError::Http` produced by this client for a
+/// 401 response — i.e. the stored credential is wrong, expired, or retired
+/// ("session expired — log in again" / "server token changed").
+pub fn is_unauthorized(err: &MusicError) -> bool {
+    matches!(err, MusicError::Http(m) if m.starts_with("server returned 401"))
+}
+
 /// Async client for one server base URL, e.g. `http://localhost:8080`.
+///
+/// Carries one credential: either the Phase 1 pairing token or (once user
+/// accounts exist) a Phase 3 session token. The credential is sent as
+/// `Authorization: Bearer` on every JSON request, and as `?access_token=`
+/// on the URL-only surfaces (`<audio>`/`<img>` tags can't set headers —
+/// see [`Client::stream_url`] / [`Client::artwork_url`]).
 #[derive(Debug, Clone)]
 pub struct Client {
     base: String,
     http: reqwest::Client,
+    token: Option<String>,
 }
 
 impl Client {
@@ -36,7 +76,18 @@ impl Client {
         Self {
             base: base_url.into().trim_end_matches('/').to_string(),
             http: reqwest::Client::new(),
+            token: None,
         }
+    }
+
+    /// Attach the credential (pairing token or session token).
+    pub fn set_token(&mut self, token: impl Into<String>) {
+        self.token = Some(token.into());
+    }
+
+    /// Forget the credential (logout).
+    pub fn clear_token(&mut self) {
+        self.token = None;
     }
 
     pub fn base_url(&self) -> &str {
@@ -47,14 +98,115 @@ impl Client {
         format!("{}{}", self.base, path)
     }
 
+    /// Add `Authorization: Bearer` when a credential is set.
+    fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.token {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
+    }
+
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, MusicError> {
         let resp = self
-            .http
-            .get(self.url(path))
+            .authed(self.http.get(self.url(path)))
             .send()
             .await
             .map_err(reqwest_err)?;
         json_or_error(resp).await
+    }
+
+    /// The `?access_token=` suffix for URL-only surfaces, or "" when no
+    /// credential is set. Percent-encoding the token keeps it one query
+    /// value even though generated tokens are already URL-safe.
+    fn token_param(&self, first: bool) -> String {
+        match &self.token {
+            Some(t) => format!(
+                "{}access_token={}",
+                if first { '?' } else { '&' },
+                urlencode(t)
+            ),
+            None => String::new(),
+        }
+    }
+
+    // -- auth (P0 §1.3, Phase 3 §3.2–§3.3) -----------------------------------
+
+    /// `POST /api/login` → session token. Returns the token; the caller
+    /// stores it (OS keychain) and hands it to [`Client::set_token`].
+    pub async fn login(&self, username: &str, password: &str) -> Result<String, LoginError> {
+        let body = serde_json::json!({ "username": username, "password": password });
+        let resp = self
+            .http
+            .post(self.url("/api/login"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LoginError::Other(reqwest_err(e)))?;
+        match resp.status() {
+            s if s.is_success() => {
+                let v: serde_json::Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| LoginError::Other(reqwest_err(e)))?;
+                v.get("token")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.to_string())
+                    .ok_or_else(|| {
+                        LoginError::Other(MusicError::Http("login: missing token".to_string()))
+                    })
+            }
+            s if s == reqwest::StatusCode::UNAUTHORIZED => Err(LoginError::Unauthorized),
+            s if s == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                let retry = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(60);
+                Err(LoginError::Throttled(retry))
+            }
+            _ => Err(LoginError::Other(http_status_error(resp).await)),
+        }
+    }
+
+    /// `POST /api/logout`: deletes the presenting session server-side.
+    pub async fn logout(&self) -> Result<(), MusicError> {
+        let resp = self
+            .authed(self.http.post(self.url("/api/logout")))
+            .send()
+            .await
+            .map_err(reqwest_err)?;
+        ok_or_error(resp).await
+    }
+
+    /// `GET /api/setup/status`: does the server still need its first admin?
+    pub async fn setup_needed(&self) -> Result<bool, MusicError> {
+        let v: serde_json::Value = self.get("/api/setup/status").await?;
+        Ok(v.get("setup_needed")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false))
+    }
+
+    /// `POST /api/setup`: create the first admin with the pairing token.
+    pub async fn create_first_admin(
+        &self,
+        username: &str,
+        password: &str,
+        pairing_token: &str,
+    ) -> Result<(), MusicError> {
+        let body = serde_json::json!({
+            "username": username,
+            "password": password,
+            "pairing_token": pairing_token,
+        });
+        let resp = self
+            .http
+            .post(self.url("/api/setup"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(reqwest_err)?;
+        ok_or_error(resp).await
     }
 
     // -- health --------------------------------------------------------
@@ -80,8 +232,7 @@ impl Client {
 
     pub async fn albums(&self, page: u64, per_page: u64) -> Result<Page<Album>, MusicError> {
         let resp = self
-            .http
-            .get(self.url("/api/albums"))
+            .authed(self.http.get(self.url("/api/albums")))
             .query(&[("page", page), ("per_page", per_page)])
             .send()
             .await
@@ -107,8 +258,7 @@ impl Client {
 
     pub async fn search(&self, q: &str) -> Result<Vec<Track>, MusicError> {
         let resp = self
-            .http
-            .get(self.url("/api/search"))
+            .authed(self.http.get(self.url("/api/search")))
             .query(&[("q", q)])
             .send()
             .await
@@ -181,8 +331,7 @@ impl Client {
 
     pub async fn create_playlist(&self, body: &NewPlaylist) -> Result<Playlist, MusicError> {
         let resp = self
-            .http
-            .post(self.url("/api/playlists"))
+            .authed(self.http.post(self.url("/api/playlists")))
             .json(body)
             .send()
             .await
@@ -192,8 +341,7 @@ impl Client {
 
     pub async fn delete_playlist(&self, id: i64) -> Result<(), MusicError> {
         let resp = self
-            .http
-            .delete(self.url(&format!("/api/playlists/{id}")))
+            .authed(self.http.delete(self.url(&format!("/api/playlists/{id}"))))
             .send()
             .await
             .map_err(reqwest_err)?;
@@ -206,8 +354,10 @@ impl Client {
         body: &SetPlaylistTracks,
     ) -> Result<Playlist, MusicError> {
         let resp = self
-            .http
-            .put(self.url(&format!("/api/playlists/{id}/tracks")))
+            .authed(
+                self.http
+                    .put(self.url(&format!("/api/playlists/{id}/tracks"))),
+            )
             .json(body)
             .send()
             .await
@@ -223,8 +373,7 @@ impl Client {
     ) -> Result<serde_json::Value, MusicError> {
         let body = serde_json::json!({ "name": name, "path": path });
         let resp = self
-            .http
-            .post(self.url("/api/playlists/import"))
+            .authed(self.http.post(self.url("/api/playlists/import")))
             .json(&body)
             .send()
             .await
@@ -234,9 +383,15 @@ impl Client {
 
     // -- artwork -----------------------------------------------------------
 
-    /// Direct URL for an `<img>` tag; no request is made.
+    /// Direct URL for an `<img>` tag; no request is made. Carries
+    /// `?access_token=` when a credential is set — `<img>` tags can't
+    /// send an `Authorization` header (spec §1.3).
     pub fn artwork_url(&self, hash: &str) -> String {
-        self.url(&format!("/api/artwork/{hash}"))
+        format!(
+            "{}{}",
+            self.url(&format!("/api/artwork/{hash}")),
+            self.token_param(true)
+        )
     }
 
     // -- jobs & scan (S9) ----------------------------------------------------
@@ -252,8 +407,7 @@ impl Client {
     /// `POST /api/scan` → 202 with the job payload.
     pub async fn trigger_scan(&self) -> Result<serde_json::Value, MusicError> {
         let resp = self
-            .http
-            .post(self.url("/api/scan"))
+            .authed(self.http.post(self.url("/api/scan")))
             .send()
             .await
             .map_err(reqwest_err)?;
@@ -285,12 +439,37 @@ impl Client {
         if let Some(n) = opts.next {
             push("next", n.to_string());
         }
+        // URL-only surface (`<audio>` tags can't set headers): the token
+        // rides as a query param (spec §1.3 documents the tradeoff).
+        if self.token.is_some() {
+            push("access_token", urlencode(self.token.as_deref().unwrap()));
+        }
         url
     }
 }
 
 fn reqwest_err(e: reqwest::Error) -> MusicError {
     MusicError::Http(e.to_string())
+}
+
+async fn http_status_error(resp: reqwest::Response) -> MusicError {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    MusicError::Http(format!("server returned {status}: {body}"))
+}
+
+/// Minimal percent-encoding for query values. Generated tokens are
+/// base64url (already safe), so this is belt-and-braces.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 async fn json_or_error<T: serde::de::DeserializeOwned>(
@@ -316,5 +495,64 @@ async fn ok_or_error(resp: reqwest::Response) -> Result<(), MusicError> {
         Err(MusicError::Http(format!(
             "server returned {status}: {body}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_url_carries_token_param() {
+        let mut c = Client::new("http://localhost:8080");
+        let plain = c.stream_url(7, &StreamUrlOptions::default());
+        assert_eq!(plain, "http://localhost:8080/stream/7");
+        c.set_token("tok123");
+        let authed = c.stream_url(7, &StreamUrlOptions::default());
+        assert_eq!(authed, "http://localhost:8080/stream/7?access_token=tok123");
+        // Combines with existing params via &.
+        let opts = StreamUrlOptions {
+            seek_ms: Some(5000),
+            ..Default::default()
+        };
+        let with_seek = c.stream_url(7, &opts);
+        assert!(with_seek.contains("seek_ms=5000&access_token=tok123"));
+        c.clear_token();
+        assert_eq!(
+            c.stream_url(7, &StreamUrlOptions::default()),
+            "http://localhost:8080/stream/7"
+        );
+    }
+
+    #[test]
+    fn artwork_url_carries_token_param() {
+        let mut c = Client::new("http://localhost:8080/");
+        assert_eq!(
+            c.artwork_url("abc"),
+            "http://localhost:8080/api/artwork/abc"
+        );
+        c.set_token("tok123");
+        assert_eq!(
+            c.artwork_url("abc"),
+            "http://localhost:8080/api/artwork/abc?access_token=tok123"
+        );
+    }
+
+    #[test]
+    fn unauthorized_detection() {
+        let e = MusicError::Http(
+            "server returned 401 Unauthorized: {\"error\":\"unauthorized\"}".to_string(),
+        );
+        assert!(is_unauthorized(&e));
+        assert!(!is_unauthorized(&MusicError::Http(
+            "server returned 200 OK".to_string()
+        )));
+        assert!(!is_unauthorized(&MusicError::NotFound("x".to_string())));
+    }
+
+    #[test]
+    fn login_error_display() {
+        assert_eq!(LoginError::Unauthorized.to_string(), "invalid credentials");
+        assert!(LoginError::Throttled(30).to_string().contains("30s"));
     }
 }

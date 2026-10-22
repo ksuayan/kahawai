@@ -29,6 +29,9 @@ kahawai-player-core = { path = "../../crates/kahawai-player-core" }
 kahawai-player-api = { path = "../../crates/kahawai-player-api" }
 kahawai-player-audio = { path = "../../crates/kahawai-player-audio" }
 fs4 = "1.1.0"
+# Server credential storage (P0 §1.3): the pairing/session token lives in
+# the OS keychain, never in settings files or logs.
+keyring = "3"
 # Logging: the engine (kahawai-player-core) logs through `tracing`; the
 # subscriber writes it out, and logfile.rs points output at a log file when
 # the app is opened from Finder (dup2).

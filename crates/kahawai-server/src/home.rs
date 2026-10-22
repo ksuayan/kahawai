@@ -183,6 +183,92 @@ async fn albums(
     .collect())
 }
 
+/// Security section: pairing token (show-once), first-admin setup form,
+/// Tailscale status, and the SEC-1 migration banner (P0 Phase 1–3).
+async fn security_section(s: &AppState) -> String {
+    let mut out = String::new();
+    out.push_str("<section class=\"security\"><h2>Server access</h2>\n");
+
+    // SEC-1 migration: an existing config already on 0.0.0.0 keeps
+    // working, and the UI says so once per run.
+    if s.bind_migration_warning {
+        out.push_str(
+            "<p class=\"warn\">This server is listening on every network interface \
+             (<code>0.0.0.0</code>) — a setting from before bearer-token auth existed. \
+             API access now needs the token below, but consider switching to \
+             \"This Mac only\" or \"Tailscale only\" in the server app's settings.</p>\n",
+        );
+    }
+
+    let users_exist = crate::users::users_exist(&s.pool).await.unwrap_or(false);
+    if users_exist {
+        out.push_str(
+            "<p>User accounts are active on this server — sign in with your \
+             username and password. The original pairing token is retired.</p>\n",
+        );
+    } else {
+        // Show-once pairing token (spec §1.3).
+        let shown = s
+            .token_shown
+            .swap(true, std::sync::atomic::Ordering::SeqCst);
+        if !shown {
+            if let Ok(Some(token)) = s.token_store.get() {
+                let _ = writeln!(
+                    out,
+                    "<p>Pair this server with Kahawai Player once: open the player's \
+                     Server settings and enter this token. It is shown here only once \
+                     (and once in the server log at startup).</p>\n\
+                     <p class=\"token\"><code>{}</code></p>\n",
+                    esc(&token)
+                );
+            }
+        }
+        // Phase 3 §3.1: one-time first-admin setup.
+        out.push_str(
+            "<h3>Create the first admin account</h3>\n\
+             <p>Creating the first admin retires the pairing token above — from \
+             then on, everyone signs in with a username and password.</p>\n\
+             <form id=\"setup-form\">\n\
+             <label>Username <input name=\"username\" required maxlength=\"64\"></label>\n\
+             <label>Password <input name=\"password\" type=\"password\" required minlength=\"8\"></label>\n\
+             <label>Pairing token <input name=\"pairing_token\" type=\"password\" required></label>\n\
+             <button type=\"submit\">Create admin</button>\n\
+             <span id=\"setup-result\" role=\"status\"></span></form>\n\
+             <script>\n\
+             document.getElementById('setup-form').addEventListener('submit', async (e) => {\n\
+               e.preventDefault();\n\
+               const f = e.target;\n\
+               const r = await fetch('/api/setup', { method: 'POST',\n\
+                 headers: {'Content-Type': 'application/json'},\n\
+                 body: JSON.stringify({ username: f.username.value,\n\
+                   password: f.password.value, pairing_token: f.pairing_token.value }) });\n\
+               document.getElementById('setup-result').textContent =\n\
+                 r.ok ? 'Admin created — the pairing token is retired. Sign in from now on.'\n\
+                      : 'Failed (' + r.status + '). Check the pairing token and try again.';\n\
+             });\n\
+             </script>\n",
+        );
+    }
+
+    match &s.tailscale {
+        Some(t) => {
+            let _ = writeln!(
+                out,
+                "<p>Tailscale: detected at <code>{}</code>{} — this server is reachable \
+                 from your tailnet.</p>\n",
+                t.ipv4,
+                t.magic_dns
+                    .as_deref()
+                    .map(|d| format!(" (<code>{}</code>)", esc(d)))
+                    .unwrap_or_default(),
+            );
+        }
+        None => out.push_str("<p>Tailscale: not detected — remote access unavailable.</p>\n"),
+    }
+    out.push_str("</section>\n");
+    out
+}
+
 pub async fn home(
     State(s): State<AppState>,
     Query(q): Query<HomeQuery>,
@@ -213,9 +299,11 @@ pub async fn home(
     let pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
     let page = q.page.unwrap_or(1).clamp(1, pages);
     let albums = albums(&s, filter, PER_PAGE, (page - 1) * PER_PAGE).await?;
+    let security = security_section(&s).await;
     let body = render(
         &base,
         note.as_deref(),
+        &security,
         &playlists,
         &albums,
         filter,
@@ -310,6 +398,7 @@ fn rows(out: &mut String, base: &str, kind: &str, items: &[Item]) {
 fn render(
     base: &str,
     note: Option<&str>,
+    security: &str,
     playlists: &[Item],
     albums: &[Item],
     filter: &str,
@@ -332,6 +421,7 @@ fn render(
     if let Some(note) = note {
         let _ = writeln!(out, "<p class=\"note\">{note}</p>");
     }
+    out.push_str(security);
 
     out.push_str("<h2>Playlists</h2>\n");
     if playlists.is_empty() {
