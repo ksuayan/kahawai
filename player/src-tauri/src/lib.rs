@@ -24,9 +24,10 @@ use kahawai_player_audio::{
     device_capabilities, device_live_state, resolved_output_device_name, CpalSink, SinkRouter,
 };
 use kahawai_player_core::{
-    fetch_artwork, is_known_dsd_device, validate_bands, AnalogSettings, ArtworkCache, BitPerfect, CrossfeedSettings, DsdStory, DspSettings,
-    EngineController, EqBand, OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, QualityMode,
-    RepeatMode,
+    fetch_artwork, is_known_dsd_device, validate_bands, AnalogSettings, ArtworkCache, BitPerfect,
+    CrossfeedSettings, DeclickSettings, DehissSettings, DsdStory, DspSettings, EngineController,
+    EqBand, OutputPath, PlayerEvent, PlayerSnapshot, PlayerStatus, QualityMode, RepeatMode,
+    TapeSettings,
 };
 use kahawai_core::{Album, Artist, Genre};
 use kahawai_player_core::catalog::{CatalogCache, SyncReport};
@@ -1156,6 +1157,30 @@ fn set_crossfeed(app: AppHandle, state: State<'_, AppState>, settings: Crossfeed
     emit_state(&app, &state.engine);
 }
 
+/// Click repair for vinyl transfers. Values are clamped by the engine,
+/// which saves them and applies them live. PCM shared path only.
+#[tauri::command]
+fn set_declick(app: AppHandle, state: State<'_, AppState>, settings: DeclickSettings) {
+    state.engine.set_declick(settings);
+    emit_state(&app, &state.engine);
+}
+
+/// Hiss reduction. Values are clamped by the engine, which saves them and
+/// applies them live. PCM shared path only.
+#[tauri::command]
+fn set_dehiss(app: AppHandle, state: State<'_, AppState>, settings: DehissSettings) {
+    state.engine.set_dehiss(settings);
+    emit_state(&app, &state.engine);
+}
+
+/// Tape color. Values are clamped by the engine, which saves them and
+/// applies them live. PCM shared path only.
+#[tauri::command]
+fn set_tape(app: AppHandle, state: State<'_, AppState>, settings: TapeSettings) {
+    state.engine.set_tape(settings);
+    emit_state(&app, &state.engine);
+}
+
 /// Persisted DSP settings (the settings file is the source of truth; the
 /// engine's setters write it synchronously). The UI calls this once at
 /// startup to mirror the engine.
@@ -1545,6 +1570,9 @@ pub fn run() {
             set_loudness_enabled,
             set_limiter_enabled,
             set_crossfeed,
+            set_declick,
+            set_dehiss,
+            set_tape,
             get_dsp_settings,
             dop_status,
             set_dsd_device_confirmed,

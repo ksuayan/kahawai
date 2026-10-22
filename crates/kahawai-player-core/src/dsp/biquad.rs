@@ -43,3 +43,45 @@ pub(super) fn biquad_step(c: &Biquad, s: &mut BiquadState, x: f32) -> f32 {
     s.z2 = c.b2 * x - c.a2 * y;
     y as f32
 }
+
+/// RBJ "Audio EQ Cookbook" design helpers, normalized (a0 = 1), f64.
+/// Shared by the de-hiss crossover, the tape record/repro EQ and head bump.
+/// `freq_hz` is capped below Nyquist the way `eq.rs` does it.
+fn rbj_pre(freq_hz: f64, sample_rate: f64) -> (f64, f64) {
+    let freq = freq_hz.min(sample_rate * 0.45).max(1.0);
+    let w0 = 2.0 * std::f64::consts::PI * freq / sample_rate;
+    (w0.cos(), w0.sin())
+}
+
+fn rbj_normalize(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Biquad {
+    Biquad {
+        b0: b0 / a0,
+        b1: b1 / a0,
+        b2: b2 / a0,
+        a1: a1 / a0,
+        a2: a2 / a0,
+    }
+}
+
+/// Second-order low-pass. Q = 1/√2 is Butterworth (the LR4 building block).
+pub(super) fn rbj_lowpass(freq_hz: f64, q: f64, sample_rate: f64) -> Biquad {
+    let (cw, sw) = rbj_pre(freq_hz, sample_rate);
+    let alpha = sw / (2.0 * q);
+    let c = (1.0 - cw) / 2.0;
+    rbj_normalize(c, 1.0 - cw, c, 1.0 + alpha, -2.0 * cw, 1.0 - alpha)
+}
+
+/// Peaking bell, `gain_db` at `freq_hz`.
+pub(super) fn rbj_peaking(freq_hz: f64, q: f64, gain_db: f64, sample_rate: f64) -> Biquad {
+    let (cw, sw) = rbj_pre(freq_hz, sample_rate);
+    let a = 10f64.powf(gain_db / 40.0);
+    let alpha = sw / (2.0 * q);
+    rbj_normalize(
+        1.0 + alpha * a,
+        -2.0 * cw,
+        1.0 - alpha * a,
+        1.0 + alpha / a,
+        -2.0 * cw,
+        1.0 - alpha / a,
+    )
+}

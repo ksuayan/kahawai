@@ -11,6 +11,9 @@ import type {
   Artist,
   Genre,
   CrossfeedSettings,
+  DeclickSettings,
+  DehissSettings,
+  TapeSettings,
   BitPerfectMode,
   DsdStory,
   DopStatus,
@@ -314,6 +317,21 @@ export async function setLimiterEnabled(enabled: boolean): Promise<void> {
 /** Headphone crossfeed; the engine clamps, saves and applies it live. */
 export async function setCrossfeed(settings: CrossfeedSettings): Promise<void> {
   await cmd("set_crossfeed", { settings });
+}
+
+/** Click repair; the engine clamps, saves and applies it live. */
+export async function setDeclick(settings: DeclickSettings): Promise<void> {
+  await cmd("set_declick", { settings });
+}
+
+/** Hiss reduction; the engine clamps, saves and applies it live. */
+export async function setDehiss(settings: DehissSettings): Promise<void> {
+  await cmd("set_dehiss", { settings });
+}
+
+/** Tape color; the engine clamps, saves and applies it live. */
+export async function setTape(settings: TapeSettings): Promise<void> {
+  await cmd("set_tape", { settings });
 }
 
 export async function getDspSettings(): Promise<DspSettings | undefined> {

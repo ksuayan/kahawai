@@ -34,14 +34,17 @@ use crate::decode::{DecodedSpec, StreamDecoder};
 use crate::dop::{dop_pcm_rate, DopSpec, DopStream};
 use crate::dsp::analog::{AnalogSettings, AnalogStage};
 use crate::dsp::crossfeed::{CrossfeedSettings, CrossfeedStage};
+use crate::dsp::declick::{DeclickSettings, DeclickStage};
+use crate::dsp::dehiss::{DehissSettings, DehissStage};
+use crate::dsp::tape::{TapeSettings, TapeStage};
 use crate::dsp::{
     headroom_guard, scan_track_levels, DspStage, EqBand, GainRamp, LookaheadLimiter, LoudnessMeter,
     LoudnessNorm, ParametricEq, DEFAULT_LOUDNESS_TARGET, EQ_PREAMP_RANGE_DB,
 };
 use crate::fader::AmpRamp;
 use crate::quality::{
-    QualityMode, BLOCKER_ANALOG, BLOCKER_CROSSFEED, BLOCKER_EQ, BLOCKER_LIMITER, BLOCKER_LOUDNESS,
-    BLOCKER_SPEED, BLOCKER_VOLUME,
+    QualityMode, BLOCKER_ANALOG, BLOCKER_CROSSFEED, BLOCKER_DECLICK, BLOCKER_DEHISS, BLOCKER_EQ,
+    BLOCKER_LIMITER, BLOCKER_LOUDNESS, BLOCKER_SPEED, BLOCKER_TAPE, BLOCKER_VOLUME,
 };
 use crate::queue::{Queue, RepeatMode};
 use crate::rangesource::SeekableControl;
@@ -365,6 +368,18 @@ pub struct DspSettings {
     /// off, like the other stages.
     #[serde(default)]
     pub crossfeed: CrossfeedSettings,
+    /// Click repair for vinyl transfers. Older settings files have none:
+    /// it defaults to off.
+    #[serde(default)]
+    pub declick: DeclickSettings,
+    /// Hiss reduction (downward expander). Older settings files have none:
+    /// it defaults to off.
+    #[serde(default)]
+    pub dehiss: DehissSettings,
+    /// Tape color (EQ, saturation, modulation, noise). Older settings files
+    /// have none: it defaults to off.
+    #[serde(default)]
+    pub tape: TapeSettings,
 }
 
 impl Default for DspSettings {
@@ -378,6 +393,9 @@ impl Default for DspSettings {
             analog: AnalogSettings::default(),
             limiter_enabled: false,
             crossfeed: CrossfeedSettings::default(),
+            declick: DeclickSettings::default(),
+            dehiss: DehissSettings::default(),
+            tape: TapeSettings::default(),
         }
     }
 }
@@ -818,9 +836,16 @@ pub struct Player {
     /// against an infinite skip loop on a poison track with repeat-all.
     empty_streak: u32,
     // -- v1 DSP (PCM only; the DoP path never touches these) --
+    /// Click repair. First in the chain: it works on the raw transfer.
+    declick: DeclickStage,
+    /// Hiss reduction. Second: it sees the de-clicked signal.
+    dehiss: DehissStage,
     crossfeed: CrossfeedStage,
     eq: ParametricEq,
     analog: AnalogStage,
+    /// Tape color. After analog: the "printed" signal gets the tape
+    /// treatment last among the color stages.
+    tape: TapeStage,
     /// Level before and after the analog stage, to compare them.
     meter_in: LoudnessMeter,
     meter_out: LoudnessMeter,
@@ -897,6 +922,9 @@ impl Player {
             crossfeed: CrossfeedStage::new(44100),
             eq: ParametricEq::new(44100),
             analog: AnalogStage::new(44100),
+            declick: DeclickStage::new(44100),
+            dehiss: DehissStage::new(44100),
+            tape: TapeStage::new(44100),
             meter_in: LoudnessMeter::new(44100),
             meter_out: LoudnessMeter::new(44100),
             peak_out: 0.0,
@@ -1073,6 +1101,12 @@ impl Player {
     /// now (names for the UI). Empty means exclusive output costs nothing.
     pub fn exclusive_blockers(&self) -> Vec<&'static str> {
         let mut b = Vec::new();
+        if self.declick.settings().enabled {
+            b.push(BLOCKER_DECLICK);
+        }
+        if self.dehiss.settings().enabled {
+            b.push(BLOCKER_DEHISS);
+        }
         if self.crossfeed.settings().enabled {
             b.push(BLOCKER_CROSSFEED);
         }
@@ -1092,6 +1126,9 @@ impl Player {
         }
         if self.analog.settings().enabled {
             b.push(BLOCKER_ANALOG);
+        }
+        if self.tape.settings().enabled {
+            b.push(BLOCKER_TAPE);
         }
         if self.limiter_enabled {
             b.push(BLOCKER_LIMITER);
@@ -1555,6 +1592,27 @@ impl Player {
         self.reconsider_exclusive();
     }
 
+    /// Click repair (PCM shared path only). DSP like the others, so while
+    /// it is on, Auto does not choose exclusive output.
+    pub fn set_declick(&mut self, settings: DeclickSettings) {
+        self.declick.set_settings(settings);
+        self.reconsider_exclusive();
+    }
+
+    /// Hiss reduction (PCM shared path only). DSP like the others, so while
+    /// it is on, Auto does not choose exclusive output.
+    pub fn set_dehiss(&mut self, settings: DehissSettings) {
+        self.dehiss.set_settings(settings);
+        self.reconsider_exclusive();
+    }
+
+    /// Tape color (PCM shared path only). DSP like the others, so while it
+    /// is on, Auto does not choose exclusive output.
+    pub fn set_tape(&mut self, settings: TapeSettings) {
+        self.tape.set_settings(settings);
+        self.reconsider_exclusive();
+    }
+
     pub fn set_loudness_enabled(&mut self, enabled: bool) {
         self.loudness.set_enabled(enabled);
         self.reconsider_exclusive();
@@ -1612,6 +1670,9 @@ impl Player {
             analog: self.analog.settings(),
             limiter_enabled: self.limiter_enabled,
             crossfeed: self.crossfeed.settings(),
+            declick: self.declick.settings(),
+            dehiss: self.dehiss.settings(),
+            tape: self.tape.settings(),
         }
     }
 
@@ -2034,11 +2095,17 @@ impl Player {
             1.0
         });
         self.eq.set_sample_rate(sink_rate);
+        self.declick.prepare(sink_rate);
+        self.declick.reset();
+        self.dehiss.prepare(sink_rate);
+        self.dehiss.reset();
         self.crossfeed.prepare(sink_rate);
         self.crossfeed.reset();
         self.analog.prepare(sink_rate);
         self.meter_in.set_sample_rate(sink_rate);
         self.meter_out.set_sample_rate(sink_rate);
+        self.tape.prepare(sink_rate);
+        self.tape.reset();
         self.limiter.prepare(sink_rate);
         self.peak_out = 0.0;
         self.dsp_meter.reset();
@@ -2443,10 +2510,15 @@ impl Player {
             None => frames,
         };
         stage_secs[0] = stage_t0.elapsed().as_secs_f64();
-        // v1 DSP chain, fixed order: crossfeed -> EQ -> analog -> loudness
-        // gain (ramped) -> volume -> look-ahead limiter -> headroom guard
-        // (belt and suspenders; a no-op once the limiter holds the ceiling).
-        // Crossfeed first: it models speakers, and the EQ corrects the
+        // v1 DSP chain, fixed order: de-click -> de-hiss -> crossfeed -> EQ
+        // -> analog -> tape -> loudness gain (ramped) -> volume ->
+        // look-ahead limiter -> headroom guard (belt and suspenders; a no-op
+        // once the limiter holds the ceiling).
+        // De-click first: it repairs the raw transfer before anything else
+        // shapes it. De-hiss second: it sees the de-clicked signal. Tape
+        // after analog: the "printed" signal gets the tape treatment last
+        // among the color stages.
+        // Crossfeed before EQ: it models speakers, and the EQ corrects the
         // headphones, so the EQ shapes what the ear will actually receive.
         // The speed change goes first, on the clean decoded signal (bit-exact
         // copy at 1.0), so everything after it works on what will be heard.
@@ -2463,6 +2535,8 @@ impl Player {
         let stretched_frames = chunk.len() / channels;
         active.play_rate = play_rate;
         stage_t0 = Instant::now();
+        self.declick.process(&mut chunk, channels);
+        self.dehiss.process(&mut chunk, channels);
         self.crossfeed.process(&mut chunk, channels);
         stage_secs[2] = stage_t0.elapsed().as_secs_f64();
         stage_t0 = Instant::now();
@@ -2492,6 +2566,10 @@ impl Player {
         let dt = frames as f32 / active.sink_rate.max(1) as f32;
         let peak = chunk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         self.peak_out = peak.max(self.peak_out * 0.5f32.powf(dt));
+        // Tape color after analog, before the loudness gain: the printed
+        // signal gets its tape treatment while the level is still the
+        // music's own.
+        self.tape.process(&mut chunk, channels);
         self.gain_ramp.apply(&mut chunk);
         // Volume, ramped per frame (about 10 ms) so dragging the slider does not
         // zipper. At (or within 0.1 % of) full volume this is a bit-exact no-op.
@@ -2973,6 +3051,9 @@ pub enum EngineCommand {
     SetLoudnessEnabled(bool),
     SetLimiterEnabled(bool),
     SetCrossfeed(CrossfeedSettings),
+    SetDeclick(DeclickSettings),
+    SetDehiss(DehissSettings),
+    SetTape(TapeSettings),
     SetServerUrl(String),
     Shutdown,
 }
@@ -3138,6 +3219,9 @@ impl EngineController {
         ctrl.send(EngineCommand::SetLoudnessEnabled(dsp.loudness_enabled));
         ctrl.send(EngineCommand::SetLimiterEnabled(dsp.limiter_enabled));
         ctrl.send(EngineCommand::SetCrossfeed(dsp.crossfeed));
+        ctrl.send(EngineCommand::SetDeclick(dsp.declick));
+        ctrl.send(EngineCommand::SetDehiss(dsp.dehiss));
+        ctrl.send(EngineCommand::SetTape(dsp.tape));
         // Playback preferences (persisted; default preserves pre-C3 behavior).
         ctrl.send(EngineCommand::SetDsdStory(settings.dsd_story));
         ctrl.send(EngineCommand::SetGlobalFormat(settings.global_format));
@@ -3478,6 +3562,27 @@ impl EngineController {
         };
         self.update_dsp_settings(|dsp| dsp.crossfeed = settings);
         self.send(EngineCommand::SetCrossfeed(settings));
+    }
+
+    /// Click repair, clamped before it is saved or applied.
+    pub fn set_declick(&self, settings: DeclickSettings) {
+        let settings = settings.clamped();
+        self.update_dsp_settings(|dsp| dsp.declick = settings);
+        self.send(EngineCommand::SetDeclick(settings));
+    }
+
+    /// Hiss reduction, clamped before it is saved or applied.
+    pub fn set_dehiss(&self, settings: DehissSettings) {
+        let settings = settings.clamped();
+        self.update_dsp_settings(|dsp| dsp.dehiss = settings);
+        self.send(EngineCommand::SetDehiss(settings));
+    }
+
+    /// Tape color, clamped before it is saved or applied.
+    pub fn set_tape(&self, settings: TapeSettings) {
+        let settings = settings.clamped();
+        self.update_dsp_settings(|dsp| dsp.tape = settings);
+        self.send(EngineCommand::SetTape(settings));
     }
 
     /// Read-modify-write the DSP section of the settings file. Each setter
@@ -4084,6 +4189,9 @@ fn apply_command(player: &mut Player, cmd: EngineCommand) {
         EngineCommand::SetLoudnessEnabled(b) => player.set_loudness_enabled(b),
         EngineCommand::SetLimiterEnabled(b) => player.set_limiter_enabled(b),
         EngineCommand::SetCrossfeed(c) => player.set_crossfeed(c),
+        EngineCommand::SetDeclick(s) => player.set_declick(s),
+        EngineCommand::SetDehiss(s) => player.set_dehiss(s),
+        EngineCommand::SetTape(s) => player.set_tape(s),
         EngineCommand::SetServerUrl(_) => {
             // The transport reads the shared URL lock directly; nothing to do.
         }

@@ -29,6 +29,9 @@ import UiSelect, { type UiSelectOption } from "../ui/UiSelect.vue";
 import UiSwitch from "../ui/UiSwitch.vue";
 import ViewShell from "../ui/ViewShell.vue";
 import AnalogSection from "./AnalogSection.vue";
+import DeclickSection from "./DeclickSection.vue";
+import DehissSection from "./DehissSection.vue";
+import TapeSection from "./TapeSection.vue";
 import EqEditor from "./EqEditor.vue";
 import ListenerSection from "./ListenerSection.vue";
 import CrossfeedSection from "./CrossfeedSection.vue";
@@ -602,6 +605,18 @@ const dopRates = computed(() =>
           Work in progress: these may change or be removed, and are off unless you turn them on.
         </UiHint>
         <AnalogSection />
+        <div class="mt-6">
+          <h4 class="mb-2 text-sm font-semibold text-normal">De-click</h4>
+          <DeclickSection />
+        </div>
+        <div class="mt-6">
+          <h4 class="mb-2 text-sm font-semibold text-normal">De-hiss</h4>
+          <DehissSection />
+        </div>
+        <div class="mt-6 pb-3">
+          <h4 class="mb-2 text-sm font-semibold text-normal">Tape (Stage 1)</h4>
+          <TapeSection />
+        </div>
       </div>
     </details>
 

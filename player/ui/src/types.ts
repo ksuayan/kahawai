@@ -596,6 +596,12 @@ export interface DspSettings {
   limiter_enabled?: boolean;
   /** Absent in settings files from before crossfeed; it defaults to off. */
   crossfeed?: CrossfeedSettings;
+  /** Absent in settings files from before de-click; it defaults to off. */
+  declick?: DeclickSettings;
+  /** Absent in settings files from before de-hiss; it defaults to off. */
+  dehiss?: DehissSettings;
+  /** Absent in settings files from before tape; it defaults to off. */
+  tape?: TapeSettings;
 }
 
 // --- Headphone crossfeed (mirrors kahawai-player-core/src/dsp/crossfeed.rs) ------
@@ -656,7 +662,129 @@ export const DEFAULT_DSP_SETTINGS: DspSettings = {
   analog: DEFAULT_ANALOG_SETTINGS,
   limiter_enabled: false,
   crossfeed: DEFAULT_CROSSFEED_SETTINGS,
+  declick: DEFAULT_DECLICK_SETTINGS,
+  dehiss: DEFAULT_DEHISS_SETTINGS,
+  tape: DEFAULT_TAPE_SETTINGS,
 };
+
+// --- De-click (mirrors kahawai-player-core/src/dsp/declick.rs) ----------------
+
+export interface DeclickSettings {
+  enabled: boolean;
+  /** 0 = gentle … 1 = aggressive. */
+  sensitivity: number;
+  /** Defects wider than this are left alone, ms. */
+  max_width_ms: number;
+  /** 0 = dry, 1 = fully repaired. */
+  dry_wet: number;
+}
+
+export const DEFAULT_DECLICK_SETTINGS: DeclickSettings = {
+  enabled: false,
+  sensitivity: 0.5,
+  max_width_ms: 2.0,
+  dry_wet: 1.0,
+};
+
+/** Ranges, as the engine clamps them. */
+export const DECLICK_SENSITIVITY_RANGE = [0, 1] as const;
+export const DECLICK_MAX_WIDTH_RANGE = [0.5, 5] as const;
+
+// --- De-hiss (mirrors kahawai-player-core/src/dsp/dehiss.rs) ------------------
+
+export interface DehissSettings {
+  enabled: boolean;
+  /** Master threshold, dBFS. */
+  threshold_db: number;
+  /** Per-band threshold trim, dB (4 bands). */
+  trim_db: [number, number, number, number];
+  /** Maximum reduction per band, dB. */
+  amount_db: number;
+  attack_ms: number;
+  release_ms: number;
+  /** 0 = dry, 1 = fully processed. */
+  dry_wet: number;
+}
+
+export const DEFAULT_DEHISS_SETTINGS: DehissSettings = {
+  enabled: false,
+  threshold_db: -50.0,
+  trim_db: [0.0, 0.0, 3.0, 6.0],
+  amount_db: 12.0,
+  attack_ms: 1.0,
+  release_ms: 100.0,
+  dry_wet: 1.0,
+};
+
+/** Ranges, as the engine clamps them. */
+export const DEHISS_THRESHOLD_RANGE = [-80, -20] as const;
+export const DEHISS_TRIM_RANGE = [-12, 12] as const;
+export const DEHISS_AMOUNT_RANGE = [0, 24] as const;
+export const DEHISS_ATTACK_RANGE = [0.1, 20] as const;
+export const DEHISS_RELEASE_RANGE = [20, 1000] as const;
+
+// --- Tape (mirrors kahawai-player-core/src/dsp/tape.rs) ----------------------
+
+export type TapeSpeed = "Ips15" | "Ips30";
+export type TapeEqStandard = "nab" | "iec";
+export type TapeQuality = "eco" | "standard" | "high";
+
+export interface TapeSettings {
+  enabled: boolean;
+  /** Input gain into the curve, dB. */
+  drive_db: number;
+  output_trim_db: number;
+  /** Knee sharpness, 0..1. */
+  saturation: number;
+  /** Under↔over: curve asymmetry, 0..1. */
+  bias: number;
+  ips: TapeSpeed;
+  eq_standard: TapeEqStandard;
+  /** Head-bump amount, 0..1. */
+  head_bump: number;
+  wow_rate_hz: number;
+  wow_depth_pct: number;
+  flutter_rate_hz: number;
+  flutter_depth_pct: number;
+  /** Slow wander amount, 0..1. */
+  drift: number;
+  /** Hiss level, dB; at or below −90 it is exactly off. */
+  hiss_db: number;
+  /** Signal-dependent grit, 0..1. */
+  asperity: number;
+  quality: TapeQuality;
+  /** 0 = dry, 1 = fully tape. */
+  dry_wet: number;
+}
+
+export const DEFAULT_TAPE_SETTINGS: TapeSettings = {
+  enabled: false,
+  drive_db: 0.0,
+  output_trim_db: 0.0,
+  saturation: 0.35,
+  bias: 0.5,
+  ips: "Ips15",
+  eq_standard: "nab",
+  head_bump: 0.5,
+  wow_rate_hz: 0.6,
+  wow_depth_pct: 0.15,
+  flutter_rate_hz: 6.0,
+  flutter_depth_pct: 0.05,
+  drift: 0.2,
+  hiss_db: -78.0,
+  asperity: 0.3,
+  quality: "standard",
+  dry_wet: 1.0,
+};
+
+/** Ranges, as the engine clamps them. */
+export const TAPE_DRIVE_RANGE = [-12, 12] as const;
+export const TAPE_TRIM_RANGE = [-12, 12] as const;
+export const TAPE_WOW_RATE_RANGE = [0.2, 2] as const;
+export const TAPE_WOW_DEPTH_RANGE = [0, 0.5] as const;
+export const TAPE_FLUTTER_RATE_RANGE = [4, 12] as const;
+export const TAPE_FLUTTER_DEPTH_RANGE = [0, 0.2] as const;
+export const TAPE_HISS_RANGE = [-90, -30] as const;
 
 /** Room for an AutoEq profile (usually 10 filters) plus a couple of your own. Mirrors `MAX_EQ_BANDS` in dsp/eq.rs. */
 export const MAX_EQ_BANDS = 12;
