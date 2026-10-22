@@ -4,6 +4,8 @@
 mod api;
 mod audiobooks;
 mod audiobooks_api;
+mod auth;
+mod auth_api;
 mod book_meta;
 mod catalog;
 mod db;
@@ -35,8 +37,10 @@ mod radio_api;
 mod resample;
 mod scanner;
 mod stream;
+mod tailscale;
 mod transcode;
 mod transcode_cache;
+mod users;
 
 use std::sync::Arc;
 
@@ -87,6 +91,22 @@ pub struct AppState {
     pub catalog_events: tokio::sync::broadcast::Sender<ServerEvent>,
     /// Rendered single-track transcodes, served with byte ranges (D3).
     pub transcode_cache: transcode_cache::TranscodeCache,
+    /// Bearer-token / session auth state (P0 Phase 1 §1.3, Phase 3 §3.2).
+    pub auth: Arc<auth::AuthState>,
+    /// Login brute-force throttling (P0 Phase 3, spec §3.3).
+    pub login_throttle: Arc<users::LoginThrottle>,
+    /// Tailscale presence detected at startup (P0 Phase 2, spec §2.1).
+    pub tailscale: Option<tailscale::TailscaleInfo>,
+    /// Set once the pairing token has been shown in the web UI; the
+    /// startup log shows it once per run regardless (spec §1.3).
+    pub token_shown: Arc<std::sync::atomic::AtomicBool>,
+    /// True when the loaded config binds an unspecified address: the
+    /// web UI shows the one-time SEC-1 migration banner.
+    pub bind_migration_warning: bool,
+    /// The pairing-token store (keychain, or the 0600-file fallback).
+    /// Needed at runtime for rotation and for retiring the token at
+    /// Phase 3 bootstrap.
+    pub token_store: Arc<dyn auth::TokenStore>,
 }
 
 impl AppState {
@@ -114,6 +134,12 @@ impl AppState {
 pub(crate) static SHUTDOWN: std::sync::LazyLock<tokio::sync::Notify> =
     std::sync::LazyLock::new(tokio::sync::Notify::new);
 
+/// The pre-P0 trusted-network warning, kept verbatim: the desktop UI's
+/// listen-scope selector surfaces it when "Local network" is chosen
+/// (spec §1.1), and it must not be reworded.
+pub const TRUSTED_NETWORK_WARNING: &str =
+    "LAN-only build: no authentication, no TLS — bind to a trusted network only";
+
 /// The last shutdown came from the operating system (SIGINT, SIGTERM), not
 /// from the app or the API. The desktop app then exits too: a terminate
 /// means the whole program, not just the server inside it.
@@ -127,6 +153,25 @@ const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// can run for the length of an album.
 const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Test-only bearer shared by every test harness in this crate.
+#[cfg(test)]
+pub const TEST_BEARER: &str = "test-bearer-token";
+
+/// Test-only: the real router plus a request middleware that injects the
+/// test bearer, so the dozens of existing inline request builders don't
+/// each need an `Authorization` header.
+#[cfg(test)]
+pub fn test_router(state: AppState) -> Router {
+    use axum::{body::Body, http::Request, middleware::map_request};
+    crate::app(state).layer(map_request(|mut req: Request<Body>| async move {
+        req.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {TEST_BEARER}").parse().unwrap(),
+        );
+        req
+    }))
+}
+
 pub fn app(state: AppState) -> Router {
     // S10: the JSON API gets a body cap and a request timeout. Streams are
     // routed separately so neither applies to long-lived audio responses.
@@ -135,6 +180,23 @@ pub fn app(state: AppState) -> Router {
         .route("/api/health", get(api::health))
         .route("/api/identity", get(api::identity))
         .route("/api/shutdown", post(api::shutdown))
+        // P0 auth (Phase 1 §1.3, Phase 3 §3.1–§3.4). `/api/login` and
+        // `/api/setup*` are intentionally public (the middleware's
+        // PUBLIC_PATHS): they are the credential issuance endpoints.
+        .route("/api/login", post(auth_api::login))
+        .route("/api/logout", post(auth_api::logout))
+        .route("/api/setup/status", get(auth_api::setup_status))
+        .route("/api/setup", post(auth_api::setup))
+        .route("/api/token/regenerate", post(auth_api::regenerate_token))
+        .route(
+            "/api/users",
+            get(auth_api::list_users).post(auth_api::create_user),
+        )
+        .route(
+            "/api/users/{id}",
+            axum::routing::delete(auth_api::delete_user),
+        )
+        .route("/api/users/me/password", post(auth_api::change_password))
         .route("/api/albums", get(api::list_albums))
         .route("/api/albums/{id}", get(api::get_album))
         .route("/api/albums/{id}/export", get(export::export_album))
@@ -305,6 +367,8 @@ pub fn app(state: AppState) -> Router {
         )
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
 
+    // Cloned before `with_state` moves `state` into the router.
+    let auth_state = state.auth.clone();
     Router::new()
         .merge(api)
         .route(
@@ -315,9 +379,66 @@ pub fn app(state: AppState) -> Router {
         // sub-router so the 60s API timeout never closes it.
         .route("/api/events", get(api::scan_events))
         .with_state(state)
-        // v1 is LAN-only: permissive CORS is acceptable here (spec §3.6).
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        // P0 Phase 1 (SEC-3): every /api/* and /stream/* request carries
+        // a valid bearer token. Runs inside CORS so preflights are
+        // answered before auth is consulted.
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            auth::require_auth,
+        ))
+        .layer(cors_allowlist())
+        // The default TraceLayer logs the raw request URI, which would
+        // leak `?access_token=` secrets into the log (TODO SEC-3 log
+        // hygiene) — the span scrubs them via auth::redact_access_token.
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |req: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %req.method(),
+                    uri = %auth::redact_access_token(&req.uri().to_string()),
+                )
+            },
+        ))
+}
+
+/// P0 Phase 1 (SEC-2): the browser-as-attacker path is closed. Only the
+/// player's own WebView origins get CORS headers; the server's web UI is
+/// same-origin and needs none.
+///
+/// Origin strings verified against the pinned Tauri version
+/// (player/src-tauri/Cargo.lock: tauri 2.12.0,
+/// `src/protocol/mod.rs::origin`): on macOS the app loads from
+/// `tauri://localhost`; on Windows/Android wry serves the custom
+/// protocol over `http(s)://tauri.localhost`. The dev server
+/// (`devUrl: http://localhost:1420`) is included so the dev loop keeps
+/// working — a website the user visits cannot spoof any of these
+/// origins from the victim's browser.
+fn cors_allowlist() -> CorsLayer {
+    use axum::http::{header, Method};
+    CorsLayer::new()
+        .allow_origin([
+            "tauri://localhost".parse().unwrap(),
+            "http://tauri.localhost".parse().unwrap(),
+            "http://localhost:1420".parse().unwrap(),
+        ])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::RANGE,
+            header::ACCEPT,
+            header::HeaderName::from_static("x-kahawai-listener"),
+            header::HeaderName::from_static("x-kahawai-shutdown"),
+        ])
+        .max_age(std::time::Duration::from_secs(3600))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -398,6 +519,10 @@ fn main() {
             desktop::setup_stop_server,
             desktop::setup_restart_server,
             desktop::setup_server_status,
+            desktop::setup_tailscale_status,
+            desktop::setup_users_exist,
+            desktop::setup_get_pairing_token,
+            desktop::setup_regenerate_token,
             desktop::setup_reveal_config,
             desktop::setup_quit,
             desktop::setup_app_ready,
@@ -457,13 +582,34 @@ pub async fn run_server_with_ready(
     config: ServerConfig,
     ready: Option<tokio::sync::oneshot::Sender<AppState>>,
 ) -> anyhow::Result<()> {
+    // P0 Phase 2 (spec §2.1): detect Tailscale before binding —
+    // "Tailscale only" mode needs the address, and the status is logged
+    // either way.
+    let tailscale = tailscale::detect();
+
     // Bind first: if the port is taken (another Kahawai Server, say a
     // development build), fail before opening the catalog or starting a
     // scan against a database the other server is using.
-    let addr: std::net::SocketAddr = config.bind.parse()?;
+    //
+    // P0 Phase 1 (SEC-1): the default is loopback; an explicit
+    // `0.0.0.0` in an existing config keeps working (migration);
+    // `tailscale_only` resolves the tailnet IP or fails loudly rather
+    // than falling back to `0.0.0.0` (spec §2.2).
+    let addr = config
+        .listen_addr(tailscale.as_ref().map(|t| std::net::IpAddr::V4(t.ipv4)))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("could not listen on {addr}: {e}"))?;
+
+    // P0 Phase 1 (SEC-3): the pairing token lives in the OS keychain
+    // (0600-file fallback where no keychain backend exists), generated
+    // on first run. It is never written to the config, the database,
+    // or any log except the single sanctioned display below.
+    let token_store =
+        auth::default_token_store(config.db_path.parent().unwrap_or(std::path::Path::new(".")));
+    let (pairing_token, _token_fresh) = auth::ensure_pairing_token(token_store.as_ref())
+        .map_err(|e| anyhow::anyhow!("could not load the API pairing token: {e}"))?;
 
     api::mark_started();
     let pool = db::open(&config.db_path).await?;
@@ -477,13 +623,24 @@ pub async fn run_server_with_ready(
 
     let (catalog_events, _) = tokio::sync::broadcast::channel(16);
     let state = AppState {
-        pool,
+        pool: pool.clone(),
         jobs,
         config: Arc::new(std::sync::RwLock::new(config.clone())),
         scan_lock: Arc::new(tokio::sync::Mutex::new(())),
         hash_lock: Arc::new(tokio::sync::Mutex::new(())),
         enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
         catalog_events,
+        auth: Arc::new(auth::AuthState::new(
+            pool.clone(),
+            Some(auth::sha256_hex(&pairing_token)),
+        )),
+        login_throttle: Arc::new(users::LoginThrottle::new()),
+        tailscale: tailscale.clone(),
+        token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        token_store: token_store.into(),
+        // SEC-1 migration: an existing config already on 0.0.0.0 keeps
+        // working, and the web UI shows a one-time banner about it.
+        bind_migration_warning: addr.ip().is_unspecified(),
         transcode_cache: transcode_cache::TranscodeCache::open(
             config
                 .db_path
@@ -571,11 +728,39 @@ pub async fn run_server_with_ready(
         }
     }
 
-    // S10: the LAN-only posture is logged at every startup, not just in docs.
-    warn!(
-        %addr,
-        "LAN-only build: no authentication, no TLS — bind to a trusted network only"
-    );
+    // P0 Phase 1 (SEC-1): the effective posture is logged at every
+    // startup, not just in docs.
+    let scope = if config.tailscale_only {
+        "Tailscale only"
+    } else if addr.ip().is_loopback() {
+        "this Mac only (loopback)"
+    } else {
+        "local network"
+    };
+    info!(%addr, scope, "Kahawai Server listening");
+    if addr.ip().is_unspecified() {
+        warn!(
+            %addr,
+            "bound to every network interface: API access needs the bearer token, \
+             but prefer \"This Mac only\" or \"Tailscale only\" unless this network is trusted"
+        );
+    }
+    match &tailscale {
+        Some(t) => info!(
+            "Tailscale detected at {} ({}) — remote access available",
+            t.ipv4,
+            t.magic_dns.as_deref().unwrap_or("no MagicDNS name found"),
+        ),
+        None => info!("Tailscale not detected — remote access unavailable"),
+    }
+    // Spec §1.3: the pairing token is displayed once in the startup log,
+    // with pairing instructions. (The web UI shows it once per run via
+    // the token_shown flag; this log line is the sanctioned exception
+    // to the token-never-in-logs rule.)
+    info!("API pairing token — enter it once in Kahawai Player → Server settings: {pairing_token}");
+    if users::users_exist(&pool).await.unwrap_or(false) {
+        info!("user accounts active: the pairing token is retired, sessions only");
+    }
     let events = state.catalog_events.clone();
     // Connection info: `POST /api/shutdown` only listens to this machine.
     axum::serve(
@@ -649,7 +834,7 @@ mod integration_tests {
         assert_eq!(id, 1);
 
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             // S10: tests run with the temp dir as the only music root, so
             // strict root enforcement is exercised, not bypassed.
@@ -662,8 +847,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        (app(state.clone()), state, dir, fixture)
+        (test_router(state.clone()), state, dir, fixture)
     }
 
     /// Test app backed by a real scan of the ffmpeg fixture library
@@ -677,7 +871,7 @@ mod integration_tests {
             .unwrap();
         assert_eq!(report.files_added, 8);
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
@@ -688,8 +882,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        (app(state.clone()), state, dir)
+        (test_router(state.clone()), state, dir)
     }
 
     async fn body_bytes(res: axum::response::Response) -> Vec<u8> {
@@ -772,6 +975,53 @@ mod integration_tests {
             .await
             .expect("the server was told to stop")
             .unwrap();
+    }
+
+    /// SEC-2: only the player's own WebView origins get CORS headers.
+    /// A disallowed origin gets no `access-control-allow-origin` back.
+    #[tokio::test]
+    async fn cors_disallowed_origin_gets_no_acao_headers() {
+        let (app, _state, _dir, _fixture) = test_app(16).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/albums")
+                    .header(header::ORIGIN, "https://evil.example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none(),
+            "disallowed origin must not get ACAO headers"
+        );
+    }
+
+    /// SEC-2: the Tauri WebView origin is allowlisted.
+    #[tokio::test]
+    async fn cors_tauri_origin_is_allowlisted() {
+        let (app, _state, _dir, _fixture) = test_app(16).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/albums")
+                    .header(header::ORIGIN, "tauri://localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("tauri://localhost")
+        );
     }
 
     #[tokio::test]
@@ -1585,8 +1835,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        let app = app(state);
+        let app = test_router(state);
 
         let t = Instant::now();
         let mut page = 1;
@@ -2394,7 +2653,7 @@ mod integration_tests {
             ..config
         };
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(config)),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2402,8 +2661,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        (app(state), dir)
+        (test_router(state), dir)
     }
 
     fn chain_of(res: &axum::response::Response) -> String {
@@ -2647,7 +2915,7 @@ mod integration_tests {
             ..Default::default()
         };
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(config)),
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2655,8 +2923,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        (app(state.clone()), state, dir, bits)
+        (test_router(state.clone()), state, dir, bits)
     }
 
     /// Verify a DoP WAV body end-to-end: header fields, strict marker
@@ -2922,7 +3199,7 @@ mod integration_tests {
                 .unwrap();
         }
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
@@ -2933,8 +3210,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        let app = app(state);
+        let app = test_router(state);
         let res = app
             .oneshot(
                 Request::builder()
@@ -2963,7 +3249,7 @@ mod integration_tests {
                 .unwrap();
         }
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
@@ -2974,8 +3260,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        let app = app(state);
+        let app = test_router(state);
         let res = app
             .oneshot(
                 Request::builder()
@@ -3015,7 +3310,7 @@ mod integration_tests {
                 .unwrap();
         }
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
@@ -3026,8 +3321,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        let app = app(state);
+        let app = test_router(state);
         let res = app
             .oneshot(
                 Request::builder()
@@ -3076,7 +3380,7 @@ mod integration_tests {
             .unwrap();
 
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
@@ -3087,8 +3391,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        let app = app(state);
+        let app = test_router(state);
         let res = app
             .oneshot(
                 Request::builder()
@@ -3136,7 +3449,7 @@ mod integration_tests {
             .await
             .unwrap();
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
@@ -3147,8 +3460,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        let app = app(state);
+        let app = test_router(state);
         // Track 2's file is outside the roots → 404 (indistinguishable
         // from a missing file, no 403 oracle).
         let res = app
@@ -3192,7 +3514,7 @@ mod integration_tests {
             .await
             .unwrap();
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
@@ -3203,8 +3525,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        let app = app(state);
+        let app = test_router(state);
         let res = app
             .oneshot(
                 Request::builder()
@@ -3291,7 +3622,7 @@ mod integration_tests {
             assert_eq!(id, i);
         }
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(ServerConfig {
                 music_dirs: vec![dir.path().to_path_buf()],
@@ -3302,8 +3633,17 @@ mod integration_tests {
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
             transcode_cache: transcode_cache::TranscodeCache::disabled(),
+            auth: Arc::new(auth::AuthState::new(
+                pool.clone(),
+                Some(auth::sha256_hex(TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(auth::MemoryTokenStore::new()),
         };
-        (app(state), dir)
+        (test_router(state), dir)
     }
 
     async fn post_json(

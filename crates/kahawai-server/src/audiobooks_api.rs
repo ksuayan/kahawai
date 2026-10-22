@@ -1358,7 +1358,7 @@ mod tests {
         let music = dir.path().join("music");
         std::fs::create_dir_all(&music).unwrap();
         let state = AppState {
-            pool,
+            pool: pool.clone(),
             jobs: crate::jobs::JobStore::new(),
             config: Arc::new(std::sync::RwLock::new(kahawai_core::ServerConfig {
                 music_dirs: vec![music],
@@ -1368,10 +1368,19 @@ mod tests {
             hash_lock: Arc::new(tokio::sync::Mutex::new(())),
             enrich_lock: Arc::new(tokio::sync::Mutex::new(())),
             catalog_events: tokio::sync::broadcast::channel(16).0,
+            auth: Arc::new(crate::auth::AuthState::new(
+                pool.clone(),
+                Some(crate::auth::sha256_hex(crate::TEST_BEARER)),
+            )),
+            login_throttle: Arc::new(crate::users::LoginThrottle::new()),
+            tailscale: None,
+            token_shown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bind_migration_warning: false,
+            token_store: Arc::new(crate::auth::MemoryTokenStore::new()),
             transcode_cache: crate::transcode_cache::TranscodeCache::disabled(),
         };
         Env {
-            app: crate::app(state.clone()),
+            app: crate::test_router(state.clone()),
             state,
             dir,
             books,

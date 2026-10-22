@@ -43,6 +43,56 @@ export function getBaseUrl(): string {
   return baseUrl;
 }
 
+// --- Auth (P0 §1.3 + Phase 3 §3.2) -------------------------------------------
+// One credential: the pairing token, or the session token once user
+// accounts exist. Sent as `Authorization: Bearer` on every JSON request;
+// URL-only surfaces (`<audio>`/`<img>` tags, SSE) carry `?access_token=`
+// instead — those APIs can't set headers.
+
+let authToken: string | null = null;
+
+export function setAuthToken(token: string | null): void {
+  authToken = token?.trim() || null;
+  reconnectCatalogEvents();
+}
+
+export function getAuthToken(): string | null {
+  return authToken;
+}
+
+/** The `?access_token=` suffix for URL-only surfaces ("" when logged out). */
+function tokenParam(first: boolean): string {
+  return authToken ? `${first ? "?" : "&"}access_token=${encodeURIComponent(authToken)}` : "";
+}
+
+/** 401 from any API call → the credential is wrong, expired, or retired. */
+const unauthorizedListeners = new Set<() => void>();
+export function onUnauthorized(cb: () => void): () => void {
+  unauthorizedListeners.add(cb);
+  return () => unauthorizedListeners.delete(cb);
+}
+
+/**
+ * Connection hint for the login/server screen (Phase 2 §2.4): distinguish
+ * "nothing answers at this address" from "the address only resolves on a
+ * tailnet, and Tailscale isn't running here".
+ */
+export function connectionHint(url: string, err: unknown): string | null {
+  if (!(err instanceof TypeError)) return null; // not a network failure
+  const host = (() => {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
+  // MagicDNS names only resolve while Tailscale is up.
+  if (host.endsWith(".ts.net") || host.endsWith(".tailscale")) {
+    return "That address is a Tailscale name, but Tailscale doesn't seem to be running on this device. Start Tailscale and try again.";
+  }
+  return "Nothing answers at that address. Check the server is running and the address is right.";
+}
+
 // --- Server events (GET /api/events, SSE) -----------------------------------
 // A scan finishing anywhere — this app's own "Scan" button, or the desktop
 // Server app's wizard/status screen — pushes a catalog-updated event here;
@@ -85,7 +135,9 @@ function reconnectCatalogEvents(): void {
 
 function connectServerEvents(): void {
   if (typeof EventSource === "undefined") return; // defensive; every real target has it
-  const source = new EventSource(`${baseUrl}/api/events`);
+  // EventSource can't set headers: the credential rides as ?access_token=
+  // (spec §1.3). `tokenParam` is "" when logged out.
+  const source = new EventSource(`${baseUrl}/api/events${tokenParam(true)}`);
   eventSource = source;
 
   source.addEventListener("open", () => {
@@ -160,7 +212,7 @@ export function resetServerEventListenersForTest(): void {
 export function artworkSrc(hash?: string | null): string {
   if (!hash) return "";
   if (inTauri()) return cachedArtworkUrl(hash);
-  return `${baseUrl}/api/artwork/${encodeURIComponent(hash)}`;
+  return `${baseUrl}/api/artwork/${encodeURIComponent(hash)}${tokenParam(true)}`;
 }
 
 /**
@@ -197,6 +249,11 @@ async function fail(method: string, path: string, res: Response): Promise<never>
   } catch {
     /* ignore */
   }
+  // The sign-in form handles its own 401s inline; everything else means
+  // the stored credential is dead → prompt to sign in again.
+  if (res.status === 401 && path !== "/api/login" && path !== "/api/setup") {
+    for (const cb of unauthorizedListeners) cb();
+  }
   throw new ApiError(method, path, res.status, body.trim());
 }
 
@@ -210,6 +267,7 @@ export function setAudiobookListener(name: string): void {
 function headers(path: string, json = false): Record<string, string> {
   const h: Record<string, string> = json ? { "Content-Type": "application/json" } : {};
   if (listener && path.startsWith("/api/audiobook")) h["X-Kahawai-Listener"] = encodeURIComponent(listener);
+  if (authToken) h["Authorization"] = `Bearer ${authToken}`;
   return h;
 }
 
@@ -252,6 +310,37 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 async function del(path: string): Promise<void> {
   const res = await fetch(`${baseUrl}${path}`, { method: "DELETE", headers: headers(path) });
   if (!res.ok) await fail("DELETE", path, res);
+}
+
+// --- Auth endpoints (P0 §1.3 + Phase 3) -------------------------------------
+
+/** `POST /api/login` → the session token. Throws `ApiError` (401 on bad credentials, 429 when throttled). */
+export async function login(username: string, password: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) await fail("POST", "/api/login", res);
+  const body = (await res.json()) as { token?: string };
+  if (!body.token) throw new Error("login succeeded without a token");
+  return body.token;
+}
+
+/** `POST /api/logout`: revoke the current session server-side. */
+export async function logout(): Promise<void> {
+  await post<void>("/api/logout", {});
+}
+
+/** `GET /api/setup/status` → true while the server still needs its first admin. */
+export async function setupNeeded(): Promise<boolean> {
+  const res = await get<{ setup_needed: boolean }>("/api/setup/status");
+  return res.setup_needed;
+}
+
+/** `POST /api/setup`: create the first admin with the pairing token. */
+export async function createFirstAdmin(username: string, password: string, pairingToken: string): Promise<void> {
+  await post<void>("/api/setup", { username, password, pairing_token: pairingToken });
 }
 
 function asItems<T>(res: Page<T> | T[]): T[] {
@@ -489,7 +578,7 @@ export type ServerCheck =
   | { kind: "older" }
   /** Something answers, but it isn't a Kahawai server. */
   | { kind: "other" }
-  | { kind: "offline" };
+  | { kind: "offline"; hint: string | null };
 
 /** Is the server URL a running Kahawai server, and which one? */
 export async function checkServer(): Promise<ServerCheck> {
@@ -497,7 +586,9 @@ export async function checkServer(): Promise<ServerCheck> {
     const id = await get<Partial<ServerIdentity>>(`/api/identity`);
     return id?.service === KAHAWAI_SERVICE ? { kind: "kahawai", identity: id as ServerIdentity } : { kind: "other" };
   } catch (e) {
-    if (!(e instanceof ApiError)) return { kind: "offline" }; // nothing answered
+    // Nothing answered: distinguish "wrong address" from "Tailscale name,
+    // but Tailscale isn't running here" (Phase 2 §2.4).
+    if (!(e instanceof ApiError)) return { kind: "offline", hint: connectionHint(baseUrl, e) };
   }
   // It answered, but not /api/identity: an older Kahawai server, or not one.
   return (await checkHealth()) ? { kind: "older" } : { kind: "other" };

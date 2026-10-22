@@ -55,6 +55,35 @@ const jobs = useJobsStore();
 const urlInput = ref(settings.serverUrl);
 const urlError = ref<string | null>(null);
 const saving = ref(false);
+// P0 §1.3: pairing token entry. The field starts empty even when a token
+// is stored — the keychain value is never rendered back into the UI.
+const tokenInput = ref("");
+const tokenError = ref<string | null>(null);
+const tokenSaving = ref(false);
+const showToken = ref(false);
+
+async function saveToken(): Promise<void> {
+  tokenError.value = null;
+  if (!tokenInput.value.trim()) {
+    tokenError.value = "Enter the pairing token shown on the server.";
+    return;
+  }
+  tokenSaving.value = true;
+  try {
+    await settings.saveServerToken(tokenInput.value);
+    tokenInput.value = "";
+    await probe();
+  } catch (e) {
+    tokenError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    tokenSaving.value = false;
+  }
+}
+
+async function signOut(): Promise<void> {
+  await settings.logout();
+  await probe();
+}
 const check = ref<ServerCheck | null>(null);
 /** A Kahawai server answers (the light and the status line). */
 const online = computed<boolean | null>(() =>
@@ -72,7 +101,7 @@ const connectionText = computed(() => {
     case "other":
       return "Something answers at this address, but it isn't a Kahawai server";
     default:
-      return "Server unreachable";
+      return c.kind === "offline" && c.hint ? c.hint : "Server unreachable";
   }
 });
 const connectionTitle = computed(() =>
@@ -348,6 +377,37 @@ const dopRates = computed(() =>
       >
         Free software (GNU AGPL v3 or later). Source code: {{ check.identity.source_url }}
       </p>
+      <div class="mt-2 border-t border-line pt-3">
+        <h4 class="m-0 mb-1 text-[13px] font-semibold">Server sign-in</h4>
+        <UiHint v-if="!settings.serverToken">
+          Pair with the server using the token it shows once at startup (or in the server app). The
+          token is kept in the OS keychain, never in settings.
+        </UiHint>
+        <UiHint v-else>
+          A credential is stored in the OS keychain
+          ({{ settings.tokenKind === "session" ? "signed in" : "paired" }}).
+        </UiHint>
+        <div v-if="!settings.serverToken" class="flex gap-2">
+          <UiInput
+            v-model="tokenInput"
+            class="flex-1"
+            :type="showToken ? 'text' : 'password'"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="Pairing token"
+            aria-label="Pairing token"
+            @keydown.enter="saveToken"
+          />
+          <UiButton variant="primary" :disabled="tokenSaving" @click="saveToken">
+            {{ tokenSaving ? "Pairing…" : "Pair" }}
+          </UiButton>
+        </div>
+        <div v-else class="flex gap-2">
+          <UiButton @click="overlays.openAuth('manual')">Sign in</UiButton>
+          <UiButton @click="signOut">Sign out</UiButton>
+        </div>
+        <StateMessage v-if="tokenError" kind="error" class="mt-3">{{ tokenError }}</StateMessage>
+      </div>
     </SettingsSection>
 
     <SettingsSection title="Audio output">

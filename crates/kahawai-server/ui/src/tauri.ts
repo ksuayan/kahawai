@@ -22,6 +22,7 @@ import type {
   ServerStatus,
   SetupInput,
   SetupState,
+  TailscaleInfo,
 } from "./types";
 
 async function cmd<T>(name: string, args?: Record<string, unknown>): Promise<T | undefined> {
@@ -61,6 +62,26 @@ export async function setupValidateDir(path: string): Promise<DirValidation | un
 /** Throws the backend's error string on failure — the wizard shows it inline. */
 export async function setupSaveConfig(input: SetupInput): Promise<void> {
   await invoke("setup_save_config", { input });
+}
+
+/** Tailscale presence (`None` outside Tauri / when not detected). Phase 2. */
+export async function setupTailscaleStatus(): Promise<TailscaleInfo | null> {
+  return (await cmd<TailscaleInfo>("setup_tailscale_status")) ?? null;
+}
+
+/** Whether any user accounts exist. Phase 3. */
+export async function setupUsersExist(): Promise<boolean> {
+  return (await cmd<boolean>("setup_users_exist")) ?? false;
+}
+
+/** The pairing token (`null` when retired or unavailable). Spec §1.3. */
+export async function setupGetPairingToken(): Promise<string | null> {
+  return (await cmd<string>("setup_get_pairing_token")) ?? null;
+}
+
+/** Mint a fresh pairing token (pairing mode only). Spec §1.3. */
+export async function setupRegenerateToken(): Promise<string> {
+  return invoke<string>("setup_regenerate_token");
 }
 
 export async function setupStartServer(): Promise<ServerStatus> {

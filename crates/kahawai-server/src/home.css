@@ -76,3 +76,23 @@ code { font-family: var(--mono); font-size: 12px; }
   .rows li { grid-template-columns: minmax(0, 1fr) auto; }
   .link { grid-column: 1 / -1; grid-row: 2; }
 }
+.security { margin: 24px 0; padding: 16px; border: 1px solid var(--border); border-radius: 6px; }
+.security h2 { margin: 0 0 8px; }
+.security h3 { margin: 16px 0 8px; }
+.security .warn {
+  padding: 10px 12px; border-radius: 4px;
+  background: color-mix(in srgb, var(--warn, #b45309) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn, #b45309) 40%, transparent);
+}
+.security .token code { font-size: 15px; letter-spacing: 0.5px; }
+.security form label { display: block; margin: 8px 0; }
+.security form input {
+  display: block; width: 100%; max-width: 360px; height: 32px; padding: 0 10px;
+  font: inherit; color: var(--text-1); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px; margin-top: 4px;
+}
+.security form button {
+  height: 32px; padding: 0 14px; font: 600 13px var(--sans); color: #fff;
+  background: var(--accent); border: 0; border-radius: 4px; cursor: pointer; margin-top: 4px;
+}
+.security #setup-result { margin-left: 12px; color: var(--text-2); }

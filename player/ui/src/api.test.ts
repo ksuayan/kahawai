@@ -3,18 +3,25 @@ import {
   ApiError,
   artworkSrc,
   checkHealth,
+  connectionHint,
   fetchAlbumDetail,
   fetchAllAlbums,
   fetchArtistDetail,
   fetchArtists,
+  login,
   onCatalogUpdated,
+  onUnauthorized,
   searchTracks,
+  setAuthToken,
   setBaseUrl,
 } from "./api";
 import { makeAlbum, makeTrack, mockFetch } from "./test/fixtures";
 import { latestEventSource } from "./test/eventsource-mock";
 
-beforeEach(() => setBaseUrl("http://server:8080"));
+beforeEach(() => {
+  setAuthToken(null);
+  setBaseUrl("http://server:8080");
+});
 
 describe("base URL", () => {
   it("trims whitespace and trailing slashes, and falls back to localhost", () => {
@@ -155,5 +162,68 @@ describe("errors and health", () => {
       throw new Error("network down");
     };
     expect(await checkHealth()).toBe(false);
+  });
+});
+
+describe("auth (P0 §1.3 + Phase 3)", () => {
+  it("sends the bearer on JSON requests when a token is set", async () => {
+    setAuthToken("tok123");
+    const calls = mockFetch({ "/api/albums": { items: [] } });
+    await fetchAllAlbums();
+    const auth = (calls[0].init?.headers as Record<string, string>)["Authorization"];
+    expect(auth).toBe("Bearer tok123");
+  });
+
+  it("appends ?access_token= to artwork and SSE URLs when a token is set", () => {
+    setAuthToken("tok123");
+    expect(artworkSrc("abc")).toBe("http://server:8080/api/artwork/abc?access_token=tok123");
+    setBaseUrl("http://server:8080"); // reconnects SSE
+    expect(latestEventSource()?.url).toBe("http://server:8080/api/events?access_token=tok123");
+  });
+
+  it("leaves URLs bare when logged out", () => {
+    expect(artworkSrc("abc")).toBe("http://server:8080/api/artwork/abc");
+    expect(latestEventSource()?.url).toBe("http://server:8080/api/events");
+  });
+
+  it("fires onUnauthorized on a 401 from a non-auth endpoint", async () => {
+    setAuthToken("dead");
+    let calls = 0;
+    const stop = onUnauthorized(() => calls++);
+    mockFetch({
+      "/api/albums": () => new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }),
+    });
+    await expect(fetchAllAlbums()).rejects.toThrow(ApiError);
+    expect(calls).toBe(1);
+    stop();
+  });
+
+  it("does not fire onUnauthorized for the login endpoint itself", async () => {
+    let calls = 0;
+    const stop = onUnauthorized(() => calls++);
+    mockFetch({
+      "/api/login": () => new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }),
+    });
+    await expect(login("u", "wrong")).rejects.toThrow(ApiError);
+    expect(calls).toBe(0);
+    stop();
+  });
+
+  it("login returns the session token", async () => {
+    mockFetch({ "/api/login": { token: "sess-abc" } });
+    await expect(login("kyo", "correct")).resolves.toBe("sess-abc");
+  });
+});
+
+describe("connectionHint (Phase 2 §2.4)", () => {
+  it("names Tailscale for MagicDNS hosts on network failure", () => {
+    const hint = connectionHint("http://kahawai-mac.tail12345.ts.net:8080", new TypeError("failed"));
+    expect(hint).toContain("Tailscale");
+  });
+
+  it("is generic for plain hosts, and null for non-network errors", () => {
+    const hint = connectionHint("http://192.168.1.5:8080", new TypeError("failed"));
+    expect(hint).toContain("Nothing answers");
+    expect(connectionHint("http://192.168.1.5:8080", new Error("nope"))).toBeNull();
   });
 });

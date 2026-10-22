@@ -52,11 +52,25 @@ Open **Kahawai Server**. A short setup guides you:
    files it found.
 2. **Database:** choose where the server keeps its library database (a few hundred MB for
    a large library). Your own Mac's drive is best.
-3. **Review:** check your choices. Leave the **Bind address** as `0.0.0.0:8080` unless you
-   know you need something else.
+3. **Review:** check your choices. Under **advanced options**, choose who may reach the
+   server:
+   - **This Mac only** (default): the server listens on `127.0.0.1` — nothing else on the
+     network can reach it.
+   - **Local network:** the server listens on `0.0.0.0` — every device on your network
+     can reach it. Only do this on a network you fully trust (your home LAN, not a coffee
+     shop or office guest Wi-Fi).
+   - **Tailscale only:** the server listens on your tailnet IP — reachable from your
+     Tailscale devices only. Needs Tailscale running; see
+     [Remote access over Tailscale](Tailscale-Remote-Access.md).
 4. Start the server. The first scan begins right away; the **Status** tab shows its
    progress, and a large library can take a while (the tags come first, so albums appear
    early).
+
+**Pairing:** the first time the server starts it generates a random pairing token,
+shown once in the server log and in the server app's **Status → Pairing** section.
+Enter it in the Player's **Settings → Server** to pair. You can regenerate it there
+(the old token stops working immediately). The token is stored in the macOS Keychain,
+never in a config file.
 
 macOS may ask:
 
@@ -80,6 +94,16 @@ Open **Kahawai Player**, then **Settings** (the gear at the bottom left) → **S
   `http://Studio-Mac.local:8080`.
 
 Click **Save**. The status line should say **Server reachable · Kahawai Server …**.
+
+Then pair: enter the server's pairing token (shown once in the server app under
+**Status → Pairing**) in the **Server sign-in** section and click **Pair**. The token is
+kept in the macOS Keychain. If the server has user accounts, sign in with your username
+and password instead — the Player prompts automatically.
+
+**Remote access:** to reach the server away from home, put both devices on the same
+Tailscale tailnet, set the server to **Tailscale only**, and use its MagicDNS name as
+the server address, e.g. `http://kahawai-mac.tail12345.ts.net:8080`. Details in
+[Tailscale-Remote-Access.md](Tailscale-Remote-Access.md).
 
 On macOS 15, the Player asks to **find devices on your local network**: click **Allow**, or
 it can't reach a server on another Mac.
