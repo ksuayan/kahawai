@@ -28,3 +28,6 @@ pub const BLOCKER_ANALOG: &str = "Analog";
 pub const BLOCKER_LIMITER: &str = "Limiter";
 pub const BLOCKER_VOLUME: &str = "Volume";
 pub const BLOCKER_SPEED: &str = "Playback speed";
+pub const BLOCKER_DECLICK: &str = "De-click";
+pub const BLOCKER_DEHISS: &str = "De-hiss";
+pub const BLOCKER_TAPE: &str = "Tape";

@@ -1,6 +1,9 @@
 //! The PCM DSP chain, one stage per file. (Spec: kahawai-player-design.md §5.)
 //!
 //! - [`crossfeed`]: headphone crossfeed (bs2b).
+//! - [`declick`]: vinyl click detection and interpolation repair.
+//! - [`dehiss`]: multiband downward expansion for steady hiss.
+//! - [`tape`]: memoryless tape coloration (saturation, head EQ, transport).
 //! - [`eq`]: the parametric EQ, built on the [`biquad`] filters.
 //! - [`analog`]: analog character: tube and solid-state warmth.
 //! - [`loudness`]: loudness metering, normalization and the track pre-scan.
@@ -18,10 +21,13 @@
 pub mod analog;
 mod biquad;
 pub mod crossfeed;
+pub mod declick;
+pub mod dehiss;
 mod eq;
 mod gain_ramp;
 mod limiter;
 mod loudness;
+pub mod tape;
 #[cfg(test)]
 mod test_util;
 

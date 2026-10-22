@@ -36,6 +36,9 @@ pub use dsp::analog::{
     AnalogSettings, AnalogStage, AnalogStatus, AntiAlias, AntiAliasChoice, TubeTable,
 };
 pub use dsp::crossfeed::{CrossfeedPreset, CrossfeedSettings, CrossfeedStage};
+pub use dsp::declick::{DeclickSettings, DeclickStage};
+pub use dsp::dehiss::{DehissSettings, DehissStage};
+pub use dsp::tape::{TapeSettings, TapeStage};
 pub use dsp::{
     headroom_guard, integrated_lufs, max_boost_db, plan_gain_db, scan_track_levels,
     scan_track_lufs, usable_freq, validate_bands, DspStage, EqBand, EqBandType, GainRamp,

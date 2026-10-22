@@ -10,6 +10,9 @@ import {
   setEqEnabled,
   setEqPreamp,
   setCrossfeed,
+  setDeclick,
+  setDehiss,
+  setTape,
   setLimiterEnabled,
   setLoudnessEnabled,
   setLoudnessTarget,
@@ -18,9 +21,15 @@ import { BUILTIN_PRESETS, sameBands, type EqPreset } from "../eqPresets";
 import {
   clampCrossfeed,
   DEFAULT_CROSSFEED_SETTINGS,
+  DEFAULT_DECLICK_SETTINGS,
+  DEFAULT_DEHISS_SETTINGS,
   DEFAULT_DSP_SETTINGS,
+  DEFAULT_TAPE_SETTINGS,
   EQ_PREAMP_RANGE_DB,
   type CrossfeedSettings,
+  type DeclickSettings,
+  type DehissSettings,
+  type TapeSettings,
   MAX_EQ_BANDS,
   type DopStatus,
   type EqBand,
@@ -75,6 +84,15 @@ export const useDspStore = defineStore("dsp", () => {
   const limiterEnabled = ref(false);
   /** Headphone crossfeed; off by default, like the other stages. */
   const crossfeed = ref<CrossfeedSettings>({ ...DEFAULT_CROSSFEED_SETTINGS });
+  /** Click repair; off by default, like the other stages. */
+  const declick = ref<DeclickSettings>({ ...DEFAULT_DECLICK_SETTINGS });
+  /** Hiss reduction; off by default, like the other stages. */
+  const dehiss = ref<DehissSettings>({
+    ...DEFAULT_DEHISS_SETTINGS,
+    trim_db: [...DEFAULT_DEHISS_SETTINGS.trim_db],
+  });
+  /** Tape color; off by default, like the other stages. */
+  const tape = ref<TapeSettings>({ ...DEFAULT_TAPE_SETTINGS });
   const loudnessTarget = ref(-14);
   const devices = ref<OutputDevice[]>([]);
   /** Chosen output device (exact name); null = follow the system default. */
@@ -124,6 +142,13 @@ export const useDspStore = defineStore("dsp", () => {
     loudnessEnabled.value = dsp.loudness_enabled;
     limiterEnabled.value = dsp.limiter_enabled ?? false;
     crossfeed.value = clampCrossfeed(dsp.crossfeed ?? DEFAULT_CROSSFEED_SETTINGS);
+    declick.value = { ...DEFAULT_DECLICK_SETTINGS, ...(dsp.declick ?? {}) };
+    dehiss.value = {
+      ...DEFAULT_DEHISS_SETTINGS,
+      ...(dsp.dehiss ?? {}),
+      trim_db: [...((dsp.dehiss?.trim_db ?? DEFAULT_DEHISS_SETTINGS.trim_db) as [number, number, number, number])],
+    };
+    tape.value = { ...DEFAULT_TAPE_SETTINGS, ...(dsp.tape ?? {}) };
     loudnessTarget.value = dsp.loudness_target;
     devices.value = devs ?? [];
     dop.value = d ?? null;
@@ -317,6 +342,21 @@ export const useDspStore = defineStore("dsp", () => {
     await setCrossfeed(crossfeed.value);
   }
 
+  async function saveDeclick(next: DeclickSettings): Promise<void> {
+    declick.value = { ...next };
+    await setDeclick(declick.value);
+  }
+
+  async function saveDehiss(next: DehissSettings): Promise<void> {
+    dehiss.value = { ...next, trim_db: [...next.trim_db] };
+    await setDehiss(dehiss.value);
+  }
+
+  async function saveTape(next: TapeSettings): Promise<void> {
+    tape.value = { ...next };
+    await setTape(tape.value);
+  }
+
   /** Returns false when the target is out of the −40…−1 LUFS range. */
   async function saveLoudnessTarget(v: number): Promise<boolean> {
     if (!isFinite(v) || v < -40 || v > -1) return false;
@@ -332,6 +372,9 @@ export const useDspStore = defineStore("dsp", () => {
     loudnessEnabled,
     limiterEnabled,
     crossfeed,
+    declick,
+    dehiss,
+    tape,
     loudnessTarget,
     devices,
     outputDevice,
@@ -364,6 +407,9 @@ export const useDspStore = defineStore("dsp", () => {
     saveLoudnessEnabled,
     saveLimiterEnabled,
     saveCrossfeed,
+    saveDeclick,
+    saveDehiss,
+    saveTape,
     saveLoudnessTarget,
   };
 });

@@ -11,6 +11,9 @@ export interface PathPlayer {
 /** What the tag needs to know about the user's processing (the dsp store satisfies this). */
 export interface PathDsp {
   crossfeed?: { enabled: boolean; preset: CrossfeedPreset };
+  declick?: { enabled: boolean };
+  dehiss?: { enabled: boolean };
+  tape?: { enabled: boolean };
   eqEnabled: boolean;
   activeBands: unknown[];
   loudnessEnabled: boolean;
@@ -34,10 +37,13 @@ export function audioPathLabel(t: Track | null, player: PathPlayer, dsp: PathDsp
       : "PCM shared";
   const dspBits: string[] = [];
   if (!player.isExclusive) {
-    // Chain order: crossfeed runs before the EQ.
+    // Chain order: de-click -> de-hiss -> crossfeed -> EQ -> analog -> tape.
+    if (dsp.declick?.enabled) dspBits.push("De-click");
+    if (dsp.dehiss?.enabled) dspBits.push("De-hiss");
     if (dsp.crossfeed?.enabled) dspBits.push(`Crossfeed ${CROSSFEED_PRESET_INFO[dsp.crossfeed.preset].label}`);
     if (dsp.eqEnabled && dsp.activeBands.length > 0) dspBits.push(`EQ ${dsp.activeBands.length} bands`);
     if (dsp.loudnessEnabled) dspBits.push(`Loudness ${dsp.loudnessTarget} LUFS`);
+    if (dsp.tape?.enabled) dspBits.push("Tape (Stage 1)");
   }
   return `${src} → ${stream} → ${out}${dspBits.length ? ` · ${dspBits.join(" · ")}` : ""}`;
 }
