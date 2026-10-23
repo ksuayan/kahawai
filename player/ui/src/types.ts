@@ -653,6 +653,43 @@ export function clampCrossfeed(s: CrossfeedSettings): CrossfeedSettings {
   };
 }
 
+export const DEFAULT_DECLICK_SETTINGS: DeclickSettings = {
+  enabled: false,
+  sensitivity: 0.5,
+  max_width_ms: 2.0,
+  dry_wet: 1.0,
+};
+
+export const DEFAULT_DEHISS_SETTINGS: DehissSettings = {
+  enabled: false,
+  threshold_db: -50.0,
+  trim_db: [0.0, 0.0, 3.0, 6.0],
+  amount_db: 12.0,
+  attack_ms: 1.0,
+  release_ms: 100.0,
+  dry_wet: 1.0,
+};
+
+export const DEFAULT_TAPE_SETTINGS: TapeSettings = {
+  enabled: false,
+  drive_db: 0.0,
+  output_trim_db: 0.0,
+  saturation: 0.35,
+  bias: 0.5,
+  ips: "Ips15",
+  eq_standard: "nab",
+  head_bump: 0.5,
+  wow_rate_hz: 0.6,
+  wow_depth_pct: 0.15,
+  flutter_rate_hz: 6.0,
+  flutter_depth_pct: 0.05,
+  drift: 0.2,
+  hiss_db: -78.0,
+  asperity: 0.3,
+  quality: "standard",
+  dry_wet: 1.0,
+};
+
 export const DEFAULT_DSP_SETTINGS: DspSettings = {
   eq_bands: [],
   eq_enabled: true,
@@ -679,13 +716,6 @@ export interface DeclickSettings {
   dry_wet: number;
 }
 
-export const DEFAULT_DECLICK_SETTINGS: DeclickSettings = {
-  enabled: false,
-  sensitivity: 0.5,
-  max_width_ms: 2.0,
-  dry_wet: 1.0,
-};
-
 /** Ranges, as the engine clamps them. */
 export const DECLICK_SENSITIVITY_RANGE = [0, 1] as const;
 export const DECLICK_MAX_WIDTH_RANGE = [0.5, 5] as const;
@@ -705,16 +735,6 @@ export interface DehissSettings {
   /** 0 = dry, 1 = fully processed. */
   dry_wet: number;
 }
-
-export const DEFAULT_DEHISS_SETTINGS: DehissSettings = {
-  enabled: false,
-  threshold_db: -50.0,
-  trim_db: [0.0, 0.0, 3.0, 6.0],
-  amount_db: 12.0,
-  attack_ms: 1.0,
-  release_ms: 100.0,
-  dry_wet: 1.0,
-};
 
 /** Ranges, as the engine clamps them. */
 export const DEHISS_THRESHOLD_RANGE = [-80, -20] as const;
@@ -756,26 +776,6 @@ export interface TapeSettings {
   /** 0 = dry, 1 = fully tape. */
   dry_wet: number;
 }
-
-export const DEFAULT_TAPE_SETTINGS: TapeSettings = {
-  enabled: false,
-  drive_db: 0.0,
-  output_trim_db: 0.0,
-  saturation: 0.35,
-  bias: 0.5,
-  ips: "Ips15",
-  eq_standard: "nab",
-  head_bump: 0.5,
-  wow_rate_hz: 0.6,
-  wow_depth_pct: 0.15,
-  flutter_rate_hz: 6.0,
-  flutter_depth_pct: 0.05,
-  drift: 0.2,
-  hiss_db: -78.0,
-  asperity: 0.3,
-  quality: "standard",
-  dry_wet: 1.0,
-};
 
 /** Ranges, as the engine clamps them. */
 export const TAPE_DRIVE_RANGE = [-12, 12] as const;
